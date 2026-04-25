@@ -52,6 +52,7 @@ from parsecore.quality import (  # noqa: E402
     PageQuality,
     StructuralQualityReport,
     evaluate_blocks,
+    evaluate_chunk_embeddings,
     evaluate_layout_signals,
 )
 
@@ -95,6 +96,10 @@ def _layout_signals_to_dict(layout_signals: Any) -> dict[str, Any]:
     return dataclasses.asdict(layout_signals)
 
 
+def _embedding_quality_to_dict(embedding_quality: Any) -> dict[str, Any]:
+    return dataclasses.asdict(embedding_quality)
+
+
 def _apply_runtime_overrides(runtime: Any, args: argparse.Namespace) -> None:
     strip_mode = args.strip_headers_footers
     if strip_mode == "default":
@@ -121,6 +126,7 @@ def _run_one(runtime, *, fixture: Path, top_pages: int) -> dict[str, Any]:
     elapsed_s = round(time.monotonic() - started, 3)
     quality = evaluate_blocks(outcome.blocks)
     layout_signals = evaluate_layout_signals(outcome.blocks)
+    embedding_quality = evaluate_chunk_embeddings(outcome.chunks)
 
     table_blocks = sum(1 for b in outcome.blocks if getattr(b.type, "value", b.type) == "table")
     paragraph_blocks = sum(
@@ -139,6 +145,7 @@ def _run_one(runtime, *, fixture: Path, top_pages: int) -> dict[str, Any]:
         },
         "quality": _report_to_dict(quality, top_pages=top_pages),
         "layout_signals": _layout_signals_to_dict(layout_signals),
+        "embedding_quality": _embedding_quality_to_dict(embedding_quality),
     }
 
 
@@ -180,6 +187,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
             f" multi_col={layout['multi_column_pages']}"
             f" stripped_pages={layout['header_footer_stripped_pages']}"
             f" ocr_pages={layout.get('ocr_fallback_pages', 0)}"
+            f" embedded_ratio={fixture['embedding_quality']['embedded_chunk_ratio']:.4f}"
             f" elapsed={fixture['elapsed_s']}s"
         )
     print(f"[save] wrote {out}")
@@ -196,6 +204,8 @@ def _check_drift(
     failures: list[str] = []
     bq = baseline["quality"]
     cq = candidate["quality"]
+    be = baseline.get("embedding_quality") or {}
+    ce = candidate.get("embedding_quality") or {}
 
     # Absolute deltas.
     for key, budget_attr in (
@@ -232,6 +242,15 @@ def _check_drift(
             f"{name}: total_blocks drifted by {delta_pct:+.2%}"
             f" (budget ±{args.max_block_count_delta_pct:.2%})"
         )
+
+    embedded_ratio_drop = float(be.get("embedded_chunk_ratio", 0.0)) - float(
+        ce.get("embedded_chunk_ratio", 0.0)
+    )
+    if embedded_ratio_drop > args.max_embedded_chunk_ratio_drop:
+        failures.append(
+            f"{name}: embedded_chunk_ratio dropped by {embedded_ratio_drop:.4f}"
+            f" (budget +{args.max_embedded_chunk_ratio_drop:.4f})"
+        )
     return failures
 
 
@@ -265,6 +284,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         bq = base["quality"]
         candidate_layout = candidate.get("layout_signals", {})
         baseline_layout = base.get("layout_signals", {})
+        candidate_embedding = candidate.get("embedding_quality", {})
+        baseline_embedding = base.get("embedding_quality", {})
         print(
             f"[check] {fixture.name}"
             f" blocks={candidate['block_counts']['total']} (baseline {base['block_counts']['total']})"
@@ -278,6 +299,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
             f" (baseline {baseline_layout.get('header_footer_stripped_pages', 0)})"
             f" ocr_pages={candidate_layout.get('ocr_fallback_pages', 0)}"
             f" (baseline {baseline_layout.get('ocr_fallback_pages', 0)})"
+            f" embedded_ratio={candidate_embedding.get('embedded_chunk_ratio', 0.0):.4f}"
+            f" (baseline {baseline_embedding.get('embedded_chunk_ratio', 0.0):.4f})"
         )
         failures.extend(
             _check_drift(name=fixture.name, baseline=base, candidate=candidate, args=args)
@@ -328,6 +351,7 @@ def _cmd_check_suite(args: argparse.Namespace) -> int:
             max_page_count_delta=args.max_page_count_delta,
             max_numeric_heavy_delta=args.max_numeric_heavy_delta,
             max_header_footer_delta=args.max_header_footer_delta,
+            max_embedded_chunk_ratio_drop=args.max_embedded_chunk_ratio_drop,
         )
         if _cmd_check(check_args) != 0:
             failures.append(label)
@@ -352,6 +376,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("default", "on", "off"),
         default="default",
         help="Override pdf-text strip_headers_footers for this run only",
+    )
+    parser.add_argument(
+        "--max-embedded-chunk-ratio-drop",
+        type=float,
+        default=0.05,
+        help="Maximum allowed drop in embedded chunk ratio vs baseline",
     )
 
     sub = parser.add_subparsers(dest="cmd", required=True)

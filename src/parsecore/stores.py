@@ -115,8 +115,8 @@ class SQLiteJobStore(JobStore):
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
             conn.executemany(
                 """
-                INSERT INTO chunks (doc_id, position, chunk_id, block_ids_json, text, language, embedding_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chunks (doc_id, position, chunk_id, block_ids_json, text, language, semantic_role, embedding_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -126,6 +126,7 @@ class SQLiteJobStore(JobStore):
                         json.dumps(chunk.block_ids, ensure_ascii=False),
                         chunk.text,
                         chunk.language,
+                        chunk.semantic_role,
                         json.dumps(chunk.embedding, ensure_ascii=False) if chunk.embedding is not None else None,
                     )
                     for position, chunk in enumerate(chunks)
@@ -248,7 +249,7 @@ class SQLiteJobStore(JobStore):
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT chunk_id, doc_id, block_ids_json, text, language, embedding_json
+                SELECT chunk_id, doc_id, block_ids_json, text, language, semantic_role, embedding_json
                 FROM chunks
                 WHERE doc_id = ?
                 ORDER BY position ASC
@@ -262,7 +263,8 @@ class SQLiteJobStore(JobStore):
                 block_ids=tuple(json.loads(row[2])),
                 text=row[3],
                 language=row[4],
-                embedding=tuple(json.loads(row[5])) if row[5] is not None else None,
+                semantic_role=row[5] or "paragraph",
+                embedding=tuple(json.loads(row[6])) if row[6] is not None else None,
             )
             for row in rows
         )
@@ -305,6 +307,7 @@ class SQLiteJobStore(JobStore):
                     block_ids_json TEXT NOT NULL,
                     text TEXT NOT NULL,
                     language TEXT NOT NULL,
+                    semantic_role TEXT NOT NULL DEFAULT 'paragraph',
                     embedding_json TEXT
                 );
 
@@ -319,6 +322,11 @@ class SQLiteJobStore(JobStore):
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
             if "dead_lettered_at" not in existing:
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN dead_lettered_at TEXT")
+            chunk_columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            if "semantic_role" not in chunk_columns:
+                conn.execute(
+                    "ALTER TABLE chunks ADD COLUMN semantic_role TEXT NOT NULL DEFAULT 'paragraph'"
+                )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -437,11 +445,15 @@ class PostgresJobStore(JobStore):
                     block_ids_json TEXT NOT NULL,
                     text TEXT NOT NULL,
                     language TEXT NOT NULL,
+                    semantic_role TEXT NOT NULL DEFAULT 'paragraph',
                     embedding_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
                     ON chunks (doc_id, position ASC);
                 """
+            )
+            cur.execute(
+                "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS semantic_role TEXT NOT NULL DEFAULT 'paragraph'"
             )
 
     # -- write paths ------------------------------------------------------
@@ -534,6 +546,7 @@ class PostgresJobStore(JobStore):
                 json.dumps(chunk.block_ids, ensure_ascii=False),
                 chunk.text,
                 chunk.language,
+                chunk.semantic_role,
                 json.dumps(chunk.embedding, ensure_ascii=False)
                 if chunk.embedding is not None
                 else None,
@@ -545,8 +558,8 @@ class PostgresJobStore(JobStore):
             if rows:
                 cur.executemany(
                     """
-                    INSERT INTO chunks (chunk_id, doc_id, position, block_ids_json, text, language, embedding_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO chunks (chunk_id, doc_id, position, block_ids_json, text, language, semantic_role, embedding_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -674,7 +687,7 @@ class PostgresJobStore(JobStore):
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT chunk_id, doc_id, block_ids_json, text, language, embedding_json
+                SELECT chunk_id, doc_id, block_ids_json, text, language, semantic_role, embedding_json
                 FROM chunks
                 WHERE doc_id = %s
                 ORDER BY position ASC
@@ -689,7 +702,8 @@ class PostgresJobStore(JobStore):
                 block_ids=tuple(json.loads(row[2])),
                 text=row[3],
                 language=row[4],
-                embedding=tuple(json.loads(row[5])) if row[5] is not None else None,
+                semantic_role=row[5] or "paragraph",
+                embedding=tuple(json.loads(row[6])) if row[6] is not None else None,
             )
             for row in rows
         )

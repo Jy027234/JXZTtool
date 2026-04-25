@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import load_settings
+from .embeddings import EmbeddingConfigurationError, build_embedding_provider
 from .jobcard import JobcardProductAdapter
 from .llm import LlmBoundaryRefiner, LlmConfigurationError, build_llm_client
 from .parsers import build_parser
 from .runtime import ParseRuntime
 from .stores import PgVectorIndex, PostgresJobStore, SQLiteJobStore
-from .stubs import EchoTranslator, EmbeddedProductAdapter, InMemoryJobStore, NullIndex, ParagraphChunkBuilder
+from .stubs import EchoTranslator, EmbeddedProductAdapter, InMemoryJobStore, NullEmbeddingProvider, NullIndex, ParagraphChunkBuilder
 
 
 def _build_job_store(database_url: str):
@@ -67,10 +68,18 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
         product_adapter = JobcardProductAdapter()
     else:
         product_adapter = EmbeddedProductAdapter()
+    try:
+        embedding_provider = (
+            build_embedding_provider(settings.providers.embedding)
+            or NullEmbeddingProvider()
+        )
+    except EmbeddingConfigurationError:
+        embedding_provider = NullEmbeddingProvider()
     return ParseRuntime(
         settings=settings,
         parsers=parsers,
         chunk_builder=ParagraphChunkBuilder(),
+        embedding_provider=embedding_provider,
         index=index,
         translator=EchoTranslator(),
         product_adapter=product_adapter,

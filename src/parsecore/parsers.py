@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from .contracts import ParserAdapter
-from .models import Block, BlockType, ParseRequest
+from .models import Block, BlockType, ParseRequest, SemanticRole
 from .stubs import StubParser
 
 
@@ -36,7 +36,11 @@ class DocxParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=document_path.stem,
-                metadata={"page": 1, "parser": self.name},
+                metadata={
+                    "page": 1,
+                    "parser": self.name,
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
             )
         ]
         position = 1
@@ -51,7 +55,12 @@ class DocxParser(ParserAdapter):
                     doc_id=request.doc_id,
                     type=BlockType.PARAGRAPH,
                     content=content,
-                    metadata={"page": 1, "parser": self.name, "position": position},
+                    metadata={
+                        "page": 1,
+                        "parser": self.name,
+                        "position": position,
+                        "semantic_role": SemanticRole.PARAGRAPH.value,
+                    },
                 )
             )
             position += 1
@@ -79,7 +88,11 @@ class TextParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=Path(request.file_path).stem,
-                metadata={"page": 1, "parser": self.name},
+                metadata={
+                    "page": 1,
+                    "parser": self.name,
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
             )
         ]
         for position, paragraph in enumerate(paragraphs, start=1):
@@ -89,7 +102,12 @@ class TextParser(ParserAdapter):
                     doc_id=request.doc_id,
                     type=BlockType.PARAGRAPH,
                     content=paragraph,
-                    metadata={"page": 1, "parser": self.name, "position": position},
+                    metadata={
+                        "page": 1,
+                        "parser": self.name,
+                        "position": position,
+                        "semantic_role": SemanticRole.PARAGRAPH.value,
+                    },
                 )
             )
         return tuple(blocks)
@@ -281,7 +299,11 @@ class PdfTextParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=Path(request.file_path).stem,
-                metadata={"page": 1, "parser": self.name},
+                metadata={
+                    "page": 1,
+                    "parser": self.name,
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
             )
         ]
         position = 1
@@ -304,6 +326,7 @@ class PdfTextParser(ParserAdapter):
                                 "parser": self.name,
                                 "position": position,
                                 "kind": "table",
+                                "semantic_role": SemanticRole.TABLE.value,
                                 "rows": table.row_count,
                                 "cols": table.col_count,
                                 "bbox": table.bbox,
@@ -349,12 +372,17 @@ class PdfTextParser(ParserAdapter):
                 )
             if not paragraphs:
                 continue
+            is_highlights_page = _is_highlights_page(paragraphs)
             for page_position, paragraph in enumerate(paragraphs, start=1):
                 metadata: dict[str, Any] = {
                     "page": page_number,
                     "parser": self.name,
                     "position": position,
                     "page_position": page_position,
+                    "semantic_role": _infer_semantic_role(
+                        paragraph,
+                        is_highlights_page=is_highlights_page,
+                    ),
                 }
                 if page_layout is not None:
                     metadata["page_width"] = page_layout.width
@@ -395,6 +423,9 @@ def _split_pdf_page_text(text: str) -> list[str]:
     if current_lines:
         paragraphs.append("\n".join(current_lines))
     return paragraphs
+
+
+_LEP_ENTRY_PATTERN = re.compile(r"(?:LIST OF EFFECTIVE PAGES|\bPage\s+[A-Z0-9.\-/]+)", re.IGNORECASE)
 
 
 _HEADING_LINE_PATTERN = re.compile(
@@ -490,6 +521,38 @@ def _split_toc_entries(
                 segments.append(tail)
         result.extend(segments if segments else [paragraph])
     return result
+
+
+def _is_highlights_page(paragraphs: Sequence[str]) -> bool:
+    collapsed = [" ".join((paragraph or "").split()) for paragraph in paragraphs]
+    return any("HIGHLIGHTS" in item.upper() for item in collapsed) and any(
+        _HIGHLIGHTS_HEADER_PATTERN.search(item) for item in collapsed
+    )
+
+
+def _infer_semantic_role(
+    paragraph: str,
+    *,
+    is_highlights_page: bool = False,
+) -> str:
+    stripped = paragraph.strip()
+    if not stripped:
+        return SemanticRole.PARAGRAPH.value
+    upper = stripped.upper()
+    if re.match(r"^(?:NOTE|注意)\s*[:：]", stripped, re.IGNORECASE):
+        return SemanticRole.NOTE.value
+    if re.match(r"^(?:WARNING|警告)\s*[:：]", stripped, re.IGNORECASE):
+        return SemanticRole.WARNING.value
+    if re.match(r"^(?:CAUTION|小心)\s*[:：]", stripped, re.IGNORECASE):
+        return SemanticRole.CAUTION.value
+    if _TOC_ENTRY_TERMINATOR.search(stripped):
+        return SemanticRole.TOC_ENTRY.value
+    if "LIST OF EFFECTIVE PAGES" in upper or _LEP_ENTRY_PATTERN.search(stripped):
+        return SemanticRole.LEP_ENTRY.value
+    if is_highlights_page and not _HIGHLIGHTS_HEADER_PATTERN.search(stripped):
+        if _HIGHLIGHTS_CHANGE_START_PATTERN.match(stripped) or _HIGHLIGHTS_PAGE_REF_PATTERN.search(stripped):
+            return SemanticRole.HIGHLIGHTS_ENTRY.value
+    return SemanticRole.PARAGRAPH.value
 
 
 def _split_structural_items(
@@ -887,7 +950,11 @@ class ImageOcrParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=document_path.stem,
-                metadata={"page": 1, "parser": self.name},
+                metadata={
+                    "page": 1,
+                    "parser": self.name,
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
             )
         ]
 
@@ -934,6 +1001,7 @@ class ImageOcrParser(ParserAdapter):
                         "bbox": bbox,
                         "confidence": confidence_value,
                         "ocr_engine": "rapidocr_onnxruntime",
+                        "semantic_role": SemanticRole.PARAGRAPH.value,
                     },
                 )
             )

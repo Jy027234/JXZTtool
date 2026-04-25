@@ -20,6 +20,11 @@ class ChunkBuilder(Protocol):
 
 
 @runtime_checkable
+class EmbeddingProvider(Protocol):
+    def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]: ...
+
+
+@runtime_checkable
 class IndexAdapter(Protocol):
     def upsert(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None: ...
 

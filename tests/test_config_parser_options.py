@@ -31,6 +31,14 @@ strategy = "lazy"
 [product]
 adapter = "embedded"
 
+[providers.embedding]
+enabled = true
+provider = "openai-compatible"
+model = "text-embedding-3-small"
+base_url = "https://example.invalid/v1"
+api_key_env = "PARSECORE_EMBEDDING_API_KEY"
+batch_size = 8
+
 [[parsers]]
 name = "pdf-text"
 media_types = ["application/pdf"]
@@ -60,6 +68,9 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
 
         docx = parsers["docx-native"]
         self.assertEqual(dict(docx.options), {})
+        self.assertTrue(settings.providers.embedding.enabled)
+        self.assertEqual(settings.providers.embedding.batch_size, 8)
+        self.assertEqual(settings.providers.embedding.model, "text-embedding-3-small")
 
 
 if __name__ == "__main__":

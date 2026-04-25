@@ -47,8 +47,22 @@ class LlmProviderSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class EmbeddingProviderSettings:
+    enabled: bool
+    provider: str
+    model: str
+    base_url: str
+    api_key_env: str
+    timeout_seconds: float
+    max_retries: int
+    batch_size: int
+    options: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_MAPPING)
+
+
+@dataclass(slots=True, frozen=True)
 class ProviderSettings:
     llm: LlmProviderSettings
+    embedding: EmbeddingProviderSettings
 
 
 @dataclass(slots=True, frozen=True)
@@ -96,6 +110,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
     runtime = data.get("runtime", {})
     providers_raw = data.get("providers", {}) or {}
     llm_raw = providers_raw.get("llm", {}) or {}
+    embedding_raw = providers_raw.get("embedding", {}) or {}
     parser_settings = tuple(
         ParserSettings(
             name=str(item["name"]),
@@ -115,6 +130,19 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         max_retries=int(llm_raw.get("max_retries", 2)),
         options=_freeze_mapping(llm_raw.get("options")),
     )
+    embedding_settings = EmbeddingProviderSettings(
+        enabled=bool(embedding_raw.get("enabled", False)),
+        provider=str(embedding_raw.get("provider", "")),
+        model=str(embedding_raw.get("model", "")),
+        base_url=str(embedding_raw.get("base_url", "")),
+        api_key_env=str(
+            embedding_raw.get("api_key_env", "PARSECORE_EMBEDDING_API_KEY")
+        ),
+        timeout_seconds=float(embedding_raw.get("timeout_seconds", 30.0)),
+        max_retries=int(embedding_raw.get("max_retries", 2)),
+        batch_size=int(embedding_raw.get("batch_size", 16)),
+        options=_freeze_mapping(embedding_raw.get("options")),
+    )
 
     return ParseCoreSettings(
         project_name=str(project.get("name", "parsecore")),
@@ -133,5 +161,5 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
         ),
         parsers=parser_settings,
-        providers=ProviderSettings(llm=llm_settings),
+        providers=ProviderSettings(llm=llm_settings, embedding=embedding_settings),
     )

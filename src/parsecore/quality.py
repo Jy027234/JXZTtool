@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from math import sqrt
 from typing import Iterable, Sequence
 
-from .models import Block
+from .models import Block, Chunk
 
 
 _HEADER_FOOTER_MAX_LEN = 80
@@ -47,6 +48,14 @@ class LayoutSignalsReport:
     header_footer_stripped_blocks: int
     ocr_fallback_pages: int
     ocr_fallback_blocks: int
+
+
+@dataclass(slots=True)
+class EmbeddingQualityReport:
+    total_chunks: int
+    embedded_chunks: int
+    embedded_chunk_ratio: float
+    mean_embedding_dim_norm: float
 
 
 @dataclass(slots=True)
@@ -205,6 +214,30 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
     )
 
 
+def evaluate_chunk_embeddings(chunks: Iterable[Chunk]) -> EmbeddingQualityReport:
+    chunks_list = list(chunks)
+    total_chunks = len(chunks_list)
+    embedded_norms: list[float] = []
+
+    for chunk in chunks_list:
+        if not chunk.embedding:
+            continue
+        vector = [float(value) for value in chunk.embedding]
+        embedded_norms.append(sqrt(sum(value * value for value in vector)))
+
+    embedded_chunks = len(embedded_norms)
+    embedded_chunk_ratio = (embedded_chunks / total_chunks) if total_chunks else 0.0
+    mean_embedding_dim_norm = (
+        float(statistics.mean(embedded_norms)) if embedded_norms else 0.0
+    )
+    return EmbeddingQualityReport(
+        total_chunks=total_chunks,
+        embedded_chunks=embedded_chunks,
+        embedded_chunk_ratio=embedded_chunk_ratio,
+        mean_embedding_dim_norm=mean_embedding_dim_norm,
+    )
+
+
 def diff_reports(
     baseline: StructuralQualityReport,
     candidate: StructuralQualityReport,
@@ -229,10 +262,12 @@ def diff_reports(
 
 
 __all__ = [
+    "EmbeddingQualityReport",
     "LayoutSignalsReport",
     "PageQuality",
     "StructuralQualityReport",
     "evaluate_blocks",
+    "evaluate_chunk_embeddings",
     "evaluate_layout_signals",
     "diff_reports",
 ]

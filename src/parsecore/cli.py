@@ -22,6 +22,11 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--doc-id", required=True)
     submit.add_argument("--file-path", required=True)
     submit.add_argument("--media-type")
+    submit.add_argument(
+        "--mode",
+        choices=("default", "rerun_chunks_only"),
+        default="default",
+    )
 
     serve = sub.add_parser("serve", help="Run the ASGI API server")
     serve.add_argument("--config", default="parsecore.toml")
@@ -59,7 +64,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"processed": processed}, ensure_ascii=False, indent=2))
         return 0
 
-    request = ParseRequest(doc_id=args.doc_id, file_path=args.file_path, media_type=args.media_type)
+    options: dict[str, str] = {}
+    if getattr(args, "mode", "default") != "default":
+        options["mode"] = args.mode
+    request = ParseRequest(
+        doc_id=args.doc_id,
+        file_path=args.file_path,
+        media_type=args.media_type,
+        options=options,
+    )
     outcome = runtime.submit(request)
     payload = {
         "job": asdict(outcome.job),

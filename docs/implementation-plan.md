@@ -43,6 +43,13 @@
 - [x] jobcard compare 层 LEP 巨块切分（`LIST OF EFFECTIVE PAGES` 页按“日期后跟 Title Case 标题”边界细分 legacy mega-block）
 - [x] PDF HIGHLIGHTS 变更日志条目合并（仅在 `HIGHLIGHTS` + `CHAPTER/Section/Page Description of Change` 页触发 `_merge_highlights_entries`）
 - [x] jobcard compare 层 legacy mega-block 专项切分（tools/torque table body、vendor code list、equipment table inline body）
+- [x] Block metadata `semantic_role` 收口（title/paragraph/table + toc/highlights/note/warning/caution/LEP）
+- [x] Chunk 透传 `semantic_role` 并持久化到 SQLite/Postgres
+- [x] 可选 embedding provider（OpenAI-compatible）接入 `STRUCTURING -> EMBEDDING -> index` 状态机
+- [x] embedding 失败降级为 `embedding_skipped` 事件，不中断主解析作业
+- [x] 结构重算模式 `options.mode = "rerun_chunks_only"`（复用已存 blocks 重算 chunk/embedding/index）
+- [x] embedding 覆盖率质量指标与 regression baseline 接线（`embedded_chunk_ratio` / `mean_embedding_dim_norm`）
+- [x] README 能力边界声明（明确 ParseCore 不承载 RAG/合规比对/宿主业务规则）
 
 ### 未完成
 
@@ -119,6 +126,10 @@
 
 目标：为多产品复用做准备，但不提前过度建设。
 
-- 抽象多产品配置
-- 加入租户与配额字段
-- 补评测集、基准集和质量报表
+- [x] 抽象多产品配置中的 provider 层（LLM / embedding 分离配置）
+- [ ] 加入租户与配额字段
+- [x] 补评测集、基准集和质量报表
+- [x] 增加 chunk-only 重算入口，避免为 embedding/索引重建另起管线
+- [x] ASGI 显式派生重算路由：`rechunk` / `re-embed`（不再依赖隐式 `options.mode`）
+- [x] 混合检索入口：`search` API 默认“向量优先 + 关键词回退”，并支持 `semantic_role` 过滤与角色权重排序
+- [x] embedding live smoke 工具：`tools/_embedding_smoke.py`，有 key 时执行真实 provider，无 key 时显式 skip

@@ -26,6 +26,19 @@ class BlockType(str, Enum):
     IMAGE = "image"
 
 
+class SemanticRole(str, Enum):
+    TITLE = "title"
+    PARAGRAPH = "paragraph"
+    TABLE = "table"
+    IMAGE = "image"
+    TOC_ENTRY = "toc_entry"
+    LEP_ENTRY = "lep_entry"
+    HIGHLIGHTS_ENTRY = "highlights_entry"
+    NOTE = "note"
+    WARNING = "warning"
+    CAUTION = "caution"
+
+
 @dataclass(slots=True, frozen=True)
 class ParseRequest:
     doc_id: str
@@ -65,6 +78,7 @@ class Chunk:
     block_ids: tuple[str, ...]
     text: str
     language: str = "und"
+    semantic_role: str = SemanticRole.PARAGRAPH.value
     embedding: tuple[float, ...] | None = None
 
 
@@ -73,3 +87,13 @@ class ParseOutcome:
     job: ParseJob
     blocks: tuple[Block, ...]
     chunks: tuple[Chunk, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ChunkSearchHit:
+    chunk_id: str
+    doc_id: str
+    block_ids: tuple[str, ...]
+    text: str
+    semantic_role: str
+    score: float

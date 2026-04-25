@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from dataclasses import replace
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
-from .contracts import ChunkBuilder, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
-from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest
+from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
+from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
 
 
 def _utc_now() -> str:
@@ -33,7 +34,12 @@ class StubParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=file_name,
-                metadata={"parser": self.name, "page": 1, "kind": "stub-title"},
+                metadata={
+                    "parser": self.name,
+                    "page": 1,
+                    "kind": "stub-title",
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
             ),
             Block(
                 block_id=f"blk-{uuid4().hex[:12]}",
@@ -43,7 +49,12 @@ class StubParser(ParserAdapter):
                     "This is a placeholder parse result. Replace StubParser with a real parser "
                     "before connecting production documents."
                 ),
-                metadata={"parser": self.name, "page": 1, "kind": "stub-body"},
+                metadata={
+                    "parser": self.name,
+                    "page": 1,
+                    "kind": "stub-body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
             ),
         )
 
@@ -52,15 +63,45 @@ class ParagraphChunkBuilder(ChunkBuilder):
     def build(self, *, doc_id: str, blocks: Sequence[Block]) -> Sequence[Chunk]:
         chunks: list[Chunk] = []
         for block in blocks:
+            semantic_role = str(
+                block.metadata.get("semantic_role")
+                or _default_semantic_role_for_block(block)
+            )
             chunks.append(
                 Chunk(
                     chunk_id=f"chk-{uuid4().hex[:12]}",
                     doc_id=doc_id,
                     block_ids=(block.block_id,),
                     text=block.content,
+                    semantic_role=semantic_role,
                 )
             )
         return tuple(chunks)
+
+
+def _default_semantic_role_for_block(block: Block) -> str:
+    return {
+        BlockType.TITLE: SemanticRole.TITLE.value,
+        BlockType.TABLE: SemanticRole.TABLE.value,
+        BlockType.IMAGE: SemanticRole.IMAGE.value,
+    }.get(block.type, SemanticRole.PARAGRAPH.value)
+
+
+class NullEmbeddingProvider(EmbeddingProvider):
+    def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]:
+        return tuple(chunks)
+
+
+class FakeEmbeddingProvider(EmbeddingProvider):
+    """Deterministic test helper that stamps a tiny embedding per chunk."""
+
+    def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]:
+        embedded: list[Chunk] = []
+        for index, chunk in enumerate(chunks, start=1):
+            embedded.append(
+                replace(chunk, embedding=(float(index), float(len(chunk.text))))
+            )
+        return tuple(embedded)
 
 
 class NullIndex(IndexAdapter):

@@ -36,6 +36,20 @@ class BackgroundParseRunner:
         future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
         return job
 
+    def rechunk_latest(self, *, doc_id: str) -> ParseJob:
+        job = self.runtime.rechunk_latest(doc_id=doc_id)
+        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
+        self.inflight[job.job_id] = future
+        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        return job
+
+    def reembed_latest(self, *, doc_id: str) -> ParseJob:
+        job = self.runtime.reembed_latest(doc_id=doc_id)
+        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
+        self.inflight[job.job_id] = future
+        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        return job
+
     def shutdown(self) -> None:
         self.executor.shutdown(wait=True)
 
@@ -49,6 +63,12 @@ class QueueSubmissionRunner:
 
     def restart_latest(self, *, doc_id: str) -> ParseJob:
         return self.runtime.restart_latest(doc_id=doc_id)
+
+    def rechunk_latest(self, *, doc_id: str) -> ParseJob:
+        return self.runtime.rechunk_latest(doc_id=doc_id)
+
+    def reembed_latest(self, *, doc_id: str) -> ParseJob:
+        return self.runtime.reembed_latest(doc_id=doc_id)
 
     def shutdown(self) -> None:
         return None
@@ -105,9 +125,55 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
             return JSONResponse({"error": "document_not_found"}, status_code=404)
         return JSONResponse(_to_payload(snapshot))
 
+    async def search_document(request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        doc_id = request.path_params["doc_id"]
+        snapshot = runtime_obj.get_document(doc_id=doc_id)
+        if snapshot["job"] is None:
+            return JSONResponse({"error": "document_not_found"}, status_code=404)
+        query = str(request.query_params.get("q") or "").strip()
+        if not query:
+            return JSONResponse({"error": "query_required"}, status_code=400)
+        limit_raw = request.query_params.get("limit", "10")
+        try:
+            limit = max(1, int(limit_raw))
+        except ValueError:
+            return JSONResponse({"error": "invalid_limit"}, status_code=400)
+        roles = request.query_params.getlist("role")
+        hits, retrieval_mode = runtime_obj.search_document_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=limit,
+            semantic_roles=roles,
+        )
+        return JSONResponse(
+            {
+                "doc_id": doc_id,
+                "query": query,
+                "limit": limit,
+                "roles": roles,
+                "retrieval_mode": retrieval_mode,
+                "items": _to_payload(hits),
+            }
+        )
+
     async def reparse_document(request: Request) -> JSONResponse:
         try:
             job = request.app.state.runner.restart_latest(doc_id=request.path_params["doc_id"])
+        except LookupError:
+            return JSONResponse({"error": "document_not_found"}, status_code=404)
+        return JSONResponse(_to_payload(job), status_code=202)
+
+    async def rechunk_document(request: Request) -> JSONResponse:
+        try:
+            job = request.app.state.runner.rechunk_latest(doc_id=request.path_params["doc_id"])
+        except LookupError:
+            return JSONResponse({"error": "document_not_found"}, status_code=404)
+        return JSONResponse(_to_payload(job), status_code=202)
+
+    async def reembed_document(request: Request) -> JSONResponse:
+        try:
+            job = request.app.state.runner.reembed_latest(doc_id=request.path_params["doc_id"])
         except LookupError:
             return JSONResponse({"error": "document_not_found"}, status_code=404)
         return JSONResponse(_to_payload(job), status_code=202)
@@ -122,7 +188,10 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
             Route("/v1/parse/jobs", list_jobs, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}", get_document, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/search", search_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/reparse", reparse_document, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/rechunk", rechunk_document, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/re-embed", reembed_document, methods=["POST"]),
         ],
     )
 
