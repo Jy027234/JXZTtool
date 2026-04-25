@@ -1,0 +1,76 @@
+[project]
+name = "parsecore-starter"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 500
+max_attempts = 3
+log_path = "var/logs/job_events.jsonl"
+
+[storage]
+database_url = "sqlite:///./var/parsecore.db"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+# Optional: LLM provider for semantic block-boundary refinement (A4).
+# Embedded-SDK mode: when ParseCore is hosted by another application, the host
+# should override these via its own config and inject the API key through the
+# referenced env var instead of writing it here.
+[providers.llm]
+enabled = false
+provider = "qwen-dashscope"
+model = "qwen3.6-35b-a3b"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "PARSECORE_LLM_API_KEY"
+timeout_seconds = 30.0
+max_retries = 2
+# options.temperature = 0.0
+# options.top_p = 0.1
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+# 可选后处理配置（默认值如下；调整需谨慎，建议先用
+# tools/min_length_scan.py 跑一次灵敏度扫描后再改 short_block_min_length）
+# 注意：A3+.1 起，strip_headers_footers 默认 false（保留完整页面内容）。
+# 需要去掉跨页重复页眉页脚时显式开启：
+#   options.post_process = { strip_headers_footers = true }
+# options.post_process = { strip_headers_footers = false, merge_short_blocks = true, short_block_min_length = 10, hf_threshold = 0.5, hf_head_n = 3, hf_tail_n = 3, hf_min_line_len = 4, split_structural_items = true, structural_min_lines_trigger = 10, split_inline_structural_items = true, inline_structural_min_length_trigger = 120, split_toc_entries = true, toc_min_entries_trigger = 3, merge_table_continuations = true, merge_highlights_entries = true }
+# A3 双通道：开启后用 pdfplumber 抽取表格 + 去表格区域文本，pypdf 仍走原管线
+[parsers.options.post_process]
+dual_channel = true
+dual_table_min_rows = 2
+dual_table_min_cols = 2
+ocr_bad_pages = true
+ocr_bad_page_min_cid_tokens = 5
+ocr_bad_page_min_cid_char_ratio = 0.25
+ocr_render_resolution = 110
+ocr_confidence_threshold = 0.5
+ocr_merge_line_gap_ratio = 1.6
+
+[[parsers]]
+name = "image-ocr"
+media_types = ["image/png", "image/jpeg"]
+extensions = [".png", ".jpg", ".jpeg"]
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt", ".md"]

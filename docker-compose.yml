@@ -1,0 +1,40 @@
+name: parsecore-starter
+
+services:
+  parsecore-api:
+    build:
+      context: .
+    command:
+      [
+        "python",
+        "-m",
+        "parsecore.cli",
+        "serve",
+        "--config",
+        "parsecore.queue.toml",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8090",
+      ]
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./var:/app/var
+      - ./parsecore.queue.toml:/app/parsecore.queue.toml:ro
+
+  parsecore-worker:
+    build:
+      context: .
+    command:
+      [
+        "python",
+        "-m",
+        "parsecore.cli",
+        "worker",
+        "--config",
+        "parsecore.queue.toml",
+      ]
+    volumes:
+      - ./var:/app/var
+      - ./parsecore.queue.toml:/app/parsecore.queue.toml:ro

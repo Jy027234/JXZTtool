@@ -1,0 +1,16 @@
+
+[api]
+fastapi<1,>=0.116
+uvicorn<1,>=0.35
+
+[parsers]
+pymupdf<2,>=1.25
+python-docx<2,>=1.1
+pytesseract<1,>=0.3
+
+[storage]
+psycopg[binary]<4,>=3.2
+pgvector<1,>=0.3
+
+[worker]
+celery<6,>=5.5

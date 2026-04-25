@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200">
+  <rect width="900" height="1200" fill="#f5f1e8"/>
+  <rect x="70" y="50" width="760" height="1100" rx="10" fill="#fffdf8" stroke="#2b2b2b" stroke-width="3"/>
+  <rect x="120" y="100" width="660" height="60" fill="#d8e3dc"/>
+  <text x="450" y="138" text-anchor="middle" font-family="Georgia, serif" font-size="28" fill="#172121">Full-width title or section header</text>
+  <line x1="450" y1="200" x2="450" y2="1030" stroke="#b8b8b8" stroke-width="6" stroke-dasharray="18 16"/>
+  <text x="450" y="230" text-anchor="middle" font-family="Georgia, serif" font-size="24" fill="#8a5a44">gutter</text>
+
+  <rect x="120" y="210" width="270" height="820" fill="#eef6ff" stroke="#6b8fb3" stroke-width="2"/>
+  <rect x="510" y="210" width="270" height="820" fill="#fff2e8" stroke="#c4845c" stroke-width="2"/>
+
+  <text x="255" y="255" text-anchor="middle" font-family="Georgia, serif" font-size="24" fill="#224c73">Column A</text>
+  <text x="645" y="255" text-anchor="middle" font-family="Georgia, serif" font-size="24" fill="#8a4a24">Column B</text>
+
+  <g font-family="Courier New, monospace" font-size="18" fill="#22333b">
+    <text x="145" y="305">A1  First paragraph line continues</text>
+    <text x="145" y="338">A2  down this column only.</text>
+    <text x="145" y="402">A3  Another paragraph stays on</text>
+    <text x="145" y="435">A4  the left side until finished.</text>
+    <text x="145" y="499">A5  Bullet or numbered steps may</text>
+    <text x="145" y="532">A6  also stay inside one column.</text>
+    <text x="145" y="596">A7  Good sample pages have a clear</text>
+    <text x="145" y="629">A8  empty gutter in the middle.</text>
+    <text x="145" y="693">A9  Lines do not span nearly full</text>
+    <text x="145" y="726">A10 page width.</text>
+    <text x="145" y="790">A11 Reading order should be left</text>
+    <text x="145" y="823">A12 column first, then right.</text>
+  </g>
+
+  <g font-family="Courier New, monospace" font-size="18" fill="#3d2c23">
+    <text x="535" y="305">B1  Right column begins only after</text>
+    <text x="535" y="338">B2  the left column is complete.</text>
+    <text x="535" y="402">B3  This is the pattern we want</text>
+    <text x="535" y="435">B4  to collect for A3+.2 tuning.</text>
+    <text x="535" y="499">B5  Avoid tables, scans with CID</text>
+    <text x="535" y="532">B6  garbling, or full-width text.</text>
+    <text x="535" y="596">B7  Best candidates are manuals,</text>
+    <text x="535" y="629">B8  magazines, newsletters, SOPs.</text>
+    <text x="535" y="693">B9  If both columns contain normal</text>
+    <text x="535" y="726">B10 words, the sample is useful.</text>
+    <text x="535" y="790">B11 A few pages are enough as long</text>
+    <text x="535" y="823">B12 as layout is stable.</text>
+  </g>
+
+  <rect x="120" y="1060" width="660" height="55" fill="#ececec"/>
+  <text x="450" y="1095" text-anchor="middle" font-family="Georgia, serif" font-size="22" fill="#444">Footer or page number area</text>
+</svg>

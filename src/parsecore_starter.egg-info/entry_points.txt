@@ -1,0 +1,2 @@
+[console_scripts]
+parsecore = parsecore.cli:main

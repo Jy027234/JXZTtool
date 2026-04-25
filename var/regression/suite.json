@@ -1,0 +1,29 @@
+{
+  "entries": [
+    {
+      "name": "primary-default",
+      "baseline": "baseline.json"
+    },
+    {
+      "name": "primary-strip-hf",
+      "baseline": "baseline.strip_hf.json"
+    },
+    {
+      "name": "sample-25-51-06",
+      "baseline": "baseline.25-51-06.json"
+    },
+    {
+      "name": "sample-27-81-17",
+      "baseline": "baseline.27-81-17.json",
+      "tags": ["slow"]
+    },
+    {
+      "name": "sample-flight-ops-manual-r2",
+      "baseline": "baseline.flight-ops-manual-r2.json"
+    },
+    {
+      "name": "sample-cmm-32-48-21-ocr",
+      "baseline": "baseline.cmm-32-48-21.json"
+    }
+  ]
+}

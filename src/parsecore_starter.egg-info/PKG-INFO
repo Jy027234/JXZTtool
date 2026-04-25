@@ -1,0 +1,104 @@
+Metadata-Version: 2.4
+Name: parsecore-starter
+Version: 0.1.0
+Summary: Embedded-first parse management starter kit
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Provides-Extra: api
+Requires-Dist: fastapi<1,>=0.116; extra == "api"
+Requires-Dist: uvicorn<1,>=0.35; extra == "api"
+Provides-Extra: worker
+Requires-Dist: celery<6,>=5.5; extra == "worker"
+Provides-Extra: storage
+Requires-Dist: psycopg[binary]<4,>=3.2; extra == "storage"
+Requires-Dist: pgvector<1,>=0.3; extra == "storage"
+Provides-Extra: parsers
+Requires-Dist: pymupdf<2,>=1.25; extra == "parsers"
+Requires-Dist: python-docx<2,>=1.1; extra == "parsers"
+Requires-Dist: pytesseract<1,>=0.3; extra == "parsers"
+
+# ParseCore Starter Kit
+
+基于现有《解析设计》沉淀出的首版可嵌入解析管理骨架。
+
+目标不是先做大而全的平台，而是先交付一个可植入其他产品的解析能力内核，满足以下约束：
+
+- 嵌入优先，未来可外拔为独立服务
+- 解析异步优先，RAG 保留同步和异步两种调用模式
+- 以 Block / Chunk 为统一结构，不直接围绕全文字符串建模
+- LLM 仅用于增强环节，不承担全文主解析
+
+## 当前交付范围
+
+当前仓库提供的是 Starter Kit，而不是完整业务实现：
+
+- 项目目录骨架
+- 核心数据模型与协议接口
+- 可运行的最小 Runtime
+- 配置模板
+- 面向 jobcard 的接入建议文档
+- 基础单元测试
+
+## 建议演进路径
+
+1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
+2. 再把真实解析器、任务队列、数据库和向量检索逐步替换进来。
+3. 用双跑方式接入 jobcard，先保持接口兼容，再替换解析实现。
+
+## 目录结构
+
+```text
+.
+├─ docs/
+│  ├─ architecture.md
+│  ├─ implementation-plan.md
+│  └─ jobcard-integration.md
+├─ src/
+│  └─ parsecore/
+│     ├─ __init__.py
+│     ├─ bootstrap.py
+│     ├─ cli.py
+│     ├─ config.py
+│     ├─ contracts.py
+│     ├─ models.py
+│     ├─ runtime.py
+│     └─ stubs.py
+├─ tests/
+│  └─ test_runtime.py
+├─ app.py
+├─ parsecore.toml
+└─ pyproject.toml
+```
+
+## 快速开始
+
+安装为开发模式：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e .
+```
+
+查看当前骨架描述：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+```
+
+模拟提交一个解析任务：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli submit --config parsecore.toml --doc-id demo-doc --file-path samples/demo.docx --media-type application/vnd.openxmlformats-officedocument.wordprocessingml.document
+```
+
+运行测试：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+## 下一步优先级
+
+1. 把 StubParser 替换为真实 PDF / DOCX / OCR 解析器。
+2. 把 InMemoryJobStore 替换为 Postgres + pgvector 存储。
+3. 把同步 Runtime 外接任务队列，拆出 worker。
+4. 补齐 REST API 和 SDK，作为跨产品接入面。

@@ -1,0 +1,129 @@
+{
+  "config": "D:\\个人文件\\个人开发\\解析管理中台\\parsecore.toml",
+  "generated_at": "2026-04-25T17:37:08+0800",
+  "post_process_overrides": {
+    "strip_headers_footers": "default"
+  },
+  "fixtures": [
+    {
+      "fixture": "D:\\app\\uploads\\27-81-17.pdf",
+      "fixture_name": "27-81-17.pdf",
+      "elapsed_s": 2240.384,
+      "block_counts": {
+        "total": 23464,
+        "paragraph": 23151,
+        "table": 312,
+        "chunks": 23464
+      },
+      "quality": {
+        "total_blocks": 23464,
+        "page_count": 1235,
+        "median_block_length": 30.0,
+        "very_short_ratio": 0.18091544493692466,
+        "suspected_header_footer_total": 1991,
+        "numeric_heavy_total": 1887,
+        "long_block_total": 19,
+        "noisy_pages": [
+          {
+            "page_number": 479,
+            "block_count": 72,
+            "median_length": 6.0,
+            "very_short_ratio": 0.8194444444444444,
+            "suspected_header_footer": 2,
+            "numeric_heavy": 2,
+            "max_length": 83
+          },
+          {
+            "page_number": 792,
+            "block_count": 26,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7692307692307693,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 79
+          },
+          {
+            "page_number": 1050,
+            "block_count": 38,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7631578947368421,
+            "suspected_header_footer": 4,
+            "numeric_heavy": 4,
+            "max_length": 115
+          },
+          {
+            "page_number": 774,
+            "block_count": 32,
+            "median_length": 8.0,
+            "very_short_ratio": 0.75,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 92
+          },
+          {
+            "page_number": 1150,
+            "block_count": 39,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7435897435897436,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 85
+          },
+          {
+            "page_number": 1102,
+            "block_count": 27,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7407407407407407,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 83
+          },
+          {
+            "page_number": 1196,
+            "block_count": 33,
+            "median_length": 8.0,
+            "very_short_ratio": 0.7272727272727273,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 116
+          },
+          {
+            "page_number": 1104,
+            "block_count": 31,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7096774193548387,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 97
+          },
+          {
+            "page_number": 916,
+            "block_count": 24,
+            "median_length": 6.5,
+            "very_short_ratio": 0.7083333333333334,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 116
+          },
+          {
+            "page_number": 1006,
+            "block_count": 24,
+            "median_length": 6.5,
+            "very_short_ratio": 0.7083333333333334,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 116
+          }
+        ]
+      },
+      "layout_signals": {
+        "pages_with_layout_metadata": 1235,
+        "multi_column_pages": 2,
+        "header_footer_stripped_pages": 0,
+        "header_footer_stripped_blocks": 0,
+        "ocr_fallback_pages": 1235,
+        "ocr_fallback_blocks": 23463
+      }
+    }
+  ]
+}
