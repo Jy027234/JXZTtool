@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from .config import EmbeddingProviderSettings
 from .contracts import EmbeddingProvider
 from .models import Chunk
+from .stubs import FakeEmbeddingProvider
 
 
 class EmbeddingConfigurationError(RuntimeError):
@@ -101,6 +102,8 @@ def build_embedding_provider(
     if not settings.enabled:
         return None
     provider = (settings.provider or "").lower()
+    if provider in {"fake", "test", "stub"}:
+        return FakeEmbeddingProvider()
     if provider in {"", "openai-compatible", "openai", "dashscope", "qwen"}:
         return OpenAiCompatibleEmbeddingProvider(settings)
     raise EmbeddingConfigurationError(

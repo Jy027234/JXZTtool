@@ -1,0 +1,63 @@
+[project]
+name = "parsecore-starter"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "queue-worker"
+max_workers = 2
+max_inflight_jobs = 0
+poll_interval_ms = 500
+quota_enforce = false
+quota_window_hours = 24
+quota_default_limit_units = 0
+max_attempts = 3
+log_path = "var/logs/job_events.jsonl"
+
+[storage]
+database_url = "postgresql://parsecore:parsecore@parsecore-postgres:5432/parsecore"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "pgvector"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+
+[parsers.options.post_process]
+dual_channel = true
+dual_table_min_rows = 2
+dual_table_min_cols = 2
+ocr_bad_pages = true
+ocr_bad_page_min_cid_tokens = 5
+ocr_bad_page_min_cid_char_ratio = 0.25
+ocr_render_resolution = 110
+ocr_confidence_threshold = 0.5
+ocr_merge_line_gap_ratio = 1.6
+
+[[parsers]]
+name = "image-ocr"
+media_types = ["image/png", "image/jpeg"]
+extensions = [".png", ".jpg", ".jpeg"]
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt", ".md"]

@@ -4,6 +4,8 @@
 
 jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合先接入 ParseCore 作为后端模块，再逐步拆成 sidecar 或独立服务。
 
+完整的宿主替换步骤见 [jobcard-replacement-checklist.md](jobcard-replacement-checklist.md)，历史双跑资料见 [../../jobcard-dual-run/README.md](../../jobcard-dual-run/README.md)，OCR 接线检查见 [../../../docs/ocr-integration-checklist.md](../../../docs/ocr-integration-checklist.md)，OCR HTTP 契约见 [../../../docs/ocr-gateway-contract.md](../../../docs/ocr-gateway-contract.md)。
+
 ## 推荐路径
 
 ### Step 1: 后端内嵌
@@ -14,11 +16,11 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 - 文档路由继续保留现有接口，对内改为调用 ParseCore 任务提交和状态查询
 - 暂时使用同一数据库，减少迁移成本
 
-### Step 2: 双跑验证
+### Step 2: 兼容性验证（历史双跑已归档）
 
-- 选一批技术文档作为样本
-- 旧流程和 ParseCore 新流程同时输出
-- 比较 Block 数量、Chunk 数量、核心字段和检索命中结果
+- 先跑 ParseCore 自检门禁，确认解析、落库和检索链路稳定
+- 再选少量宿主真实样本做兼容性复验
+- 历史双跑记录与辅助脚本仅在需要回看宿主差异时使用
 
 ### Step 3: worker 外拆
 
@@ -57,6 +59,8 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 
 当前实际进度：
 
+- 历史双跑记录、runbook 和辅助脚本已统一归档到 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md)。
+
 - 已在 jobcard 主应用内挂载 ParseCore 子应用。
 - 已把普通文档库和管理文库的旧后台解析入口切到 ParseCore。
 - 已保留旧后台解析逻辑作为 ParseCore bridge 不可用时的回退路径。
@@ -89,10 +93,12 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 
 ## 下一步重点
 
-1. 把缺失的种子样本补到 jobcard `UPLOAD_DIR` 对应目录后，运行 `python parsecore_compare.py --collection documents --output data/parsecore_dual_run_report_documents` 复跑 documents 报告。
-2. 扩大真实 PDF / DOCX 样本面；对于尚未入库的文件，可直接运行 `python parsecore_compare.py --file <绝对路径> --name <样本名> --output data/parsecore_dual_run_report_direct_file` 做双跑，持续记录 plainText、Block、Chunk 差异，形成可回归的数据集。
-3. 基于当前已落地的字段级、页面级、Block/Chunk、索引命中、第一版 Block 对位、展示口径摘要和展示口径 Block 对位摘要，继续扩大真实样本面；若后续需要更强定位能力，再把当前页内动态规划匹配升级为更丰富的块匹配策略，并在合适时机把正式索引链路纳入对比，而不再只看全文相似度。
+1. 把 ParseCore 自检门禁固定为 `unittest`、`tools/regression_baseline.py check-suite`、`GET /health` 和最小解析 smoke。
+2. 宿主侧只保留少量真实样本的灰度复验，不再默认继续扩大双跑样本池。
+3. 若宿主出现兼容性问题，再回到 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md) 中的记录和脚本复现旧场景。
 4. 在此基础上继续收敛 PDF 生产级策略，并评估部署时是继续走 inline，还是切换到 `queue-worker` 模式。
+
+如果要回看当前仓库已经完成的 jobcard 历史联调路径，优先按 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md) 进入；当前 OCR provider 的独立验收则继续按 [ocr-integration-checklist.md](ocr-integration-checklist.md) 补齐。
 
 ## 最小集成示例
 

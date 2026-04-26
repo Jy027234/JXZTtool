@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import tempfile
+import threading
 import unittest
 from types import MappingProxyType
 from pathlib import Path
@@ -164,6 +166,92 @@ class OcrProviderTests(unittest.TestCase):
 
         payload = json.loads(raw_body.decode("utf-8"))
         self.assertEqual(payload["options"], {"det_use_dilation": True})
+
+    def test_remote_http_provider_matches_gateway_contract_over_real_http(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _GatewayHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - stdlib handler name
+                raw_length = self.headers.get("Content-Length", "0")
+                content_length = int(raw_length)
+                body = self.rfile.read(content_length)
+                captured["path"] = self.path
+                captured["headers"] = {key: value for key, value in self.headers.items()}
+                captured["body"] = json.loads(body.decode("utf-8"))
+
+                response = json.dumps(
+                    {
+                        "data": {
+                            "items": [
+                                {
+                                    "polygon": [[0, 0], [10, 0], [10, 8], [0, 8]],
+                                    "text": "Gateway text",
+                                    "score": 0.93,
+                                }
+                            ]
+                        },
+                        "elapsed_seconds": 0.21,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib signature
+                return None
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            with patch.dict(os.environ, {"PARSECORE_OCR_API_KEY": "test-key"}, clear=True):
+                settings = OcrProviderSettings(
+                    enabled=True,
+                    provider="remote-http",
+                    base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                    api_key_env="PARSECORE_OCR_API_KEY",
+                    timeout_seconds=5.0,
+                    max_retries=0,
+                    options={
+                        "endpoint_path": "/ocr/v1",
+                        "headers": {"X-OCR-Tenant": "tenant-a"},
+                        "det_use_dilation": True,
+                    },
+                )
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    image_path = Path(tmp) / "sample.png"
+                    image_path.write_bytes(b"fake-image")
+                    engine = build_ocr_engine(settings)
+                    result, elapsed = engine(str(image_path))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+        self.assertEqual(captured["path"], "/ocr/v1")
+        headers = captured["headers"]
+        assert isinstance(headers, dict)
+        normalized_headers = {str(key).lower(): str(value) for key, value in headers.items()}
+        self.assertEqual(normalized_headers["authorization"], "Bearer test-key")
+        self.assertEqual(normalized_headers["x-ocr-tenant"], "tenant-a")
+        self.assertEqual(normalized_headers["content-type"], "application/json")
+
+        payload = captured["body"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["mime_type"], "image/png")
+        self.assertEqual(payload["file_name"], "sample.png")
+        self.assertEqual(payload["options"], {"det_use_dilation": True})
+        self.assertEqual(base64.b64decode(payload["image_base64"]), b"fake-image")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][1], "Gateway text")
+        self.assertAlmostEqual(result[0][2], 0.93)
+        self.assertAlmostEqual(elapsed, 0.21)
 
 
 if __name__ == "__main__":

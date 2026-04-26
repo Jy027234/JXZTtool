@@ -6,14 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY pyproject.toml README.md parsecore.toml parsecore.queue.toml ./
+COPY pyproject.toml README.md parsecore.toml parsecore.queue.toml parsecore.remote-http.toml.example parsecore.pgvector.toml.example parsecore.pgvector.fake-embedding.toml.example ./
 COPY src ./src
 
-RUN pip install --no-cache-dir -e ".[api,parsers]"
+RUN pip install --no-cache-dir -e ".[api,parsers,storage]"
 
 EXPOSE 8090
 

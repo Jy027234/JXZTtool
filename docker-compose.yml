@@ -1,6 +1,23 @@
 name: parsecore-starter
 
 services:
+  parsecore-postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["pgvector"]
+    environment:
+      POSTGRES_DB: parsecore
+      POSTGRES_USER: parsecore
+      POSTGRES_PASSWORD: parsecore
+    ports:
+      - "5432:5432"
+    volumes:
+      - parsecore-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parsecore -d parsecore"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   parsecore-api:
     build:
       context: .
@@ -11,7 +28,7 @@ services:
         "parsecore.cli",
         "serve",
         "--config",
-        "parsecore.queue.toml",
+        "/app/parsecore.runtime.toml",
         "--host",
         "0.0.0.0",
         "--port",
@@ -21,7 +38,7 @@ services:
       - "8090:8090"
     volumes:
       - ./var:/app/var
-      - ./parsecore.queue.toml:/app/parsecore.queue.toml:ro
+      - ${PARSECORE_RUNTIME_CONFIG:-./parsecore.queue.toml}:/app/parsecore.runtime.toml:ro
 
   parsecore-worker:
     build:
@@ -33,8 +50,11 @@ services:
         "parsecore.cli",
         "worker",
         "--config",
-        "parsecore.queue.toml",
+        "/app/parsecore.runtime.toml",
       ]
     volumes:
       - ./var:/app/var
-      - ./parsecore.queue.toml:/app/parsecore.queue.toml:ro
+      - ${PARSECORE_RUNTIME_CONFIG:-./parsecore.queue.toml}:/app/parsecore.runtime.toml:ro
+
+volumes:
+  parsecore-postgres-data:

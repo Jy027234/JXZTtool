@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from parsecore.config import EmbeddingProviderSettings
-from parsecore.embeddings import OpenAiCompatibleEmbeddingProvider
+from parsecore.embeddings import OpenAiCompatibleEmbeddingProvider, build_embedding_provider
 from parsecore.models import Chunk
 
 
@@ -94,6 +94,30 @@ class OpenAiCompatibleEmbeddingProviderTests(unittest.TestCase):
         self.assertTrue(captured_body)
         payload = json.loads(captured_body[0].decode("utf-8"))
         self.assertEqual(payload["dimensions"], 256)
+
+    def test_build_embedding_provider_supports_fake_provider(self) -> None:
+        provider = build_embedding_provider(
+            EmbeddingProviderSettings(
+                enabled=True,
+                provider="fake",
+                model="",
+                base_url="",
+                api_key_env="PARSECORE_EMBEDDING_API_KEY",
+                timeout_seconds=5.0,
+                max_retries=0,
+                batch_size=8,
+                options={},
+            )
+        )
+        chunks = [Chunk(chunk_id="c1", doc_id="d", block_ids=("b1",), text="alpha")]
+
+        assert provider is not None
+        embedded = provider.embed(doc_id="d", chunks=chunks)
+
+        assert embedded[0].embedding is not None
+        self.assertEqual(len(embedded[0].embedding), 1536)
+        self.assertEqual(embedded[0].embedding[:2], (1.0, 5.0))
+        self.assertTrue(all(value == 0.0 for value in embedded[0].embedding[2:]))
 
 
 if __name__ == "__main__":

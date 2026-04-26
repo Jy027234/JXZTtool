@@ -52,6 +52,14 @@ class LayoutSignalsReport:
     ocr_fallback_blocks: int
     ocr_failed_pages: int
     ocr_failed_blocks: int
+    layout_elapsed_s: float
+    ocr_engine_init_elapsed_s: float
+    ocr_render_elapsed_s: float
+    ocr_call_elapsed_s: float
+    ocr_provider_elapsed_s: float
+    ocr_postprocess_elapsed_s: float
+    ocr_total_elapsed_s: float
+    max_ocr_page_elapsed_s: float
 
 
 @dataclass(slots=True)
@@ -189,6 +197,16 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
     ocr_fallback_blocks = 0
     ocr_failed_pages: set[int] = set()
     ocr_failed_blocks = 0
+    page_timings: dict[int, dict[str, float]] = {}
+    timing_keys = (
+        "layout_elapsed_s",
+        "ocr_engine_init_elapsed_s",
+        "ocr_render_elapsed_s",
+        "ocr_call_elapsed_s",
+        "ocr_provider_elapsed_s",
+        "ocr_postprocess_elapsed_s",
+        "ocr_total_elapsed_s",
+    )
 
     for block in blocks:
         page_number = _page_number_of(block)
@@ -217,6 +235,28 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
         if metadata.get("ocr_error_reason"):
             ocr_failed_pages.add(page_number)
             ocr_failed_blocks += 1
+        page_timing = page_timings.setdefault(page_number, {})
+        for key in timing_keys:
+            raw_value = metadata.get(key)
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0.0:
+                continue
+            page_timing[key] = max(page_timing.get(key, 0.0), value)
+
+    layout_elapsed_s = sum(item.get("layout_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_engine_init_elapsed_s = sum(item.get("ocr_engine_init_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_render_elapsed_s = sum(item.get("ocr_render_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_call_elapsed_s = sum(item.get("ocr_call_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_provider_elapsed_s = sum(item.get("ocr_provider_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_postprocess_elapsed_s = sum(item.get("ocr_postprocess_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_total_elapsed_s = sum(item.get("ocr_total_elapsed_s", 0.0) for item in page_timings.values())
+    max_ocr_page_elapsed_s = max(
+        (item.get("ocr_total_elapsed_s", 0.0) for item in page_timings.values()),
+        default=0.0,
+    )
 
     return LayoutSignalsReport(
         pages_with_layout_metadata=len(pages_with_layout_metadata),
@@ -229,6 +269,14 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
         ocr_fallback_blocks=ocr_fallback_blocks,
         ocr_failed_pages=len(ocr_failed_pages),
         ocr_failed_blocks=ocr_failed_blocks,
+        layout_elapsed_s=layout_elapsed_s,
+        ocr_engine_init_elapsed_s=ocr_engine_init_elapsed_s,
+        ocr_render_elapsed_s=ocr_render_elapsed_s,
+        ocr_call_elapsed_s=ocr_call_elapsed_s,
+        ocr_provider_elapsed_s=ocr_provider_elapsed_s,
+        ocr_postprocess_elapsed_s=ocr_postprocess_elapsed_s,
+        ocr_total_elapsed_s=ocr_total_elapsed_s,
+        max_ocr_page_elapsed_s=max_ocr_page_elapsed_s,
     )
 
 

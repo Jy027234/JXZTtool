@@ -1,0 +1,66 @@
+{
+  "status": "ok",
+  "generated_at": "2026-04-26T19:14:09+0800",
+  "config": "D:\\个人文件\\个人开发\\解析管理中台\\parsecore.toml",
+  "suite": null,
+  "checks": [
+    {
+      "name": "unit_tests",
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_s": 6.634,
+      "summary": "125 tests passed, skipped=5",
+      "details": {
+        "tests_ran": 125,
+        "reported_elapsed_s": 6.028,
+        "skipped": 5
+      },
+      "tail": [
+        "..................................................................................................sssss......................",
+        "----------------------------------------------------------------------",
+        "Ran 125 tests in 6.028s",
+        "OK (skipped=5)"
+      ]
+    },
+    {
+      "name": "runtime_describe",
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_s": 0.397,
+      "summary": "project=parsecore-starter index_mode=hybrid execution_mode=inline",
+      "details": {
+        "project": "parsecore-starter",
+        "index_mode": "hybrid",
+        "execution_mode": "inline",
+        "parsers": [
+          "docx-native",
+          "pdf-text",
+          "image-ocr",
+          "text-native"
+        ]
+      },
+      "tail": [
+        "    \"poll_interval_ms\": 500,",
+        "    \"max_inflight_jobs\": 0",
+        "  },",
+        "  \"translation\": {",
+        "    \"enabled\": true,",
+        "    \"strategy\": \"lazy\"",
+        "  },",
+        "  \"embedding\": {",
+        "    \"enabled\": false,",
+        "    \"provider\": \"openai-compatible\",",
+        "    \"model\": \"text-embedding-3-small\"",
+        "  },",
+        "  \"product_adapter\": \"embedded\",",
+        "  \"parsers\": [",
+        "    \"docx-native\",",
+        "    \"pdf-text\",",
+        "    \"image-ocr\",",
+        "    \"text-native\"",
+        "  ]",
+        "}"
+      ]
+    }
+  ]
+}

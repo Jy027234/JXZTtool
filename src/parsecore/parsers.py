@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 import xml.etree.ElementTree as ET
@@ -236,7 +237,8 @@ class PdfTextParser(ParserAdapter):
         normalized_suffix = suffix.lower()
         return normalized_type in self._media_types or normalized_suffix in self._extensions
 
-    def _ensure_pdf_ocr_engine(self) -> tuple[Any | None, str | None]:
+    def _ensure_pdf_ocr_engine(self) -> tuple[Any | None, str | None, float]:
+        started = time.monotonic()
         if self._ocr_parser is None:
             self._ocr_parser = ImageOcrParser(
                 media_types=["image/png", "image/jpeg"],
@@ -245,9 +247,9 @@ class PdfTextParser(ParserAdapter):
                 ocr_provider_settings=self._ocr_provider_settings,
             )
         try:
-            return self._ocr_parser._ensure_engine(), None
+            return self._ocr_parser._ensure_engine(), None, round(time.monotonic() - started, 6)
         except Exception as exc:
-            return None, _classify_ocr_error(exc)
+            return None, _classify_ocr_error(exc), round(time.monotonic() - started, 6)
 
     def _maybe_recover_page_with_ocr(
         self,
@@ -255,18 +257,21 @@ class PdfTextParser(ParserAdapter):
         table_bboxes: Sequence[tuple[float, float, float, float]],
         column_count_hint: int,
         extracted_text: str | None,
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, _OcrStageTimings]:
+        timings = _OcrStageTimings()
         reason = _ocr_fallback_reason_for_page(
             extracted_text or "",
             min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
             min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
         )
         if reason is None:
-            return None, None, None
-        engine, engine_error_reason = self._ensure_pdf_ocr_engine()
+            return None, None, None, timings
+        attempt_started = time.monotonic()
+        engine, engine_error_reason, timings.engine_init_elapsed_s = self._ensure_pdf_ocr_engine()
         if engine is None:
-            return None, reason, engine_error_reason or "provider_unavailable"
-        text, ocr_error_reason = _extract_ocr_text_from_page(
+            timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
+            return None, reason, engine_error_reason or "provider_unavailable", timings
+        text, ocr_error_reason, extract_timings = _extract_ocr_text_from_page(
             page,
             engine=engine,
             table_bboxes=table_bboxes,
@@ -275,9 +280,14 @@ class PdfTextParser(ParserAdapter):
             column_count_hint=column_count_hint,
             merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
         )
+        timings.render_elapsed_s = extract_timings.render_elapsed_s
+        timings.call_elapsed_s = extract_timings.call_elapsed_s
+        timings.provider_elapsed_s = extract_timings.provider_elapsed_s
+        timings.postprocess_elapsed_s = extract_timings.postprocess_elapsed_s
+        timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
         if not text:
-            return None, reason, ocr_error_reason or "empty_ocr_text"
-        return text, reason, None
+            return None, reason, ocr_error_reason or "empty_ocr_text", timings
+        return text, reason, None, timings
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
@@ -407,24 +417,12 @@ class PdfTextParser(ParserAdapter):
                                 "rows": table.row_count,
                                 "cols": table.col_count,
                                 "bbox": table.bbox,
-                                "page_width": page_layout.width,
-                                "page_height": page_layout.height,
-                                "column_count_hint": page_layout.column_count_hint,
                                 "cells": table.cells,
                                 "table_index": table_index,
                             },
                         )
                     )
-                    ocr_attempt_reason = getattr(page_layout, "ocr_attempt_reason", None)
-                    if ocr_attempt_reason is not None:
-                        blocks[-1].metadata["ocr_attempted"] = True
-                        blocks[-1].metadata["ocr_attempt_reason"] = ocr_attempt_reason
-                    if page_layout.ocr_fallback_reason is not None:
-                        blocks[-1].metadata["ocr_fallback_used"] = True
-                        blocks[-1].metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
-                    ocr_error_reason = getattr(page_layout, "ocr_error_reason", None)
-                    if ocr_error_reason is not None:
-                        blocks[-1].metadata["ocr_error_reason"] = ocr_error_reason
+                    _attach_page_layout_metadata(blocks[-1].metadata, page_layout)
                     position += 1
             if not paragraphs:
                 continue
@@ -438,20 +436,7 @@ class PdfTextParser(ParserAdapter):
                     "semantic_role": semantic_role,
                 }
                 if page_layout is not None:
-                    metadata["page_width"] = page_layout.width
-                    metadata["page_height"] = page_layout.height
-                    metadata["layout_source"] = "pdfplumber"
-                    metadata["column_count_hint"] = page_layout.column_count_hint
-                    ocr_attempt_reason = getattr(page_layout, "ocr_attempt_reason", None)
-                    if ocr_attempt_reason is not None:
-                        metadata["ocr_attempted"] = True
-                        metadata["ocr_attempt_reason"] = ocr_attempt_reason
-                    if page_layout.ocr_fallback_reason is not None:
-                        metadata["ocr_fallback_used"] = True
-                        metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
-                    ocr_error_reason = getattr(page_layout, "ocr_error_reason", None)
-                    if ocr_error_reason is not None:
-                        metadata["ocr_error_reason"] = ocr_error_reason
+                    _attach_page_layout_metadata(metadata, page_layout)
                 if page_number in stripped_page_numbers:
                     metadata["header_footer_stripped"] = True
                 blocks.append(
@@ -1146,9 +1131,26 @@ class _PageLayout:
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
     column_count_hint: int = 1
+    layout_elapsed_s: float = 0.0
     ocr_attempt_reason: str | None = None
     ocr_fallback_reason: str | None = None
     ocr_error_reason: str | None = None
+    ocr_engine_init_elapsed_s: float = 0.0
+    ocr_render_elapsed_s: float = 0.0
+    ocr_call_elapsed_s: float = 0.0
+    ocr_provider_elapsed_s: float = 0.0
+    ocr_postprocess_elapsed_s: float = 0.0
+    ocr_total_elapsed_s: float = 0.0
+
+
+@dataclass(slots=True)
+class _OcrStageTimings:
+    engine_init_elapsed_s: float = 0.0
+    render_elapsed_s: float = 0.0
+    call_elapsed_s: float = 0.0
+    provider_elapsed_s: float = 0.0
+    postprocess_elapsed_s: float = 0.0
+    total_elapsed_s: float = 0.0
 
 
 @dataclass(slots=True)
@@ -1166,7 +1168,7 @@ def _extract_pdfplumber_layout(
     min_cols: int,
     ocr_page_text_fn: Callable[
         [Any, Sequence[tuple[float, float, float, float]], int, str | None],
-        tuple[str | None, str | None, str | None],
+        tuple[str | None, str | None, str | None, _OcrStageTimings],
     ] | None = None,
 ) -> list[_PageLayout]:
     """Extract per-page layout (tables + table-stripped text) using pdfplumber.
@@ -1184,6 +1186,7 @@ def _extract_pdfplumber_layout(
     layouts: list[_PageLayout] = []
     with pdfplumber.open(file_path) as document:
         for index, page in enumerate(document.pages, start=1):
+            page_started = time.monotonic()
             tables: list[_PdfTable] = []
             try:
                 found = page.find_tables() or []
@@ -1213,6 +1216,7 @@ def _extract_pdfplumber_layout(
             ocr_attempt_reason: str | None = None
             ocr_fallback_reason: str | None = None
             ocr_error_reason: str | None = None
+            ocr_timings = _OcrStageTimings()
             try:
                 if _should_rebuild_multi_column_text(page, column_count_hint=column_count_hint):
                     text_without_tables = _extract_text_by_columns(
@@ -1226,9 +1230,10 @@ def _extract_pdfplumber_layout(
                     text_without_tables = page.extract_text() or ""
             except Exception:
                 text_without_tables = None
+            layout_elapsed_s = round(time.monotonic() - page_started, 6)
 
             if ocr_page_text_fn is not None:
-                recovered_text, ocr_attempt_reason, ocr_error_reason = ocr_page_text_fn(
+                recovered_text, ocr_attempt_reason, ocr_error_reason, ocr_timings = ocr_page_text_fn(
                     page,
                     table_bboxes,
                     column_count_hint,
@@ -1246,12 +1251,47 @@ def _extract_pdfplumber_layout(
                     text_without_tables=text_without_tables,
                     tables=tables,
                     column_count_hint=column_count_hint,
+                    layout_elapsed_s=layout_elapsed_s,
                     ocr_attempt_reason=ocr_attempt_reason,
                     ocr_fallback_reason=ocr_fallback_reason,
                     ocr_error_reason=ocr_error_reason,
+                    ocr_engine_init_elapsed_s=ocr_timings.engine_init_elapsed_s,
+                    ocr_render_elapsed_s=ocr_timings.render_elapsed_s,
+                    ocr_call_elapsed_s=ocr_timings.call_elapsed_s,
+                    ocr_provider_elapsed_s=ocr_timings.provider_elapsed_s,
+                    ocr_postprocess_elapsed_s=ocr_timings.postprocess_elapsed_s,
+                    ocr_total_elapsed_s=ocr_timings.total_elapsed_s,
                 )
             )
     return layouts
+
+
+def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLayout) -> None:
+    metadata["page_width"] = page_layout.width
+    metadata["page_height"] = page_layout.height
+    metadata["layout_source"] = "pdfplumber"
+    metadata["column_count_hint"] = page_layout.column_count_hint
+    metadata["layout_elapsed_s"] = page_layout.layout_elapsed_s
+    if page_layout.ocr_attempt_reason is not None:
+        metadata["ocr_attempted"] = True
+        metadata["ocr_attempt_reason"] = page_layout.ocr_attempt_reason
+    if page_layout.ocr_fallback_reason is not None:
+        metadata["ocr_fallback_used"] = True
+        metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
+    if page_layout.ocr_error_reason is not None:
+        metadata["ocr_error_reason"] = page_layout.ocr_error_reason
+    if page_layout.ocr_engine_init_elapsed_s > 0.0:
+        metadata["ocr_engine_init_elapsed_s"] = page_layout.ocr_engine_init_elapsed_s
+    if page_layout.ocr_render_elapsed_s > 0.0:
+        metadata["ocr_render_elapsed_s"] = page_layout.ocr_render_elapsed_s
+    if page_layout.ocr_call_elapsed_s > 0.0:
+        metadata["ocr_call_elapsed_s"] = page_layout.ocr_call_elapsed_s
+    if page_layout.ocr_provider_elapsed_s > 0.0:
+        metadata["ocr_provider_elapsed_s"] = page_layout.ocr_provider_elapsed_s
+    if page_layout.ocr_postprocess_elapsed_s > 0.0:
+        metadata["ocr_postprocess_elapsed_s"] = page_layout.ocr_postprocess_elapsed_s
+    if page_layout.ocr_total_elapsed_s > 0.0:
+        metadata["ocr_total_elapsed_s"] = page_layout.ocr_total_elapsed_s
 
 
 _CID_TOKEN_PATTERN = re.compile(r"\(cid:\d+\)")
@@ -1284,17 +1324,21 @@ def _extract_ocr_text_from_page(
     confidence_threshold: float,
     column_count_hint: int,
     merge_line_gap_ratio: float,
-) -> str | None:
+) -> tuple[str | None, str | None, _OcrStageTimings]:
+    timings = _OcrStageTimings()
     try:
         import numpy as np  # type: ignore
         from PIL import ImageDraw  # type: ignore
     except ImportError:
-        return None, "ocr_dependencies_missing"
+        return None, "ocr_dependencies_missing", timings
 
+    render_started = time.monotonic()
     try:
         rendered = page.to_image(resolution=resolution).original.convert("RGB")
     except Exception:
-        return None, "ocr_render_failed"
+        timings.render_elapsed_s = round(time.monotonic() - render_started, 6)
+        timings.total_elapsed_s = timings.render_elapsed_s
+        return None, "ocr_render_failed", timings
 
     if table_bboxes:
         draw = ImageDraw.Draw(rendered)
@@ -1310,12 +1354,25 @@ def _extract_ocr_text_from_page(
                 ),
                 fill="white",
             )
+    timings.render_elapsed_s = round(time.monotonic() - render_started, 6)
 
+    call_started = time.monotonic()
     try:
-        result, _elapsed = engine(np.array(rendered))
+        result, provider_elapsed = engine(np.array(rendered))
     except Exception as exc:
-        return None, _classify_ocr_error(exc)
+        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+        timings.total_elapsed_s = round(
+            timings.render_elapsed_s + timings.call_elapsed_s,
+            6,
+        )
+        return None, _classify_ocr_error(exc), timings
+    timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+    try:
+        timings.provider_elapsed_s = float(provider_elapsed)
+    except (TypeError, ValueError):
+        timings.provider_elapsed_s = 0.0
 
+    postprocess_started = time.monotonic()
     lines = _collect_ocr_lines(
         result,
         confidence_threshold=confidence_threshold,
@@ -1323,9 +1380,14 @@ def _extract_ocr_text_from_page(
         page_width=float(rendered.width),
     )
     paragraphs = _group_ocr_lines(lines, merge_line_gap_ratio=merge_line_gap_ratio)
+    timings.postprocess_elapsed_s = round(time.monotonic() - postprocess_started, 6)
+    timings.total_elapsed_s = round(
+        timings.render_elapsed_s + timings.call_elapsed_s + timings.postprocess_elapsed_s,
+        6,
+    )
     if not paragraphs:
-        return None, "empty_ocr_text"
-    return "\n\n".join(paragraphs), None
+        return None, "empty_ocr_text", timings
+    return "\n\n".join(paragraphs), None, timings
 
 
 def _collect_ocr_lines(

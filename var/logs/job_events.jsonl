@@ -3147,3 +3147,739 @@
 {"timestamp": "2026-04-26T06:22:26.790497+00:00", "event": "state_changed", "job_id": "job-86fc66f98f36", "doc_id": "doc-ocr-events", "state": "structuring"}
 {"timestamp": "2026-04-26T06:22:26.798131+00:00", "event": "state_changed", "job_id": "job-86fc66f98f36", "doc_id": "doc-ocr-events", "state": "embedding"}
 {"timestamp": "2026-04-26T06:22:26.806133+00:00", "event": "completed", "job_id": "job-86fc66f98f36", "doc_id": "doc-ocr-events", "attempt": 1, "duration_s": 0.035, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T07:20:10.528898+00:00", "event": "started", "job_id": "job-01a8333cae69", "doc_id": "live-docx-001", "attempt": 1, "file_path": "/tmp/tmpworsxhxq.docx"}
+{"timestamp": "2026-04-26T07:20:10.538857+00:00", "event": "state_changed", "job_id": "job-01a8333cae69", "doc_id": "live-docx-001", "state": "parsing"}
+{"timestamp": "2026-04-26T07:20:10.567886+00:00", "event": "state_changed", "job_id": "job-01a8333cae69", "doc_id": "live-docx-001", "state": "structuring"}
+{"timestamp": "2026-04-26T07:20:10.577242+00:00", "event": "state_changed", "job_id": "job-01a8333cae69", "doc_id": "live-docx-001", "state": "embedding"}
+{"timestamp": "2026-04-26T07:20:10.606601+00:00", "event": "completed", "job_id": "job-01a8333cae69", "doc_id": "live-docx-001", "attempt": 1, "duration_s": 0.079, "blocks": 301, "chunks": 301}
+{"timestamp": "2026-04-26T07:40:08.982208+00:00", "event": "started", "job_id": "job-b95d1948d1f2", "doc_id": "live-docx-001", "attempt": 1, "file_path": "/tmp/tmpworsxhxq.docx"}
+{"timestamp": "2026-04-26T07:40:08.993568+00:00", "event": "reused_blocks", "doc_id": "live-docx-001", "blocks": 301}
+{"timestamp": "2026-04-26T07:40:09.020657+00:00", "event": "state_changed", "job_id": "job-b95d1948d1f2", "doc_id": "live-docx-001", "state": "structuring"}
+{"timestamp": "2026-04-26T07:40:09.029266+00:00", "event": "reused_chunks", "doc_id": "live-docx-001", "chunks": 301}
+{"timestamp": "2026-04-26T07:40:09.037285+00:00", "event": "state_changed", "job_id": "job-b95d1948d1f2", "doc_id": "live-docx-001", "state": "embedding"}
+{"timestamp": "2026-04-26T07:40:09.074554+00:00", "event": "completed", "job_id": "job-b95d1948d1f2", "doc_id": "live-docx-001", "attempt": 1, "duration_s": 0.093, "blocks": 301, "chunks": 301}
+{"timestamp": "2026-04-26T07:48:04.013361+00:00", "event": "started", "job_id": "job-cb2b63bb591a", "doc_id": "live-docx-001", "attempt": 1, "file_path": "/tmp/tmpworsxhxq.docx"}
+{"timestamp": "2026-04-26T07:48:04.025572+00:00", "event": "reused_blocks", "doc_id": "live-docx-001", "blocks": 301}
+{"timestamp": "2026-04-26T07:48:04.050790+00:00", "event": "state_changed", "job_id": "job-cb2b63bb591a", "doc_id": "live-docx-001", "state": "structuring"}
+{"timestamp": "2026-04-26T07:48:04.060442+00:00", "event": "reused_chunks", "doc_id": "live-docx-001", "chunks": 301}
+{"timestamp": "2026-04-26T07:48:04.070276+00:00", "event": "state_changed", "job_id": "job-cb2b63bb591a", "doc_id": "live-docx-001", "state": "embedding"}
+{"timestamp": "2026-04-26T07:48:04.112637+00:00", "event": "failed", "job_id": "job-cb2b63bb591a", "doc_id": "live-docx-001", "attempt": 1, "error": "chunk chk-7c024db1197d embedding dim=2 mismatch with index dim=1536"}
+{"timestamp": "2026-04-26T07:50:19.598927+00:00", "event": "started", "job_id": "job-db083990cbfd", "doc_id": "live-docx-001", "attempt": 1, "file_path": "/tmp/tmpworsxhxq.docx"}
+{"timestamp": "2026-04-26T07:50:19.611692+00:00", "event": "reused_blocks", "doc_id": "live-docx-001", "blocks": 301}
+{"timestamp": "2026-04-26T07:50:19.635874+00:00", "event": "state_changed", "job_id": "job-db083990cbfd", "doc_id": "live-docx-001", "state": "structuring"}
+{"timestamp": "2026-04-26T07:50:19.647401+00:00", "event": "reused_chunks", "doc_id": "live-docx-001", "chunks": 301}
+{"timestamp": "2026-04-26T07:50:19.658600+00:00", "event": "state_changed", "job_id": "job-db083990cbfd", "doc_id": "live-docx-001", "state": "embedding"}
+{"timestamp": "2026-04-26T07:50:20.252408+00:00", "event": "completed", "job_id": "job-db083990cbfd", "doc_id": "live-docx-001", "attempt": 1, "duration_s": 0.653, "blocks": 301, "chunks": 301}
+{"timestamp": "2026-04-26T07:52:27.906848+00:00", "event": "started", "job_id": "job-e4a696180005", "doc_id": "live-pdf-001", "attempt": 1, "file_path": "/tmp/tmp815cttwd.pdf"}
+{"timestamp": "2026-04-26T07:52:27.916699+00:00", "event": "state_changed", "job_id": "job-e4a696180005", "doc_id": "live-pdf-001", "state": "parsing"}
+{"timestamp": "2026-04-26T07:52:30.807026+00:00", "event": "state_changed", "job_id": "job-e4a696180005", "doc_id": "live-pdf-001", "state": "structuring"}
+{"timestamp": "2026-04-26T07:52:30.817913+00:00", "event": "state_changed", "job_id": "job-e4a696180005", "doc_id": "live-pdf-001", "state": "embedding"}
+{"timestamp": "2026-04-26T07:52:30.928682+00:00", "event": "completed", "job_id": "job-e4a696180005", "doc_id": "live-pdf-001", "attempt": 1, "duration_s": 3.022, "blocks": 46, "chunks": 46}
+{"timestamp": "2026-04-26T10:55:20.617498+00:00", "event": "started", "job_id": "job-54c6f6ee4dbe", "doc_id": "doc-q-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-oplk277c\\quota-a.docx"}
+{"timestamp": "2026-04-26T10:55:20.626776+00:00", "event": "state_changed", "job_id": "job-54c6f6ee4dbe", "doc_id": "doc-q-1", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:20.642979+00:00", "event": "state_changed", "job_id": "job-54c6f6ee4dbe", "doc_id": "doc-q-1", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:20.649813+00:00", "event": "state_changed", "job_id": "job-54c6f6ee4dbe", "doc_id": "doc-q-1", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:20.664134+00:00", "event": "completed", "job_id": "job-54c6f6ee4dbe", "doc_id": "doc-q-1", "attempt": 1, "duration_s": 0.047, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:21.012308+00:00", "event": "started", "job_id": "job-1102235e06c9", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-7swoy4lv\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:21.017834+00:00", "event": "state_changed", "job_id": "job-1102235e06c9", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.031657+00:00", "event": "state_changed", "job_id": "job-1102235e06c9", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.038209+00:00", "event": "state_changed", "job_id": "job-1102235e06c9", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.063586+00:00", "event": "completed", "job_id": "job-1102235e06c9", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.051, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:21.130527+00:00", "event": "started", "job_id": "job-5777218c18d8", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-7swoy4lv\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:21.139093+00:00", "event": "state_changed", "job_id": "job-5777218c18d8", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.154068+00:00", "event": "state_changed", "job_id": "job-5777218c18d8", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.161809+00:00", "event": "state_changed", "job_id": "job-5777218c18d8", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.189661+00:00", "event": "completed", "job_id": "job-5777218c18d8", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.059, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:21.274188+00:00", "event": "started", "job_id": "job-9d5adb6f896e", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpk_fdf44b.docx"}
+{"timestamp": "2026-04-26T10:55:21.281837+00:00", "event": "state_changed", "job_id": "job-9d5adb6f896e", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.296181+00:00", "event": "state_changed", "job_id": "job-9d5adb6f896e", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.304188+00:00", "event": "state_changed", "job_id": "job-9d5adb6f896e", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.317062+00:00", "event": "completed", "job_id": "job-9d5adb6f896e", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:21.335536+00:00", "event": "started", "job_id": "job-11e57026f664", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpsegh3fr2.docx"}
+{"timestamp": "2026-04-26T10:55:21.344848+00:00", "event": "state_changed", "job_id": "job-11e57026f664", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.358847+00:00", "event": "state_changed", "job_id": "job-11e57026f664", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.365074+00:00", "event": "state_changed", "job_id": "job-11e57026f664", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.380490+00:00", "event": "completed", "job_id": "job-11e57026f664", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.045, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:21.453297+00:00", "event": "started", "job_id": "job-b782d0165c6e", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp_apk2m34.pdf"}
+{"timestamp": "2026-04-26T10:55:21.462588+00:00", "event": "state_changed", "job_id": "job-b782d0165c6e", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.630466+00:00", "event": "state_changed", "job_id": "job-b782d0165c6e", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.637462+00:00", "event": "state_changed", "job_id": "job-b782d0165c6e", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.649298+00:00", "event": "completed", "job_id": "job-b782d0165c6e", "doc_id": "compat", "attempt": 1, "duration_s": 0.196, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:21.773995+00:00", "event": "started", "job_id": "job-d4d9729546fb", "doc_id": "quota", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp52xyqmhs.docx"}
+{"timestamp": "2026-04-26T10:55:21.781509+00:00", "event": "state_changed", "job_id": "job-d4d9729546fb", "doc_id": "quota", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.795933+00:00", "event": "state_changed", "job_id": "job-d4d9729546fb", "doc_id": "quota", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.803653+00:00", "event": "state_changed", "job_id": "job-d4d9729546fb", "doc_id": "quota", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.818389+00:00", "event": "completed", "job_id": "job-d4d9729546fb", "doc_id": "quota", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:21.893246+00:00", "event": "started", "job_id": "job-86bc235a86e2", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp1moa_q_4.docx"}
+{"timestamp": "2026-04-26T10:55:21.900381+00:00", "event": "state_changed", "job_id": "job-86bc235a86e2", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:21.913378+00:00", "event": "state_changed", "job_id": "job-86bc235a86e2", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:21.922230+00:00", "event": "state_changed", "job_id": "job-86bc235a86e2", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:21.934898+00:00", "event": "completed", "job_id": "job-86bc235a86e2", "doc_id": "compat", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.018190+00:00", "event": "started", "job_id": "job-4b80ac28bc93", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpawzqqkxa.docx"}
+{"timestamp": "2026-04-26T10:55:22.030333+00:00", "event": "state_changed", "job_id": "job-4b80ac28bc93", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.045764+00:00", "event": "state_changed", "job_id": "job-4b80ac28bc93", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.054966+00:00", "event": "state_changed", "job_id": "job-4b80ac28bc93", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.068893+00:00", "event": "completed", "job_id": "job-4b80ac28bc93", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.051, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.148184+00:00", "event": "started", "job_id": "job-3bf42b9384e4", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpzfc98on3.pdf"}
+{"timestamp": "2026-04-26T10:55:22.158436+00:00", "event": "state_changed", "job_id": "job-3bf42b9384e4", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.364648+00:00", "event": "state_changed", "job_id": "job-3bf42b9384e4", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.373099+00:00", "event": "state_changed", "job_id": "job-3bf42b9384e4", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.387054+00:00", "event": "completed", "job_id": "job-3bf42b9384e4", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.238, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.408172+00:00", "event": "started", "job_id": "job-b9f66c0c3ff5", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpl1_3psii.pdf"}
+{"timestamp": "2026-04-26T10:55:22.416189+00:00", "event": "state_changed", "job_id": "job-b9f66c0c3ff5", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.437083+00:00", "event": "state_changed", "job_id": "job-b9f66c0c3ff5", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.446258+00:00", "event": "state_changed", "job_id": "job-b9f66c0c3ff5", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.460557+00:00", "event": "completed", "job_id": "job-b9f66c0c3ff5", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.052, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.568869+00:00", "event": "started", "job_id": "job-9c751107aabf", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-nrz029xt\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:22.578983+00:00", "event": "state_changed", "job_id": "job-9c751107aabf", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.620059+00:00", "event": "state_changed", "job_id": "job-9c751107aabf", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.639473+00:00", "event": "state_changed", "job_id": "job-9c751107aabf", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.671835+00:00", "event": "completed", "job_id": "job-9c751107aabf", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.103, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.706355+00:00", "event": "started", "job_id": "job-aefe8cd629e0", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-nrz029xt\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:22.712615+00:00", "event": "state_changed", "job_id": "job-aefe8cd629e0", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.714125+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T10:55:22.749277+00:00", "event": "started", "job_id": "job-79e20c08b572", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-nrz029xt\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:22.756427+00:00", "event": "state_changed", "job_id": "job-79e20c08b572", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:22.758019+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T10:55:22.764266+00:00", "event": "state_changed", "job_id": "job-aefe8cd629e0", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.772260+00:00", "event": "state_changed", "job_id": "job-aefe8cd629e0", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.781288+00:00", "event": "state_changed", "job_id": "job-79e20c08b572", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:22.786041+00:00", "event": "reused_chunks", "doc_id": "doc-api-002", "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.795749+00:00", "event": "completed", "job_id": "job-aefe8cd629e0", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.089, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.803501+00:00", "event": "state_changed", "job_id": "job-79e20c08b572", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:22.816732+00:00", "event": "completed", "job_id": "job-79e20c08b572", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.068, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:22.999338+00:00", "event": "started", "job_id": "job-6ab7699c22b9", "doc_id": "doc-dashboard", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ouiwl87_\\test-dashboard.docx"}
+{"timestamp": "2026-04-26T10:55:23.006643+00:00", "event": "state_changed", "job_id": "job-6ab7699c22b9", "doc_id": "doc-dashboard", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:23.019423+00:00", "event": "state_changed", "job_id": "job-6ab7699c22b9", "doc_id": "doc-dashboard", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:23.027330+00:00", "event": "state_changed", "job_id": "job-6ab7699c22b9", "doc_id": "doc-dashboard", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:23.039795+00:00", "event": "completed", "job_id": "job-6ab7699c22b9", "doc_id": "doc-dashboard", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:23.115308+00:00", "event": "started", "job_id": "job-db36768a835f", "doc_id": "doc-ocr-events", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-zbre9z0v\\ocr-events.docx"}
+{"timestamp": "2026-04-26T10:55:23.126316+00:00", "event": "state_changed", "job_id": "job-db36768a835f", "doc_id": "doc-ocr-events", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:23.163224+00:00", "event": "state_changed", "job_id": "job-db36768a835f", "doc_id": "doc-ocr-events", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:23.173922+00:00", "event": "state_changed", "job_id": "job-db36768a835f", "doc_id": "doc-ocr-events", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:23.188148+00:00", "event": "completed", "job_id": "job-db36768a835f", "doc_id": "doc-ocr-events", "attempt": 1, "duration_s": 0.073, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T10:55:23.276927+00:00", "event": "started", "job_id": "job-32d1f75cc9db", "doc_id": "doc-event-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-e8l2qu70\\doc1.docx"}
+{"timestamp": "2026-04-26T10:55:23.283640+00:00", "event": "state_changed", "job_id": "job-32d1f75cc9db", "doc_id": "doc-event-1", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:23.296179+00:00", "event": "state_changed", "job_id": "job-32d1f75cc9db", "doc_id": "doc-event-1", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:23.301890+00:00", "event": "state_changed", "job_id": "job-32d1f75cc9db", "doc_id": "doc-event-1", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:23.314010+00:00", "event": "completed", "job_id": "job-32d1f75cc9db", "doc_id": "doc-event-1", "attempt": 1, "duration_s": 0.038, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:23.384534+00:00", "event": "started", "job_id": "job-0a8a5e1d04f8", "doc_id": "doc-metrics", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-stx660x2\\test-metrics.docx"}
+{"timestamp": "2026-04-26T10:55:23.392961+00:00", "event": "state_changed", "job_id": "job-0a8a5e1d04f8", "doc_id": "doc-metrics", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:23.408800+00:00", "event": "state_changed", "job_id": "job-0a8a5e1d04f8", "doc_id": "doc-metrics", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:23.415738+00:00", "event": "state_changed", "job_id": "job-0a8a5e1d04f8", "doc_id": "doc-metrics", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:23.428093+00:00", "event": "completed", "job_id": "job-0a8a5e1d04f8", "doc_id": "doc-metrics", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:23.512612+00:00", "event": "started", "job_id": "job-c33e9f99897a", "doc_id": "doc-api-queue-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-3x91vyjz\\queued.docx"}
+{"timestamp": "2026-04-26T10:55:23.525033+00:00", "event": "state_changed", "job_id": "job-c33e9f99897a", "doc_id": "doc-api-queue-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:23.531564+00:00", "event": "state_changed", "job_id": "job-c33e9f99897a", "doc_id": "doc-api-queue-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:23.542948+00:00", "event": "completed", "job_id": "job-c33e9f99897a", "doc_id": "doc-api-queue-001", "attempt": 1, "duration_s": 0.03, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:24.416856+00:00", "event": "started", "job_id": "job-c8d82a2c5aee", "doc_id": "doc-tenant-iso", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-4_8hon2s\\tenant-doc.docx"}
+{"timestamp": "2026-04-26T10:55:24.425779+00:00", "event": "state_changed", "job_id": "job-c8d82a2c5aee", "doc_id": "doc-tenant-iso", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.436868+00:00", "event": "state_changed", "job_id": "job-c8d82a2c5aee", "doc_id": "doc-tenant-iso", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.443799+00:00", "event": "state_changed", "job_id": "job-c8d82a2c5aee", "doc_id": "doc-tenant-iso", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:24.456193+00:00", "event": "completed", "job_id": "job-c8d82a2c5aee", "doc_id": "doc-tenant-iso", "attempt": 1, "duration_s": 0.039, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:24.518456+00:00", "event": "started", "job_id": "job-4d5a0865d051", "doc_id": "doc-embed-partial", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-oj6soyh7\\embed-partial.docx"}
+{"timestamp": "2026-04-26T10:55:24.525919+00:00", "event": "state_changed", "job_id": "job-4d5a0865d051", "doc_id": "doc-embed-partial", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.541538+00:00", "event": "state_changed", "job_id": "job-4d5a0865d051", "doc_id": "doc-embed-partial", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.550561+00:00", "event": "state_changed", "job_id": "job-4d5a0865d051", "doc_id": "doc-embed-partial", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:24.551682+00:00", "event": "embedding_retry", "doc_id": "doc-embed-partial", "batch_index": 2, "attempt": 1, "max_attempts": 2, "delay_s": 0.05, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T10:55:24.603384+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-embed-partial", "batch_index": 2, "attempts": 2, "chunks": 1, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T10:55:24.604252+00:00", "event": "embedding_skipped", "doc_id": "doc-embed-partial", "chunks": 3, "failed_batches": 1, "total_batches": 3}
+{"timestamp": "2026-04-26T10:55:24.621731+00:00", "event": "completed", "job_id": "job-4d5a0865d051", "doc_id": "doc-embed-partial", "attempt": 1, "duration_s": 0.103, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:24.709179+00:00", "event": "started", "job_id": "job-b57c2d891a40", "doc_id": "doc-tenant-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-497gnw_z\\tenant-a.docx"}
+{"timestamp": "2026-04-26T10:55:24.719850+00:00", "event": "state_changed", "job_id": "job-b57c2d891a40", "doc_id": "doc-tenant-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.738441+00:00", "event": "state_changed", "job_id": "job-b57c2d891a40", "doc_id": "doc-tenant-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.746060+00:00", "event": "state_changed", "job_id": "job-b57c2d891a40", "doc_id": "doc-tenant-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:24.758882+00:00", "event": "completed", "job_id": "job-b57c2d891a40", "doc_id": "doc-tenant-a", "attempt": 1, "duration_s": 0.05, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:24.771862+00:00", "event": "started", "job_id": "job-8811bc78b880", "doc_id": "doc-tenant-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-497gnw_z\\tenant-b.docx"}
+{"timestamp": "2026-04-26T10:55:24.778353+00:00", "event": "state_changed", "job_id": "job-8811bc78b880", "doc_id": "doc-tenant-b", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.793091+00:00", "event": "state_changed", "job_id": "job-8811bc78b880", "doc_id": "doc-tenant-b", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.800411+00:00", "event": "state_changed", "job_id": "job-8811bc78b880", "doc_id": "doc-tenant-b", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:24.813039+00:00", "event": "completed", "job_id": "job-8811bc78b880", "doc_id": "doc-tenant-b", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:24.872629+00:00", "event": "started", "job_id": "job-53ba553f8ddf", "doc_id": "pdf-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_ooccsun\\sample.pdf"}
+{"timestamp": "2026-04-26T10:55:24.879476+00:00", "event": "state_changed", "job_id": "job-53ba553f8ddf", "doc_id": "pdf-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.890575+00:00", "event": "state_changed", "job_id": "job-53ba553f8ddf", "doc_id": "pdf-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.897728+00:00", "event": "state_changed", "job_id": "job-53ba553f8ddf", "doc_id": "pdf-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:24.910099+00:00", "event": "completed", "job_id": "job-53ba553f8ddf", "doc_id": "pdf-001", "attempt": 1, "duration_s": 0.038, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T10:55:24.966115+00:00", "event": "started", "job_id": "job-f63121c73166", "doc_id": "pdf-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-pbz9jy0i\\sample.pdf"}
+{"timestamp": "2026-04-26T10:55:24.972861+00:00", "event": "state_changed", "job_id": "job-f63121c73166", "doc_id": "pdf-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:24.982650+00:00", "event": "state_changed", "job_id": "job-f63121c73166", "doc_id": "pdf-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:24.990047+00:00", "event": "state_changed", "job_id": "job-f63121c73166", "doc_id": "pdf-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.001700+00:00", "event": "completed", "job_id": "job-f63121c73166", "doc_id": "pdf-002", "attempt": 1, "duration_s": 0.036, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T10:55:25.064807+00:00", "event": "started", "job_id": "job-79fc85d4c955", "doc_id": "doc-quota-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-hhhyji14\\quota-a.docx"}
+{"timestamp": "2026-04-26T10:55:25.074160+00:00", "event": "state_changed", "job_id": "job-79fc85d4c955", "doc_id": "doc-quota-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.087516+00:00", "event": "state_changed", "job_id": "job-79fc85d4c955", "doc_id": "doc-quota-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.094408+00:00", "event": "state_changed", "job_id": "job-79fc85d4c955", "doc_id": "doc-quota-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.105154+00:00", "event": "completed", "job_id": "job-79fc85d4c955", "doc_id": "doc-quota-a", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:25.160519+00:00", "event": "started", "job_id": "job-20b5ba91a629", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-n5n9kcx5\\revision.docx"}
+{"timestamp": "2026-04-26T10:55:25.167571+00:00", "event": "state_changed", "job_id": "job-20b5ba91a629", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.181173+00:00", "event": "state_changed", "job_id": "job-20b5ba91a629", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.189594+00:00", "event": "state_changed", "job_id": "job-20b5ba91a629", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.201707+00:00", "event": "completed", "job_id": "job-20b5ba91a629", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.041, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:25.215794+00:00", "event": "started", "job_id": "job-9035271afd44", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-n5n9kcx5\\revision.docx"}
+{"timestamp": "2026-04-26T10:55:25.222247+00:00", "event": "state_changed", "job_id": "job-9035271afd44", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.233184+00:00", "event": "state_changed", "job_id": "job-9035271afd44", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.241019+00:00", "event": "state_changed", "job_id": "job-9035271afd44", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.261439+00:00", "event": "completed", "job_id": "job-9035271afd44", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.046, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:25.320148+00:00", "event": "started", "job_id": "job-7c81f9e56fb6", "doc_id": "doc-metrics-ok", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-v1l1z_il\\metrics-ok.docx"}
+{"timestamp": "2026-04-26T10:55:25.328328+00:00", "event": "state_changed", "job_id": "job-7c81f9e56fb6", "doc_id": "doc-metrics-ok", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.343701+00:00", "event": "state_changed", "job_id": "job-7c81f9e56fb6", "doc_id": "doc-metrics-ok", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.349545+00:00", "event": "state_changed", "job_id": "job-7c81f9e56fb6", "doc_id": "doc-metrics-ok", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.363400+00:00", "event": "completed", "job_id": "job-7c81f9e56fb6", "doc_id": "doc-metrics-ok", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:25.375919+00:00", "event": "started", "job_id": "job-4559421ebfc2", "doc_id": "doc-metrics-fail", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-v1l1z_il\\missing-metrics.docx"}
+{"timestamp": "2026-04-26T10:55:25.383423+00:00", "event": "state_changed", "job_id": "job-4559421ebfc2", "doc_id": "doc-metrics-fail", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.392160+00:00", "event": "failed", "job_id": "job-4559421ebfc2", "doc_id": "doc-metrics-fail", "attempt": 1, "error": "[Errno 2] No such file or directory: 'C:\\\\Users\\\\jiaxi\\\\AppData\\\\Local\\\\Temp\\\\parsecore-tests-v1l1z_il\\\\missing-metrics.docx'"}
+{"timestamp": "2026-04-26T10:55:25.454237+00:00", "event": "started", "job_id": "job-9240c6fe4a0a", "doc_id": "doc-fallback", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-2kd0711_\\search-fallback.docx"}
+{"timestamp": "2026-04-26T10:55:25.461455+00:00", "event": "state_changed", "job_id": "job-9240c6fe4a0a", "doc_id": "doc-fallback", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.475870+00:00", "event": "state_changed", "job_id": "job-9240c6fe4a0a", "doc_id": "doc-fallback", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.482307+00:00", "event": "state_changed", "job_id": "job-9240c6fe4a0a", "doc_id": "doc-fallback", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.482970+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 1, "max_attempts": 3, "delay_s": 0.05, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:55:25.534525+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 2, "max_attempts": 3, "delay_s": 0.1, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:55:25.637828+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-fallback", "batch_index": 1, "attempts": 3, "chunks": 2, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:55:25.639662+00:00", "event": "embedding_skipped", "doc_id": "doc-fallback", "chunks": 2, "failed_batches": 1, "total_batches": 1}
+{"timestamp": "2026-04-26T10:55:25.658073+00:00", "event": "completed", "job_id": "job-9240c6fe4a0a", "doc_id": "doc-fallback", "attempt": 1, "duration_s": 0.204, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:25.660569+00:00", "event": "search_embedding_skipped", "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:55:25.719610+00:00", "event": "started", "job_id": "job-39932b7e7c40", "doc_id": "doc-hybrid", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-o7jxhc8c\\search-hybrid.docx"}
+{"timestamp": "2026-04-26T10:55:25.726839+00:00", "event": "state_changed", "job_id": "job-39932b7e7c40", "doc_id": "doc-hybrid", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.738396+00:00", "event": "state_changed", "job_id": "job-39932b7e7c40", "doc_id": "doc-hybrid", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.745320+00:00", "event": "state_changed", "job_id": "job-39932b7e7c40", "doc_id": "doc-hybrid", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.755813+00:00", "event": "completed", "job_id": "job-39932b7e7c40", "doc_id": "doc-hybrid", "attempt": 1, "duration_s": 0.036, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:25.823156+00:00", "event": "started", "job_id": "job-7629aee7d3f2", "doc_id": "doc-search", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-jco4qtvu\\search.docx"}
+{"timestamp": "2026-04-26T10:55:25.832864+00:00", "event": "state_changed", "job_id": "job-7629aee7d3f2", "doc_id": "doc-search", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.847652+00:00", "event": "state_changed", "job_id": "job-7629aee7d3f2", "doc_id": "doc-search", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.854458+00:00", "event": "state_changed", "job_id": "job-7629aee7d3f2", "doc_id": "doc-search", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.867880+00:00", "event": "completed", "job_id": "job-7629aee7d3f2", "doc_id": "doc-search", "attempt": 1, "duration_s": 0.045, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:25.948319+00:00", "event": "started", "job_id": "job-5e47555d4af3", "doc_id": "doc-old", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-pm92p74g\\old-job.docx"}
+{"timestamp": "2026-04-26T10:55:25.956882+00:00", "event": "state_changed", "job_id": "job-5e47555d4af3", "doc_id": "doc-old", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:25.971456+00:00", "event": "state_changed", "job_id": "job-5e47555d4af3", "doc_id": "doc-old", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:25.980176+00:00", "event": "state_changed", "job_id": "job-5e47555d4af3", "doc_id": "doc-old", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:25.996364+00:00", "event": "completed", "job_id": "job-5e47555d4af3", "doc_id": "doc-old", "attempt": 1, "duration_s": 0.048, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:26.063372+00:00", "event": "started", "job_id": "job-00558a4e9045", "doc_id": "doc-embed", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-tmffb67h\\embed.docx"}
+{"timestamp": "2026-04-26T10:55:26.069221+00:00", "event": "state_changed", "job_id": "job-00558a4e9045", "doc_id": "doc-embed", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.081655+00:00", "event": "state_changed", "job_id": "job-00558a4e9045", "doc_id": "doc-embed", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.090466+00:00", "event": "state_changed", "job_id": "job-00558a4e9045", "doc_id": "doc-embed", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.105080+00:00", "event": "completed", "job_id": "job-00558a4e9045", "doc_id": "doc-embed", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:26.167344+00:00", "event": "started", "job_id": "job-51f665740ca3", "doc_id": "doc-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-bzawo5if\\spec.docx"}
+{"timestamp": "2026-04-26T10:55:26.175926+00:00", "event": "state_changed", "job_id": "job-51f665740ca3", "doc_id": "doc-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.189453+00:00", "event": "state_changed", "job_id": "job-51f665740ca3", "doc_id": "doc-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.197633+00:00", "event": "state_changed", "job_id": "job-51f665740ca3", "doc_id": "doc-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.216531+00:00", "event": "completed", "job_id": "job-51f665740ca3", "doc_id": "doc-001", "attempt": 1, "duration_s": 0.049, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:26.276920+00:00", "event": "started", "job_id": "job-66717f2f6fdc", "doc_id": "doc-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-zkktnil5\\manual.docx"}
+{"timestamp": "2026-04-26T10:55:26.283664+00:00", "event": "state_changed", "job_id": "job-66717f2f6fdc", "doc_id": "doc-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.299071+00:00", "event": "state_changed", "job_id": "job-66717f2f6fdc", "doc_id": "doc-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.305694+00:00", "event": "state_changed", "job_id": "job-66717f2f6fdc", "doc_id": "doc-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.318073+00:00", "event": "completed", "job_id": "job-66717f2f6fdc", "doc_id": "doc-002", "attempt": 1, "duration_s": 0.041, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:26.383825+00:00", "event": "started", "job_id": "job-c9828c525b39", "doc_id": "doc-ocr", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-giubdaod\\ocr.docx"}
+{"timestamp": "2026-04-26T10:55:26.391940+00:00", "event": "state_changed", "job_id": "job-c9828c525b39", "doc_id": "doc-ocr", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.405325+00:00", "event": "state_changed", "job_id": "job-c9828c525b39", "doc_id": "doc-ocr", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.412272+00:00", "event": "state_changed", "job_id": "job-c9828c525b39", "doc_id": "doc-ocr", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.418849+00:00", "event": "completed", "job_id": "job-c9828c525b39", "doc_id": "doc-ocr", "attempt": 1, "duration_s": 0.035, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T10:55:26.480367+00:00", "event": "started", "job_id": "job-a1268dfc8222", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_3igeusr\\rerun.docx"}
+{"timestamp": "2026-04-26T10:55:26.488918+00:00", "event": "state_changed", "job_id": "job-a1268dfc8222", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.501383+00:00", "event": "state_changed", "job_id": "job-a1268dfc8222", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.509561+00:00", "event": "state_changed", "job_id": "job-a1268dfc8222", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.521599+00:00", "event": "completed", "job_id": "job-a1268dfc8222", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.041, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:26.533559+00:00", "event": "started", "job_id": "job-713c9be3d094", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_3igeusr\\missing.docx"}
+{"timestamp": "2026-04-26T10:55:26.540316+00:00", "event": "state_changed", "job_id": "job-713c9be3d094", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.542155+00:00", "event": "reused_blocks", "doc_id": "doc-rerun", "blocks": 3}
+{"timestamp": "2026-04-26T10:55:26.551229+00:00", "event": "state_changed", "job_id": "job-713c9be3d094", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.559008+00:00", "event": "state_changed", "job_id": "job-713c9be3d094", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.569147+00:00", "event": "completed", "job_id": "job-713c9be3d094", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.036, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:55:26.634611+00:00", "event": "started", "job_id": "job-a7dfe369ee82", "doc_id": "doc-dash-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-4s3761ij\\dash-a.docx"}
+{"timestamp": "2026-04-26T10:55:26.643657+00:00", "event": "state_changed", "job_id": "job-a7dfe369ee82", "doc_id": "doc-dash-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.657756+00:00", "event": "state_changed", "job_id": "job-a7dfe369ee82", "doc_id": "doc-dash-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.667911+00:00", "event": "state_changed", "job_id": "job-a7dfe369ee82", "doc_id": "doc-dash-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.682154+00:00", "event": "completed", "job_id": "job-a7dfe369ee82", "doc_id": "doc-dash-a", "attempt": 1, "duration_s": 0.048, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:26.696385+00:00", "event": "started", "job_id": "job-a114121e5571", "doc_id": "doc-dash-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-4s3761ij\\dash-b.docx"}
+{"timestamp": "2026-04-26T10:55:26.704934+00:00", "event": "state_changed", "job_id": "job-a114121e5571", "doc_id": "doc-dash-b", "state": "parsing"}
+{"timestamp": "2026-04-26T10:55:26.718272+00:00", "event": "state_changed", "job_id": "job-a114121e5571", "doc_id": "doc-dash-b", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.727427+00:00", "event": "state_changed", "job_id": "job-a114121e5571", "doc_id": "doc-dash-b", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.740142+00:00", "event": "completed", "job_id": "job-a114121e5571", "doc_id": "doc-dash-b", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:55:26.817199+00:00", "event": "started", "job_id": "job-07b8e1badea8", "doc_id": "doc-worker-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-c26_q3u3\\worker.docx"}
+{"timestamp": "2026-04-26T10:55:26.829803+00:00", "event": "state_changed", "job_id": "job-07b8e1badea8", "doc_id": "doc-worker-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:55:26.835187+00:00", "event": "state_changed", "job_id": "job-07b8e1badea8", "doc_id": "doc-worker-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:55:26.848400+00:00", "event": "completed", "job_id": "job-07b8e1badea8", "doc_id": "doc-worker-001", "attempt": 1, "duration_s": 0.032, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:02.234070+00:00", "event": "started", "job_id": "job-1d35fc802729", "doc_id": "doc-q-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-2oil1gfk\\quota-a.docx"}
+{"timestamp": "2026-04-26T10:56:02.241800+00:00", "event": "state_changed", "job_id": "job-1d35fc802729", "doc_id": "doc-q-1", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:02.255563+00:00", "event": "state_changed", "job_id": "job-1d35fc802729", "doc_id": "doc-q-1", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:02.263984+00:00", "event": "state_changed", "job_id": "job-1d35fc802729", "doc_id": "doc-q-1", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:02.277572+00:00", "event": "completed", "job_id": "job-1d35fc802729", "doc_id": "doc-q-1", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:02.650579+00:00", "event": "started", "job_id": "job-b53b9882a1cb", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_msjlb11\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:02.659868+00:00", "event": "state_changed", "job_id": "job-b53b9882a1cb", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:02.674222+00:00", "event": "state_changed", "job_id": "job-b53b9882a1cb", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:02.681423+00:00", "event": "state_changed", "job_id": "job-b53b9882a1cb", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:02.693831+00:00", "event": "completed", "job_id": "job-b53b9882a1cb", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:02.787460+00:00", "event": "started", "job_id": "job-59044c76e163", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_msjlb11\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:02.794500+00:00", "event": "state_changed", "job_id": "job-59044c76e163", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:02.821695+00:00", "event": "state_changed", "job_id": "job-59044c76e163", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:02.827920+00:00", "event": "state_changed", "job_id": "job-59044c76e163", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:02.857295+00:00", "event": "completed", "job_id": "job-59044c76e163", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.07, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:02.969605+00:00", "event": "started", "job_id": "job-7032e0c44caf", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpgclxnx52.docx"}
+{"timestamp": "2026-04-26T10:56:02.977767+00:00", "event": "state_changed", "job_id": "job-7032e0c44caf", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:02.992844+00:00", "event": "state_changed", "job_id": "job-7032e0c44caf", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:02.999676+00:00", "event": "state_changed", "job_id": "job-7032e0c44caf", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.011694+00:00", "event": "completed", "job_id": "job-7032e0c44caf", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:03.027246+00:00", "event": "started", "job_id": "job-2112cf4255be", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp6aslehml.docx"}
+{"timestamp": "2026-04-26T10:56:03.033548+00:00", "event": "state_changed", "job_id": "job-2112cf4255be", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.045841+00:00", "event": "state_changed", "job_id": "job-2112cf4255be", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.051448+00:00", "event": "state_changed", "job_id": "job-2112cf4255be", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.063243+00:00", "event": "completed", "job_id": "job-2112cf4255be", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.036, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:03.137423+00:00", "event": "started", "job_id": "job-9d2a817a1530", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp65sniyj4.pdf"}
+{"timestamp": "2026-04-26T10:56:03.148120+00:00", "event": "state_changed", "job_id": "job-9d2a817a1530", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.319377+00:00", "event": "state_changed", "job_id": "job-9d2a817a1530", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.327203+00:00", "event": "state_changed", "job_id": "job-9d2a817a1530", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.338856+00:00", "event": "completed", "job_id": "job-9d2a817a1530", "doc_id": "compat", "attempt": 1, "duration_s": 0.201, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:03.468674+00:00", "event": "started", "job_id": "job-ba80ffd40145", "doc_id": "quota", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpv7zh48wp.docx"}
+{"timestamp": "2026-04-26T10:56:03.476179+00:00", "event": "state_changed", "job_id": "job-ba80ffd40145", "doc_id": "quota", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.487365+00:00", "event": "state_changed", "job_id": "job-ba80ffd40145", "doc_id": "quota", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.495702+00:00", "event": "state_changed", "job_id": "job-ba80ffd40145", "doc_id": "quota", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.508042+00:00", "event": "completed", "job_id": "job-ba80ffd40145", "doc_id": "quota", "attempt": 1, "duration_s": 0.039, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:03.584588+00:00", "event": "started", "job_id": "job-053e32b10920", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpzn8rw_vt.docx"}
+{"timestamp": "2026-04-26T10:56:03.594003+00:00", "event": "state_changed", "job_id": "job-053e32b10920", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.607524+00:00", "event": "state_changed", "job_id": "job-053e32b10920", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.614322+00:00", "event": "state_changed", "job_id": "job-053e32b10920", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.626905+00:00", "event": "completed", "job_id": "job-053e32b10920", "doc_id": "compat", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:03.717475+00:00", "event": "started", "job_id": "job-35046eb1b284", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmp3xtazmjl.docx"}
+{"timestamp": "2026-04-26T10:56:03.726600+00:00", "event": "state_changed", "job_id": "job-35046eb1b284", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.740895+00:00", "event": "state_changed", "job_id": "job-35046eb1b284", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.748071+00:00", "event": "state_changed", "job_id": "job-35046eb1b284", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:03.760423+00:00", "event": "completed", "job_id": "job-35046eb1b284", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:03.832823+00:00", "event": "started", "job_id": "job-44bfdcad1881", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpq1a8bo3z.pdf"}
+{"timestamp": "2026-04-26T10:56:03.840859+00:00", "event": "state_changed", "job_id": "job-44bfdcad1881", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:03.993863+00:00", "event": "state_changed", "job_id": "job-44bfdcad1881", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:03.999857+00:00", "event": "state_changed", "job_id": "job-44bfdcad1881", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.012825+00:00", "event": "completed", "job_id": "job-44bfdcad1881", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.18, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.030762+00:00", "event": "started", "job_id": "job-7daa5232630e", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpk018nae6.pdf"}
+{"timestamp": "2026-04-26T10:56:04.036497+00:00", "event": "state_changed", "job_id": "job-7daa5232630e", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.057970+00:00", "event": "state_changed", "job_id": "job-7daa5232630e", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.065670+00:00", "event": "state_changed", "job_id": "job-7daa5232630e", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.080120+00:00", "event": "completed", "job_id": "job-7daa5232630e", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.049, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.167318+00:00", "event": "started", "job_id": "job-8ed051b16420", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xh9t9j3h\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:04.175375+00:00", "event": "state_changed", "job_id": "job-8ed051b16420", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.188362+00:00", "event": "state_changed", "job_id": "job-8ed051b16420", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.195327+00:00", "event": "state_changed", "job_id": "job-8ed051b16420", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.209954+00:00", "event": "completed", "job_id": "job-8ed051b16420", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.250928+00:00", "event": "started", "job_id": "job-0849e48094e4", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xh9t9j3h\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:04.257872+00:00", "event": "state_changed", "job_id": "job-0849e48094e4", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.263462+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T10:56:04.273657+00:00", "event": "started", "job_id": "job-64162bb8b157", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xh9t9j3h\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:04.279574+00:00", "event": "state_changed", "job_id": "job-64162bb8b157", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.280976+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T10:56:04.293456+00:00", "event": "state_changed", "job_id": "job-64162bb8b157", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.295786+00:00", "event": "reused_chunks", "doc_id": "doc-api-002", "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.304240+00:00", "event": "state_changed", "job_id": "job-64162bb8b157", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.309194+00:00", "event": "state_changed", "job_id": "job-0849e48094e4", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.315214+00:00", "event": "state_changed", "job_id": "job-0849e48094e4", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.329078+00:00", "event": "completed", "job_id": "job-0849e48094e4", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.078, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.358225+00:00", "event": "completed", "job_id": "job-64162bb8b157", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.085, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:04.511155+00:00", "event": "started", "job_id": "job-955e99f5d763", "doc_id": "doc-dashboard", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_fe1dnmh\\test-dashboard.docx"}
+{"timestamp": "2026-04-26T10:56:04.518751+00:00", "event": "state_changed", "job_id": "job-955e99f5d763", "doc_id": "doc-dashboard", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.531095+00:00", "event": "state_changed", "job_id": "job-955e99f5d763", "doc_id": "doc-dashboard", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.537861+00:00", "event": "state_changed", "job_id": "job-955e99f5d763", "doc_id": "doc-dashboard", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.551626+00:00", "event": "completed", "job_id": "job-955e99f5d763", "doc_id": "doc-dashboard", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:04.624010+00:00", "event": "started", "job_id": "job-1f9727877bc7", "doc_id": "doc-ocr-events", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-jcb7l5gd\\ocr-events.docx"}
+{"timestamp": "2026-04-26T10:56:04.630207+00:00", "event": "state_changed", "job_id": "job-1f9727877bc7", "doc_id": "doc-ocr-events", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.643439+00:00", "event": "state_changed", "job_id": "job-1f9727877bc7", "doc_id": "doc-ocr-events", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.650085+00:00", "event": "state_changed", "job_id": "job-1f9727877bc7", "doc_id": "doc-ocr-events", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.661392+00:00", "event": "completed", "job_id": "job-1f9727877bc7", "doc_id": "doc-ocr-events", "attempt": 1, "duration_s": 0.037, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T10:56:04.774002+00:00", "event": "started", "job_id": "job-b882d74ce2bf", "doc_id": "doc-event-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-fwghll_n\\doc1.docx"}
+{"timestamp": "2026-04-26T10:56:04.781126+00:00", "event": "state_changed", "job_id": "job-b882d74ce2bf", "doc_id": "doc-event-1", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.792604+00:00", "event": "state_changed", "job_id": "job-b882d74ce2bf", "doc_id": "doc-event-1", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.799427+00:00", "event": "state_changed", "job_id": "job-b882d74ce2bf", "doc_id": "doc-event-1", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.817522+00:00", "event": "completed", "job_id": "job-b882d74ce2bf", "doc_id": "doc-event-1", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:04.884888+00:00", "event": "started", "job_id": "job-48e83432352b", "doc_id": "doc-metrics", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-yrdkrigr\\test-metrics.docx"}
+{"timestamp": "2026-04-26T10:56:04.892227+00:00", "event": "state_changed", "job_id": "job-48e83432352b", "doc_id": "doc-metrics", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:04.907147+00:00", "event": "state_changed", "job_id": "job-48e83432352b", "doc_id": "doc-metrics", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:04.915705+00:00", "event": "state_changed", "job_id": "job-48e83432352b", "doc_id": "doc-metrics", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:04.930705+00:00", "event": "completed", "job_id": "job-48e83432352b", "doc_id": "doc-metrics", "attempt": 1, "duration_s": 0.046, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:05.000315+00:00", "event": "started", "job_id": "job-776c134157a6", "doc_id": "doc-api-queue-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xih6bs8z\\queued.docx"}
+{"timestamp": "2026-04-26T10:56:05.017457+00:00", "event": "state_changed", "job_id": "job-776c134157a6", "doc_id": "doc-api-queue-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:05.025162+00:00", "event": "state_changed", "job_id": "job-776c134157a6", "doc_id": "doc-api-queue-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:05.037720+00:00", "event": "completed", "job_id": "job-776c134157a6", "doc_id": "doc-api-queue-001", "attempt": 1, "duration_s": 0.037, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:05.888216+00:00", "event": "started", "job_id": "job-ccee8f5ac787", "doc_id": "doc-tenant-iso", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-pvqbhdw8\\tenant-doc.docx"}
+{"timestamp": "2026-04-26T10:56:05.895554+00:00", "event": "state_changed", "job_id": "job-ccee8f5ac787", "doc_id": "doc-tenant-iso", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:05.908458+00:00", "event": "state_changed", "job_id": "job-ccee8f5ac787", "doc_id": "doc-tenant-iso", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:05.915179+00:00", "event": "state_changed", "job_id": "job-ccee8f5ac787", "doc_id": "doc-tenant-iso", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:05.927836+00:00", "event": "completed", "job_id": "job-ccee8f5ac787", "doc_id": "doc-tenant-iso", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:05.994574+00:00", "event": "started", "job_id": "job-fd2184f54499", "doc_id": "doc-embed-partial", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-kssbftbe\\embed-partial.docx"}
+{"timestamp": "2026-04-26T10:56:06.003557+00:00", "event": "state_changed", "job_id": "job-fd2184f54499", "doc_id": "doc-embed-partial", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.020866+00:00", "event": "state_changed", "job_id": "job-fd2184f54499", "doc_id": "doc-embed-partial", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.029272+00:00", "event": "state_changed", "job_id": "job-fd2184f54499", "doc_id": "doc-embed-partial", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.030285+00:00", "event": "embedding_retry", "doc_id": "doc-embed-partial", "batch_index": 2, "attempt": 1, "max_attempts": 2, "delay_s": 0.05, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T10:56:06.082046+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-embed-partial", "batch_index": 2, "attempts": 2, "chunks": 1, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T10:56:06.083710+00:00", "event": "embedding_skipped", "doc_id": "doc-embed-partial", "chunks": 3, "failed_batches": 1, "total_batches": 3}
+{"timestamp": "2026-04-26T10:56:06.098727+00:00", "event": "completed", "job_id": "job-fd2184f54499", "doc_id": "doc-embed-partial", "attempt": 1, "duration_s": 0.104, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:06.157797+00:00", "event": "started", "job_id": "job-b2c591288f42", "doc_id": "doc-tenant-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ynvxyi55\\tenant-a.docx"}
+{"timestamp": "2026-04-26T10:56:06.164607+00:00", "event": "state_changed", "job_id": "job-b2c591288f42", "doc_id": "doc-tenant-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.177740+00:00", "event": "state_changed", "job_id": "job-b2c591288f42", "doc_id": "doc-tenant-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.183318+00:00", "event": "state_changed", "job_id": "job-b2c591288f42", "doc_id": "doc-tenant-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.195309+00:00", "event": "completed", "job_id": "job-b2c591288f42", "doc_id": "doc-tenant-a", "attempt": 1, "duration_s": 0.037, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:06.208205+00:00", "event": "started", "job_id": "job-221d03ed06d5", "doc_id": "doc-tenant-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ynvxyi55\\tenant-b.docx"}
+{"timestamp": "2026-04-26T10:56:06.213953+00:00", "event": "state_changed", "job_id": "job-221d03ed06d5", "doc_id": "doc-tenant-b", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.226143+00:00", "event": "state_changed", "job_id": "job-221d03ed06d5", "doc_id": "doc-tenant-b", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.232032+00:00", "event": "state_changed", "job_id": "job-221d03ed06d5", "doc_id": "doc-tenant-b", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.244368+00:00", "event": "completed", "job_id": "job-221d03ed06d5", "doc_id": "doc-tenant-b", "attempt": 1, "duration_s": 0.036, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:06.319476+00:00", "event": "started", "job_id": "job-1f7389e01d06", "doc_id": "pdf-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-21js_ebd\\sample.pdf"}
+{"timestamp": "2026-04-26T10:56:06.327496+00:00", "event": "state_changed", "job_id": "job-1f7389e01d06", "doc_id": "pdf-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.340105+00:00", "event": "state_changed", "job_id": "job-1f7389e01d06", "doc_id": "pdf-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.346465+00:00", "event": "state_changed", "job_id": "job-1f7389e01d06", "doc_id": "pdf-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.358976+00:00", "event": "completed", "job_id": "job-1f7389e01d06", "doc_id": "pdf-001", "attempt": 1, "duration_s": 0.04, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T10:56:06.416759+00:00", "event": "started", "job_id": "job-b524b526d976", "doc_id": "pdf-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ns_jlwbt\\sample.pdf"}
+{"timestamp": "2026-04-26T10:56:06.425085+00:00", "event": "state_changed", "job_id": "job-b524b526d976", "doc_id": "pdf-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.438573+00:00", "event": "state_changed", "job_id": "job-b524b526d976", "doc_id": "pdf-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.445005+00:00", "event": "state_changed", "job_id": "job-b524b526d976", "doc_id": "pdf-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.458912+00:00", "event": "completed", "job_id": "job-b524b526d976", "doc_id": "pdf-002", "attempt": 1, "duration_s": 0.042, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T10:56:06.518062+00:00", "event": "started", "job_id": "job-f694b31e36d9", "doc_id": "doc-quota-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xym7z0nv\\quota-a.docx"}
+{"timestamp": "2026-04-26T10:56:06.526373+00:00", "event": "state_changed", "job_id": "job-f694b31e36d9", "doc_id": "doc-quota-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.538441+00:00", "event": "state_changed", "job_id": "job-f694b31e36d9", "doc_id": "doc-quota-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.545631+00:00", "event": "state_changed", "job_id": "job-f694b31e36d9", "doc_id": "doc-quota-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.557655+00:00", "event": "completed", "job_id": "job-f694b31e36d9", "doc_id": "doc-quota-a", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:06.615884+00:00", "event": "started", "job_id": "job-64d633d58b0f", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-qkuuer97\\revision.docx"}
+{"timestamp": "2026-04-26T10:56:06.623909+00:00", "event": "state_changed", "job_id": "job-64d633d58b0f", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.634926+00:00", "event": "state_changed", "job_id": "job-64d633d58b0f", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.642970+00:00", "event": "state_changed", "job_id": "job-64d633d58b0f", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.655184+00:00", "event": "completed", "job_id": "job-64d633d58b0f", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.039, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:06.667677+00:00", "event": "started", "job_id": "job-4c525904760e", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-qkuuer97\\revision.docx"}
+{"timestamp": "2026-04-26T10:56:06.676470+00:00", "event": "state_changed", "job_id": "job-4c525904760e", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.690382+00:00", "event": "state_changed", "job_id": "job-4c525904760e", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.697071+00:00", "event": "state_changed", "job_id": "job-4c525904760e", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.709030+00:00", "event": "completed", "job_id": "job-4c525904760e", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.041, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:06.769228+00:00", "event": "started", "job_id": "job-50a49e8b8c26", "doc_id": "doc-metrics-ok", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xtceuy92\\metrics-ok.docx"}
+{"timestamp": "2026-04-26T10:56:06.777621+00:00", "event": "state_changed", "job_id": "job-50a49e8b8c26", "doc_id": "doc-metrics-ok", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.790600+00:00", "event": "state_changed", "job_id": "job-50a49e8b8c26", "doc_id": "doc-metrics-ok", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.799001+00:00", "event": "state_changed", "job_id": "job-50a49e8b8c26", "doc_id": "doc-metrics-ok", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.814313+00:00", "event": "completed", "job_id": "job-50a49e8b8c26", "doc_id": "doc-metrics-ok", "attempt": 1, "duration_s": 0.045, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:06.826575+00:00", "event": "started", "job_id": "job-0896390435cd", "doc_id": "doc-metrics-fail", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xtceuy92\\missing-metrics.docx"}
+{"timestamp": "2026-04-26T10:56:06.833142+00:00", "event": "state_changed", "job_id": "job-0896390435cd", "doc_id": "doc-metrics-fail", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.842065+00:00", "event": "failed", "job_id": "job-0896390435cd", "doc_id": "doc-metrics-fail", "attempt": 1, "error": "[Errno 2] No such file or directory: 'C:\\\\Users\\\\jiaxi\\\\AppData\\\\Local\\\\Temp\\\\parsecore-tests-xtceuy92\\\\missing-metrics.docx'"}
+{"timestamp": "2026-04-26T10:56:06.901012+00:00", "event": "started", "job_id": "job-a134b93542f0", "doc_id": "doc-fallback", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-7vyhq53z\\search-fallback.docx"}
+{"timestamp": "2026-04-26T10:56:06.909839+00:00", "event": "state_changed", "job_id": "job-a134b93542f0", "doc_id": "doc-fallback", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:06.924095+00:00", "event": "state_changed", "job_id": "job-a134b93542f0", "doc_id": "doc-fallback", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:06.930054+00:00", "event": "state_changed", "job_id": "job-a134b93542f0", "doc_id": "doc-fallback", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:06.930717+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 1, "max_attempts": 3, "delay_s": 0.05, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:56:06.982307+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 2, "max_attempts": 3, "delay_s": 0.1, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:56:07.083755+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-fallback", "batch_index": 1, "attempts": 3, "chunks": 2, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:56:07.085269+00:00", "event": "embedding_skipped", "doc_id": "doc-fallback", "chunks": 2, "failed_batches": 1, "total_batches": 1}
+{"timestamp": "2026-04-26T10:56:07.103050+00:00", "event": "completed", "job_id": "job-a134b93542f0", "doc_id": "doc-fallback", "attempt": 1, "duration_s": 0.202, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:07.108265+00:00", "event": "search_embedding_skipped", "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T10:56:07.174493+00:00", "event": "started", "job_id": "job-a95ac9c96430", "doc_id": "doc-hybrid", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-tobc9ozo\\search-hybrid.docx"}
+{"timestamp": "2026-04-26T10:56:07.181601+00:00", "event": "state_changed", "job_id": "job-a95ac9c96430", "doc_id": "doc-hybrid", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.195662+00:00", "event": "state_changed", "job_id": "job-a95ac9c96430", "doc_id": "doc-hybrid", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.202297+00:00", "event": "state_changed", "job_id": "job-a95ac9c96430", "doc_id": "doc-hybrid", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.214385+00:00", "event": "completed", "job_id": "job-a95ac9c96430", "doc_id": "doc-hybrid", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:07.282909+00:00", "event": "started", "job_id": "job-5f5ae01d9680", "doc_id": "doc-search", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-m9tih6qs\\search.docx"}
+{"timestamp": "2026-04-26T10:56:07.290921+00:00", "event": "state_changed", "job_id": "job-5f5ae01d9680", "doc_id": "doc-search", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.302227+00:00", "event": "state_changed", "job_id": "job-5f5ae01d9680", "doc_id": "doc-search", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.310259+00:00", "event": "state_changed", "job_id": "job-5f5ae01d9680", "doc_id": "doc-search", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.325026+00:00", "event": "completed", "job_id": "job-5f5ae01d9680", "doc_id": "doc-search", "attempt": 1, "duration_s": 0.042, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:07.399516+00:00", "event": "started", "job_id": "job-098ca4e8ca5f", "doc_id": "doc-old", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-pxamg839\\old-job.docx"}
+{"timestamp": "2026-04-26T10:56:07.407744+00:00", "event": "state_changed", "job_id": "job-098ca4e8ca5f", "doc_id": "doc-old", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.419440+00:00", "event": "state_changed", "job_id": "job-098ca4e8ca5f", "doc_id": "doc-old", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.428410+00:00", "event": "state_changed", "job_id": "job-098ca4e8ca5f", "doc_id": "doc-old", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.440411+00:00", "event": "completed", "job_id": "job-098ca4e8ca5f", "doc_id": "doc-old", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:07.500647+00:00", "event": "started", "job_id": "job-bf9457d91c78", "doc_id": "doc-embed", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-3erl7six\\embed.docx"}
+{"timestamp": "2026-04-26T10:56:07.509050+00:00", "event": "state_changed", "job_id": "job-bf9457d91c78", "doc_id": "doc-embed", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.522314+00:00", "event": "state_changed", "job_id": "job-bf9457d91c78", "doc_id": "doc-embed", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.528821+00:00", "event": "state_changed", "job_id": "job-bf9457d91c78", "doc_id": "doc-embed", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.541934+00:00", "event": "completed", "job_id": "job-bf9457d91c78", "doc_id": "doc-embed", "attempt": 1, "duration_s": 0.041, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:07.601126+00:00", "event": "started", "job_id": "job-55a1a915ef38", "doc_id": "doc-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-868yrgje\\spec.docx"}
+{"timestamp": "2026-04-26T10:56:07.608852+00:00", "event": "state_changed", "job_id": "job-55a1a915ef38", "doc_id": "doc-001", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.621695+00:00", "event": "state_changed", "job_id": "job-55a1a915ef38", "doc_id": "doc-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.629213+00:00", "event": "state_changed", "job_id": "job-55a1a915ef38", "doc_id": "doc-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.643317+00:00", "event": "completed", "job_id": "job-55a1a915ef38", "doc_id": "doc-001", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:07.707991+00:00", "event": "started", "job_id": "job-ad56f82f6314", "doc_id": "doc-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-485xit0a\\manual.docx"}
+{"timestamp": "2026-04-26T10:56:07.714041+00:00", "event": "state_changed", "job_id": "job-ad56f82f6314", "doc_id": "doc-002", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.727956+00:00", "event": "state_changed", "job_id": "job-ad56f82f6314", "doc_id": "doc-002", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.734748+00:00", "event": "state_changed", "job_id": "job-ad56f82f6314", "doc_id": "doc-002", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.747674+00:00", "event": "completed", "job_id": "job-ad56f82f6314", "doc_id": "doc-002", "attempt": 1, "duration_s": 0.039, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:07.817323+00:00", "event": "started", "job_id": "job-7ca2255e5555", "doc_id": "doc-ocr", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-n4l0ge35\\ocr.docx"}
+{"timestamp": "2026-04-26T10:56:07.825371+00:00", "event": "state_changed", "job_id": "job-7ca2255e5555", "doc_id": "doc-ocr", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.836085+00:00", "event": "state_changed", "job_id": "job-7ca2255e5555", "doc_id": "doc-ocr", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.844210+00:00", "event": "state_changed", "job_id": "job-7ca2255e5555", "doc_id": "doc-ocr", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.851775+00:00", "event": "completed", "job_id": "job-7ca2255e5555", "doc_id": "doc-ocr", "attempt": 1, "duration_s": 0.035, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T10:56:07.910923+00:00", "event": "started", "job_id": "job-b36371fade60", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-kx0sv2m1\\rerun.docx"}
+{"timestamp": "2026-04-26T10:56:07.919342+00:00", "event": "state_changed", "job_id": "job-b36371fade60", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.932261+00:00", "event": "state_changed", "job_id": "job-b36371fade60", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.939257+00:00", "event": "state_changed", "job_id": "job-b36371fade60", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.950190+00:00", "event": "completed", "job_id": "job-b36371fade60", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.039, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:07.960687+00:00", "event": "started", "job_id": "job-3aa8b867b2a2", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-kx0sv2m1\\missing.docx"}
+{"timestamp": "2026-04-26T10:56:07.966329+00:00", "event": "state_changed", "job_id": "job-3aa8b867b2a2", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:07.967858+00:00", "event": "reused_blocks", "doc_id": "doc-rerun", "blocks": 3}
+{"timestamp": "2026-04-26T10:56:07.975613+00:00", "event": "state_changed", "job_id": "job-3aa8b867b2a2", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:07.983805+00:00", "event": "state_changed", "job_id": "job-3aa8b867b2a2", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:07.996454+00:00", "event": "completed", "job_id": "job-3aa8b867b2a2", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.035, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:08.060262+00:00", "event": "started", "job_id": "job-ee5583a8828f", "doc_id": "doc-dash-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-kwy6ob4w\\dash-a.docx"}
+{"timestamp": "2026-04-26T10:56:08.066013+00:00", "event": "state_changed", "job_id": "job-ee5583a8828f", "doc_id": "doc-dash-a", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:08.081199+00:00", "event": "state_changed", "job_id": "job-ee5583a8828f", "doc_id": "doc-dash-a", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:08.088046+00:00", "event": "state_changed", "job_id": "job-ee5583a8828f", "doc_id": "doc-dash-a", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:08.100072+00:00", "event": "completed", "job_id": "job-ee5583a8828f", "doc_id": "doc-dash-a", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:08.113112+00:00", "event": "started", "job_id": "job-7a40b260f660", "doc_id": "doc-dash-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-kwy6ob4w\\dash-b.docx"}
+{"timestamp": "2026-04-26T10:56:08.119123+00:00", "event": "state_changed", "job_id": "job-7a40b260f660", "doc_id": "doc-dash-b", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:08.129778+00:00", "event": "state_changed", "job_id": "job-7a40b260f660", "doc_id": "doc-dash-b", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:08.136811+00:00", "event": "state_changed", "job_id": "job-7a40b260f660", "doc_id": "doc-dash-b", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:08.149660+00:00", "event": "completed", "job_id": "job-7a40b260f660", "doc_id": "doc-dash-b", "attempt": 1, "duration_s": 0.036, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T10:56:08.232682+00:00", "event": "started", "job_id": "job-ad90b3125563", "doc_id": "doc-worker-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-2rx3nufc\\worker.docx"}
+{"timestamp": "2026-04-26T10:56:08.250461+00:00", "event": "state_changed", "job_id": "job-ad90b3125563", "doc_id": "doc-worker-001", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:08.259587+00:00", "event": "state_changed", "job_id": "job-ad90b3125563", "doc_id": "doc-worker-001", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:08.275827+00:00", "event": "completed", "job_id": "job-ad90b3125563", "doc_id": "doc-worker-001", "attempt": 1, "duration_s": 0.043, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T10:56:14.030745+00:00", "event": "started", "job_id": "job-9b4ad1604815", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\36d65cd6b61346e28e97dbaf829646de.pdf"}
+{"timestamp": "2026-04-26T10:56:14.035579+00:00", "event": "state_changed", "job_id": "job-9b4ad1604815", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T10:56:52.884677+00:00", "event": "state_changed", "job_id": "job-9b4ad1604815", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T10:56:52.900905+00:00", "event": "state_changed", "job_id": "job-9b4ad1604815", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T10:56:53.093537+00:00", "event": "completed", "job_id": "job-9b4ad1604815", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "duration_s": 39.063, "blocks": 1266, "chunks": 1266}
+{"timestamp": "2026-04-26T10:56:53.133116+00:00", "event": "started", "job_id": "job-78d86fd3392d", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\36d65cd6b61346e28e97dbaf829646de.pdf"}
+{"timestamp": "2026-04-26T10:56:53.138633+00:00", "event": "state_changed", "job_id": "job-78d86fd3392d", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T10:57:31.867087+00:00", "event": "state_changed", "job_id": "job-78d86fd3392d", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T10:57:31.879469+00:00", "event": "state_changed", "job_id": "job-78d86fd3392d", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T10:57:31.948807+00:00", "event": "completed", "job_id": "job-78d86fd3392d", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "duration_s": 38.816, "blocks": 1233, "chunks": 1233}
+{"timestamp": "2026-04-26T10:57:31.998239+00:00", "event": "started", "job_id": "job-f400746496bc", "doc_id": "regression:25-51-06.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\25-51-06.pdf"}
+{"timestamp": "2026-04-26T10:57:32.005448+00:00", "event": "state_changed", "job_id": "job-f400746496bc", "doc_id": "regression:25-51-06.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T10:59:18.809168+00:00", "event": "started", "job_id": "job-41a2ec3dbde3", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\36d65cd6b61346e28e97dbaf829646de.pdf"}
+{"timestamp": "2026-04-26T10:59:18.815479+00:00", "event": "state_changed", "job_id": "job-41a2ec3dbde3", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T10:59:56.627774+00:00", "event": "state_changed", "job_id": "job-41a2ec3dbde3", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T10:59:56.638272+00:00", "event": "state_changed", "job_id": "job-41a2ec3dbde3", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T10:59:56.705504+00:00", "event": "completed", "job_id": "job-41a2ec3dbde3", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "duration_s": 37.896, "blocks": 1266, "chunks": 1266}
+{"timestamp": "2026-04-26T10:59:56.747255+00:00", "event": "started", "job_id": "job-d8abbc0740cf", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\36d65cd6b61346e28e97dbaf829646de.pdf"}
+{"timestamp": "2026-04-26T10:59:56.753256+00:00", "event": "state_changed", "job_id": "job-d8abbc0740cf", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T11:00:46.692474+00:00", "event": "state_changed", "job_id": "job-d8abbc0740cf", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T11:00:46.709603+00:00", "event": "state_changed", "job_id": "job-d8abbc0740cf", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T11:00:46.806012+00:00", "event": "completed", "job_id": "job-d8abbc0740cf", "doc_id": "regression:36d65cd6b61346e28e97dbaf829646de.pdf", "attempt": 1, "duration_s": 50.059, "blocks": 1233, "chunks": 1233}
+{"timestamp": "2026-04-26T11:00:46.868745+00:00", "event": "started", "job_id": "job-27e241b6d492", "doc_id": "regression:25-51-06.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\25-51-06.pdf"}
+{"timestamp": "2026-04-26T11:00:46.875781+00:00", "event": "state_changed", "job_id": "job-27e241b6d492", "doc_id": "regression:25-51-06.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T11:03:12.699125+00:00", "event": "state_changed", "job_id": "job-27e241b6d492", "doc_id": "regression:25-51-06.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T11:03:12.714285+00:00", "event": "state_changed", "job_id": "job-27e241b6d492", "doc_id": "regression:25-51-06.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T11:03:12.793840+00:00", "event": "completed", "job_id": "job-27e241b6d492", "doc_id": "regression:25-51-06.pdf", "attempt": 1, "duration_s": 145.925, "blocks": 880, "chunks": 880}
+{"timestamp": "2026-04-26T11:03:12.844752+00:00", "event": "started", "job_id": "job-e8ef39b7bcc9", "doc_id": "regression:飞行运行手册第二版R2(2021-04-06）.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\飞行运行手册第二版R2(2021-04-06）.pdf"}
+{"timestamp": "2026-04-26T11:03:12.852955+00:00", "event": "state_changed", "job_id": "job-e8ef39b7bcc9", "doc_id": "regression:飞行运行手册第二版R2(2021-04-06）.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T11:04:48.904423+00:00", "event": "state_changed", "job_id": "job-e8ef39b7bcc9", "doc_id": "regression:飞行运行手册第二版R2(2021-04-06）.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T11:04:48.924930+00:00", "event": "state_changed", "job_id": "job-e8ef39b7bcc9", "doc_id": "regression:飞行运行手册第二版R2(2021-04-06）.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T11:04:49.145421+00:00", "event": "completed", "job_id": "job-e8ef39b7bcc9", "doc_id": "regression:飞行运行手册第二版R2(2021-04-06）.pdf", "attempt": 1, "duration_s": 96.301, "blocks": 1866, "chunks": 1866}
+{"timestamp": "2026-04-26T11:04:49.233871+00:00", "event": "started", "job_id": "job-69214077ae55", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf"}
+{"timestamp": "2026-04-26T11:04:49.240585+00:00", "event": "state_changed", "job_id": "job-69214077ae55", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:02.748816+00:00", "event": "started", "job_id": "job-bcab9f081b82", "doc_id": "doc-q-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-sqvnbib7\\quota-a.docx"}
+{"timestamp": "2026-04-26T11:14:02.758293+00:00", "event": "state_changed", "job_id": "job-bcab9f081b82", "doc_id": "doc-q-1", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:02.772057+00:00", "event": "state_changed", "job_id": "job-bcab9f081b82", "doc_id": "doc-q-1", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:02.778076+00:00", "event": "state_changed", "job_id": "job-bcab9f081b82", "doc_id": "doc-q-1", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:02.789258+00:00", "event": "completed", "job_id": "job-bcab9f081b82", "doc_id": "doc-q-1", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:03.119159+00:00", "event": "started", "job_id": "job-859841af5beb", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-x_0ei44x\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:03.125289+00:00", "event": "state_changed", "job_id": "job-859841af5beb", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.147004+00:00", "event": "state_changed", "job_id": "job-859841af5beb", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.155038+00:00", "event": "state_changed", "job_id": "job-859841af5beb", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.167830+00:00", "event": "completed", "job_id": "job-859841af5beb", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.049, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:03.267629+00:00", "event": "started", "job_id": "job-4c4828d4aef0", "doc_id": "doc-api-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-x_0ei44x\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:03.275883+00:00", "event": "state_changed", "job_id": "job-4c4828d4aef0", "doc_id": "doc-api-001", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.289438+00:00", "event": "state_changed", "job_id": "job-4c4828d4aef0", "doc_id": "doc-api-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.295553+00:00", "event": "state_changed", "job_id": "job-4c4828d4aef0", "doc_id": "doc-api-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.312606+00:00", "event": "completed", "job_id": "job-4c4828d4aef0", "doc_id": "doc-api-001", "attempt": 1, "duration_s": 0.045, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:03.400922+00:00", "event": "started", "job_id": "job-7bfeaf3adfd4", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpvtqnpi4f.docx"}
+{"timestamp": "2026-04-26T11:14:03.411497+00:00", "event": "state_changed", "job_id": "job-7bfeaf3adfd4", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.429027+00:00", "event": "state_changed", "job_id": "job-7bfeaf3adfd4", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.439674+00:00", "event": "state_changed", "job_id": "job-7bfeaf3adfd4", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.458211+00:00", "event": "completed", "job_id": "job-7bfeaf3adfd4", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.058, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:03.480049+00:00", "event": "started", "job_id": "job-53cc43e58cb0", "doc_id": "compat-alias", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpb50yywwi.docx"}
+{"timestamp": "2026-04-26T11:14:03.488944+00:00", "event": "state_changed", "job_id": "job-53cc43e58cb0", "doc_id": "compat-alias", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.505698+00:00", "event": "state_changed", "job_id": "job-53cc43e58cb0", "doc_id": "compat-alias", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.512283+00:00", "event": "state_changed", "job_id": "job-53cc43e58cb0", "doc_id": "compat-alias", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.524862+00:00", "event": "completed", "job_id": "job-53cc43e58cb0", "doc_id": "compat-alias", "attempt": 1, "duration_s": 0.045, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:03.592589+00:00", "event": "started", "job_id": "job-d9cc664b5ead", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpu5o5e5ut.pdf"}
+{"timestamp": "2026-04-26T11:14:03.602952+00:00", "event": "state_changed", "job_id": "job-d9cc664b5ead", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.751197+00:00", "event": "state_changed", "job_id": "job-d9cc664b5ead", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.761492+00:00", "event": "state_changed", "job_id": "job-d9cc664b5ead", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.776567+00:00", "event": "completed", "job_id": "job-d9cc664b5ead", "doc_id": "compat", "attempt": 1, "duration_s": 0.184, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:03.907384+00:00", "event": "started", "job_id": "job-7d725e9fb25b", "doc_id": "quota", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpxaywclrb.docx"}
+{"timestamp": "2026-04-26T11:14:03.913162+00:00", "event": "state_changed", "job_id": "job-7d725e9fb25b", "doc_id": "quota", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:03.924916+00:00", "event": "state_changed", "job_id": "job-7d725e9fb25b", "doc_id": "quota", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:03.930215+00:00", "event": "state_changed", "job_id": "job-7d725e9fb25b", "doc_id": "quota", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:03.941545+00:00", "event": "completed", "job_id": "job-7d725e9fb25b", "doc_id": "quota", "attempt": 1, "duration_s": 0.034, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:04.008393+00:00", "event": "started", "job_id": "job-82d1d155b0c8", "doc_id": "compat", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpfjvl32ni.docx"}
+{"timestamp": "2026-04-26T11:14:04.017448+00:00", "event": "state_changed", "job_id": "job-82d1d155b0c8", "doc_id": "compat", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.032671+00:00", "event": "state_changed", "job_id": "job-82d1d155b0c8", "doc_id": "compat", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.041475+00:00", "event": "state_changed", "job_id": "job-82d1d155b0c8", "doc_id": "compat", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.057360+00:00", "event": "completed", "job_id": "job-82d1d155b0c8", "doc_id": "compat", "attempt": 1, "duration_s": 0.049, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.146060+00:00", "event": "started", "job_id": "job-3623916ef284", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpebiug62k.docx"}
+{"timestamp": "2026-04-26T11:14:04.156257+00:00", "event": "state_changed", "job_id": "job-3623916ef284", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.170228+00:00", "event": "state_changed", "job_id": "job-3623916ef284", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.178504+00:00", "event": "state_changed", "job_id": "job-3623916ef284", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.194379+00:00", "event": "completed", "job_id": "job-3623916ef284", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.048, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.255369+00:00", "event": "started", "job_id": "job-fbb033992680", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmpkj6ddcw7.pdf"}
+{"timestamp": "2026-04-26T11:14:04.261830+00:00", "event": "state_changed", "job_id": "job-fbb033992680", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.393733+00:00", "event": "state_changed", "job_id": "job-fbb033992680", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.401512+00:00", "event": "state_changed", "job_id": "job-fbb033992680", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.413082+00:00", "event": "completed", "job_id": "job-fbb033992680", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.158, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.431655+00:00", "event": "started", "job_id": "job-e04a94a8f42f", "doc_id": "compat-upload", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\tmplwsgyxv9.pdf"}
+{"timestamp": "2026-04-26T11:14:04.442005+00:00", "event": "state_changed", "job_id": "job-e04a94a8f42f", "doc_id": "compat-upload", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.462570+00:00", "event": "state_changed", "job_id": "job-e04a94a8f42f", "doc_id": "compat-upload", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.470297+00:00", "event": "state_changed", "job_id": "job-e04a94a8f42f", "doc_id": "compat-upload", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.481462+00:00", "event": "completed", "job_id": "job-e04a94a8f42f", "doc_id": "compat-upload", "attempt": 1, "duration_s": 0.05, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.575273+00:00", "event": "started", "job_id": "job-cc655df21122", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-jpurp9n4\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:04.586065+00:00", "event": "state_changed", "job_id": "job-cc655df21122", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.620276+00:00", "event": "state_changed", "job_id": "job-cc655df21122", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.628156+00:00", "event": "state_changed", "job_id": "job-cc655df21122", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.642077+00:00", "event": "completed", "job_id": "job-cc655df21122", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.067, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.662631+00:00", "event": "started", "job_id": "job-2f7cc7c89e8c", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-jpurp9n4\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:04.670738+00:00", "event": "state_changed", "job_id": "job-2f7cc7c89e8c", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.673459+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T11:14:04.679648+00:00", "event": "state_changed", "job_id": "job-2f7cc7c89e8c", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.687110+00:00", "event": "state_changed", "job_id": "job-2f7cc7c89e8c", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.698648+00:00", "event": "completed", "job_id": "job-2f7cc7c89e8c", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.036, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.725999+00:00", "event": "started", "job_id": "job-579795c2e4e0", "doc_id": "doc-api-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-jpurp9n4\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:04.734695+00:00", "event": "state_changed", "job_id": "job-579795c2e4e0", "doc_id": "doc-api-002", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.736306+00:00", "event": "reused_blocks", "doc_id": "doc-api-002", "blocks": 3}
+{"timestamp": "2026-04-26T11:14:04.746059+00:00", "event": "state_changed", "job_id": "job-579795c2e4e0", "doc_id": "doc-api-002", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.752194+00:00", "event": "reused_chunks", "doc_id": "doc-api-002", "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.758922+00:00", "event": "state_changed", "job_id": "job-579795c2e4e0", "doc_id": "doc-api-002", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.773250+00:00", "event": "completed", "job_id": "job-579795c2e4e0", "doc_id": "doc-api-002", "attempt": 1, "duration_s": 0.047, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:04.913796+00:00", "event": "started", "job_id": "job-314b8bc9a192", "doc_id": "doc-dashboard", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-1j672xyw\\test-dashboard.docx"}
+{"timestamp": "2026-04-26T11:14:04.921900+00:00", "event": "state_changed", "job_id": "job-314b8bc9a192", "doc_id": "doc-dashboard", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:04.936003+00:00", "event": "state_changed", "job_id": "job-314b8bc9a192", "doc_id": "doc-dashboard", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:04.944585+00:00", "event": "state_changed", "job_id": "job-314b8bc9a192", "doc_id": "doc-dashboard", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:04.959512+00:00", "event": "completed", "job_id": "job-314b8bc9a192", "doc_id": "doc-dashboard", "attempt": 1, "duration_s": 0.046, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:05.030088+00:00", "event": "started", "job_id": "job-2819c55f33a6", "doc_id": "doc-ocr-events", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-_crhfj0w\\ocr-events.docx"}
+{"timestamp": "2026-04-26T11:14:05.037979+00:00", "event": "state_changed", "job_id": "job-2819c55f33a6", "doc_id": "doc-ocr-events", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:05.058459+00:00", "event": "state_changed", "job_id": "job-2819c55f33a6", "doc_id": "doc-ocr-events", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:05.063324+00:00", "event": "state_changed", "job_id": "job-2819c55f33a6", "doc_id": "doc-ocr-events", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:05.085742+00:00", "event": "completed", "job_id": "job-2819c55f33a6", "doc_id": "doc-ocr-events", "attempt": 1, "duration_s": 0.055, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T11:14:05.173485+00:00", "event": "started", "job_id": "job-b0ff9dda3d49", "doc_id": "doc-event-1", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-mzzritqd\\doc1.docx"}
+{"timestamp": "2026-04-26T11:14:05.181629+00:00", "event": "state_changed", "job_id": "job-b0ff9dda3d49", "doc_id": "doc-event-1", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:05.193790+00:00", "event": "state_changed", "job_id": "job-b0ff9dda3d49", "doc_id": "doc-event-1", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:05.201040+00:00", "event": "state_changed", "job_id": "job-b0ff9dda3d49", "doc_id": "doc-event-1", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:05.212872+00:00", "event": "completed", "job_id": "job-b0ff9dda3d49", "doc_id": "doc-event-1", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:05.280442+00:00", "event": "started", "job_id": "job-cb94cc1f980f", "doc_id": "doc-metrics", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-tny8uu8i\\test-metrics.docx"}
+{"timestamp": "2026-04-26T11:14:05.287720+00:00", "event": "state_changed", "job_id": "job-cb94cc1f980f", "doc_id": "doc-metrics", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:05.301602+00:00", "event": "state_changed", "job_id": "job-cb94cc1f980f", "doc_id": "doc-metrics", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:05.308300+00:00", "event": "state_changed", "job_id": "job-cb94cc1f980f", "doc_id": "doc-metrics", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:05.321692+00:00", "event": "completed", "job_id": "job-cb94cc1f980f", "doc_id": "doc-metrics", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:05.399713+00:00", "event": "started", "job_id": "job-82a890a7c478", "doc_id": "doc-api-queue-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xir5r0mx\\queued.docx"}
+{"timestamp": "2026-04-26T11:14:05.410795+00:00", "event": "state_changed", "job_id": "job-82a890a7c478", "doc_id": "doc-api-queue-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:05.417859+00:00", "event": "state_changed", "job_id": "job-82a890a7c478", "doc_id": "doc-api-queue-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:05.428094+00:00", "event": "completed", "job_id": "job-82a890a7c478", "doc_id": "doc-api-queue-001", "attempt": 1, "duration_s": 0.028, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:06.252792+00:00", "event": "started", "job_id": "job-8c10ba20c322", "doc_id": "doc-tenant-iso", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-fn5h7ibl\\tenant-doc.docx"}
+{"timestamp": "2026-04-26T11:14:06.259946+00:00", "event": "state_changed", "job_id": "job-8c10ba20c322", "doc_id": "doc-tenant-iso", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.273457+00:00", "event": "state_changed", "job_id": "job-8c10ba20c322", "doc_id": "doc-tenant-iso", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.279045+00:00", "event": "state_changed", "job_id": "job-8c10ba20c322", "doc_id": "doc-tenant-iso", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.289452+00:00", "event": "completed", "job_id": "job-8c10ba20c322", "doc_id": "doc-tenant-iso", "attempt": 1, "duration_s": 0.037, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:06.354654+00:00", "event": "started", "job_id": "job-c9dffad159ab", "doc_id": "doc-embed-partial", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-4ecjtbts\\embed-partial.docx"}
+{"timestamp": "2026-04-26T11:14:06.360794+00:00", "event": "state_changed", "job_id": "job-c9dffad159ab", "doc_id": "doc-embed-partial", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.371926+00:00", "event": "state_changed", "job_id": "job-c9dffad159ab", "doc_id": "doc-embed-partial", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.377514+00:00", "event": "state_changed", "job_id": "job-c9dffad159ab", "doc_id": "doc-embed-partial", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.378086+00:00", "event": "embedding_retry", "doc_id": "doc-embed-partial", "batch_index": 2, "attempt": 1, "max_attempts": 2, "delay_s": 0.05, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T11:14:06.429672+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-embed-partial", "batch_index": 2, "attempts": 2, "chunks": 1, "error": "embedding unavailable for FAIL batch"}
+{"timestamp": "2026-04-26T11:14:06.430965+00:00", "event": "embedding_skipped", "doc_id": "doc-embed-partial", "chunks": 3, "failed_batches": 1, "total_batches": 3}
+{"timestamp": "2026-04-26T11:14:06.442077+00:00", "event": "completed", "job_id": "job-c9dffad159ab", "doc_id": "doc-embed-partial", "attempt": 1, "duration_s": 0.087, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:06.498644+00:00", "event": "started", "job_id": "job-20ce463bfb36", "doc_id": "doc-tenant-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-8liwac4a\\tenant-a.docx"}
+{"timestamp": "2026-04-26T11:14:06.505390+00:00", "event": "state_changed", "job_id": "job-20ce463bfb36", "doc_id": "doc-tenant-a", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.516257+00:00", "event": "state_changed", "job_id": "job-20ce463bfb36", "doc_id": "doc-tenant-a", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.522015+00:00", "event": "state_changed", "job_id": "job-20ce463bfb36", "doc_id": "doc-tenant-a", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.533000+00:00", "event": "completed", "job_id": "job-20ce463bfb36", "doc_id": "doc-tenant-a", "attempt": 1, "duration_s": 0.034, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:06.549198+00:00", "event": "started", "job_id": "job-eb061c8ba604", "doc_id": "doc-tenant-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-8liwac4a\\tenant-b.docx"}
+{"timestamp": "2026-04-26T11:14:06.555347+00:00", "event": "state_changed", "job_id": "job-eb061c8ba604", "doc_id": "doc-tenant-b", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.570729+00:00", "event": "state_changed", "job_id": "job-eb061c8ba604", "doc_id": "doc-tenant-b", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.577710+00:00", "event": "state_changed", "job_id": "job-eb061c8ba604", "doc_id": "doc-tenant-b", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.588794+00:00", "event": "completed", "job_id": "job-eb061c8ba604", "doc_id": "doc-tenant-b", "attempt": 1, "duration_s": 0.039, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:06.656803+00:00", "event": "started", "job_id": "job-68f0f41795d2", "doc_id": "pdf-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-syy1nc2a\\sample.pdf"}
+{"timestamp": "2026-04-26T11:14:06.662995+00:00", "event": "state_changed", "job_id": "job-68f0f41795d2", "doc_id": "pdf-001", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.678475+00:00", "event": "state_changed", "job_id": "job-68f0f41795d2", "doc_id": "pdf-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.686316+00:00", "event": "state_changed", "job_id": "job-68f0f41795d2", "doc_id": "pdf-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.701262+00:00", "event": "completed", "job_id": "job-68f0f41795d2", "doc_id": "pdf-001", "attempt": 1, "duration_s": 0.044, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T11:14:06.759367+00:00", "event": "started", "job_id": "job-804ab425f734", "doc_id": "pdf-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-z7z0xo_r\\sample.pdf"}
+{"timestamp": "2026-04-26T11:14:06.764967+00:00", "event": "state_changed", "job_id": "job-804ab425f734", "doc_id": "pdf-002", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.779138+00:00", "event": "state_changed", "job_id": "job-804ab425f734", "doc_id": "pdf-002", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.787321+00:00", "event": "state_changed", "job_id": "job-804ab425f734", "doc_id": "pdf-002", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.799541+00:00", "event": "completed", "job_id": "job-804ab425f734", "doc_id": "pdf-002", "attempt": 1, "duration_s": 0.04, "blocks": 4, "chunks": 4}
+{"timestamp": "2026-04-26T11:14:06.858888+00:00", "event": "started", "job_id": "job-642183c4a930", "doc_id": "doc-quota-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-rncsmq_u\\quota-a.docx"}
+{"timestamp": "2026-04-26T11:14:06.864634+00:00", "event": "state_changed", "job_id": "job-642183c4a930", "doc_id": "doc-quota-a", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.880193+00:00", "event": "state_changed", "job_id": "job-642183c4a930", "doc_id": "doc-quota-a", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.888931+00:00", "event": "state_changed", "job_id": "job-642183c4a930", "doc_id": "doc-quota-a", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:06.900387+00:00", "event": "completed", "job_id": "job-642183c4a930", "doc_id": "doc-quota-a", "attempt": 1, "duration_s": 0.041, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:06.965349+00:00", "event": "started", "job_id": "job-0da5aa085905", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ye1e_zz6\\revision.docx"}
+{"timestamp": "2026-04-26T11:14:06.973776+00:00", "event": "state_changed", "job_id": "job-0da5aa085905", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:06.988206+00:00", "event": "state_changed", "job_id": "job-0da5aa085905", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:06.995919+00:00", "event": "state_changed", "job_id": "job-0da5aa085905", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.007072+00:00", "event": "completed", "job_id": "job-0da5aa085905", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:07.018876+00:00", "event": "started", "job_id": "job-26c538c79445", "doc_id": "doc-003", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ye1e_zz6\\revision.docx"}
+{"timestamp": "2026-04-26T11:14:07.025128+00:00", "event": "state_changed", "job_id": "job-26c538c79445", "doc_id": "doc-003", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.040343+00:00", "event": "state_changed", "job_id": "job-26c538c79445", "doc_id": "doc-003", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.046827+00:00", "event": "state_changed", "job_id": "job-26c538c79445", "doc_id": "doc-003", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.060498+00:00", "event": "completed", "job_id": "job-26c538c79445", "doc_id": "doc-003", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:07.118935+00:00", "event": "started", "job_id": "job-66b444515449", "doc_id": "doc-metrics-ok", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xbhymtyv\\metrics-ok.docx"}
+{"timestamp": "2026-04-26T11:14:07.125934+00:00", "event": "state_changed", "job_id": "job-66b444515449", "doc_id": "doc-metrics-ok", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.139490+00:00", "event": "state_changed", "job_id": "job-66b444515449", "doc_id": "doc-metrics-ok", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.146001+00:00", "event": "state_changed", "job_id": "job-66b444515449", "doc_id": "doc-metrics-ok", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.158605+00:00", "event": "completed", "job_id": "job-66b444515449", "doc_id": "doc-metrics-ok", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:07.173076+00:00", "event": "started", "job_id": "job-3e63d38b379b", "doc_id": "doc-metrics-fail", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-xbhymtyv\\missing-metrics.docx"}
+{"timestamp": "2026-04-26T11:14:07.184390+00:00", "event": "state_changed", "job_id": "job-3e63d38b379b", "doc_id": "doc-metrics-fail", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.194160+00:00", "event": "failed", "job_id": "job-3e63d38b379b", "doc_id": "doc-metrics-fail", "attempt": 1, "error": "[Errno 2] No such file or directory: 'C:\\\\Users\\\\jiaxi\\\\AppData\\\\Local\\\\Temp\\\\parsecore-tests-xbhymtyv\\\\missing-metrics.docx'"}
+{"timestamp": "2026-04-26T11:14:07.258641+00:00", "event": "started", "job_id": "job-c257d97406c3", "doc_id": "doc-fallback", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-pn83w7l6\\search-fallback.docx"}
+{"timestamp": "2026-04-26T11:14:07.267504+00:00", "event": "state_changed", "job_id": "job-c257d97406c3", "doc_id": "doc-fallback", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.284487+00:00", "event": "state_changed", "job_id": "job-c257d97406c3", "doc_id": "doc-fallback", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.291983+00:00", "event": "state_changed", "job_id": "job-c257d97406c3", "doc_id": "doc-fallback", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.292878+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 1, "max_attempts": 3, "delay_s": 0.05, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T11:14:07.344560+00:00", "event": "embedding_retry", "doc_id": "doc-fallback", "batch_index": 1, "attempt": 2, "max_attempts": 3, "delay_s": 0.1, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T11:14:07.446400+00:00", "event": "embedding_batch_skipped", "doc_id": "doc-fallback", "batch_index": 1, "attempts": 3, "chunks": 2, "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T11:14:07.448065+00:00", "event": "embedding_skipped", "doc_id": "doc-fallback", "chunks": 2, "failed_batches": 1, "total_batches": 1}
+{"timestamp": "2026-04-26T11:14:07.460931+00:00", "event": "completed", "job_id": "job-c257d97406c3", "doc_id": "doc-fallback", "attempt": 1, "duration_s": 0.202, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:07.463210+00:00", "event": "search_embedding_skipped", "error": "embedding unavailable"}
+{"timestamp": "2026-04-26T11:14:07.523365+00:00", "event": "started", "job_id": "job-455733245b68", "doc_id": "doc-hybrid", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-1afjdben\\search-hybrid.docx"}
+{"timestamp": "2026-04-26T11:14:07.531653+00:00", "event": "state_changed", "job_id": "job-455733245b68", "doc_id": "doc-hybrid", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.544418+00:00", "event": "state_changed", "job_id": "job-455733245b68", "doc_id": "doc-hybrid", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.550893+00:00", "event": "state_changed", "job_id": "job-455733245b68", "doc_id": "doc-hybrid", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.563528+00:00", "event": "completed", "job_id": "job-455733245b68", "doc_id": "doc-hybrid", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:07.631876+00:00", "event": "started", "job_id": "job-07e0bee6fd35", "doc_id": "doc-search", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-7homgict\\search.docx"}
+{"timestamp": "2026-04-26T11:14:07.638765+00:00", "event": "state_changed", "job_id": "job-07e0bee6fd35", "doc_id": "doc-search", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.652300+00:00", "event": "state_changed", "job_id": "job-07e0bee6fd35", "doc_id": "doc-search", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.657882+00:00", "event": "state_changed", "job_id": "job-07e0bee6fd35", "doc_id": "doc-search", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.671741+00:00", "event": "completed", "job_id": "job-07e0bee6fd35", "doc_id": "doc-search", "attempt": 1, "duration_s": 0.04, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:07.745917+00:00", "event": "started", "job_id": "job-eaa83ef4d864", "doc_id": "doc-old", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-mw0usbs2\\old-job.docx"}
+{"timestamp": "2026-04-26T11:14:07.753728+00:00", "event": "state_changed", "job_id": "job-eaa83ef4d864", "doc_id": "doc-old", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.766029+00:00", "event": "state_changed", "job_id": "job-eaa83ef4d864", "doc_id": "doc-old", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.775101+00:00", "event": "state_changed", "job_id": "job-eaa83ef4d864", "doc_id": "doc-old", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.789619+00:00", "event": "completed", "job_id": "job-eaa83ef4d864", "doc_id": "doc-old", "attempt": 1, "duration_s": 0.044, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:07.845758+00:00", "event": "started", "job_id": "job-70e04f81b615", "doc_id": "doc-embed", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-4csxyren\\embed.docx"}
+{"timestamp": "2026-04-26T11:14:07.854105+00:00", "event": "state_changed", "job_id": "job-70e04f81b615", "doc_id": "doc-embed", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.864744+00:00", "event": "state_changed", "job_id": "job-70e04f81b615", "doc_id": "doc-embed", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.872413+00:00", "event": "state_changed", "job_id": "job-70e04f81b615", "doc_id": "doc-embed", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.885363+00:00", "event": "completed", "job_id": "job-70e04f81b615", "doc_id": "doc-embed", "attempt": 1, "duration_s": 0.04, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:07.940584+00:00", "event": "started", "job_id": "job-25b4cd88397d", "doc_id": "doc-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-ndgg8mew\\spec.docx"}
+{"timestamp": "2026-04-26T11:14:07.946903+00:00", "event": "state_changed", "job_id": "job-25b4cd88397d", "doc_id": "doc-001", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:07.962722+00:00", "event": "state_changed", "job_id": "job-25b4cd88397d", "doc_id": "doc-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:07.970677+00:00", "event": "state_changed", "job_id": "job-25b4cd88397d", "doc_id": "doc-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:07.986082+00:00", "event": "completed", "job_id": "job-25b4cd88397d", "doc_id": "doc-001", "attempt": 1, "duration_s": 0.045, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:08.047406+00:00", "event": "started", "job_id": "job-25dda1b1cfef", "doc_id": "doc-002", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-e69higah\\manual.docx"}
+{"timestamp": "2026-04-26T11:14:08.055675+00:00", "event": "state_changed", "job_id": "job-25dda1b1cfef", "doc_id": "doc-002", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.067520+00:00", "event": "state_changed", "job_id": "job-25dda1b1cfef", "doc_id": "doc-002", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.074432+00:00", "event": "state_changed", "job_id": "job-25dda1b1cfef", "doc_id": "doc-002", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.086299+00:00", "event": "completed", "job_id": "job-25dda1b1cfef", "doc_id": "doc-002", "attempt": 1, "duration_s": 0.039, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:08.154338+00:00", "event": "started", "job_id": "job-dc3b9b251bb6", "doc_id": "doc-ocr", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-3m169eam\\ocr.docx"}
+{"timestamp": "2026-04-26T11:14:08.160451+00:00", "event": "state_changed", "job_id": "job-dc3b9b251bb6", "doc_id": "doc-ocr", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.173490+00:00", "event": "state_changed", "job_id": "job-dc3b9b251bb6", "doc_id": "doc-ocr", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.182054+00:00", "event": "state_changed", "job_id": "job-dc3b9b251bb6", "doc_id": "doc-ocr", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.189683+00:00", "event": "completed", "job_id": "job-dc3b9b251bb6", "doc_id": "doc-ocr", "attempt": 1, "duration_s": 0.035, "blocks": 2, "chunks": 0}
+{"timestamp": "2026-04-26T11:14:08.250875+00:00", "event": "started", "job_id": "job-54761fb4ef3a", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-b03v6z_9\\rerun.docx"}
+{"timestamp": "2026-04-26T11:14:08.256660+00:00", "event": "state_changed", "job_id": "job-54761fb4ef3a", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.270639+00:00", "event": "state_changed", "job_id": "job-54761fb4ef3a", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.278932+00:00", "event": "state_changed", "job_id": "job-54761fb4ef3a", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.293206+00:00", "event": "completed", "job_id": "job-54761fb4ef3a", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.042, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:08.309623+00:00", "event": "started", "job_id": "job-3df0645589d8", "doc_id": "doc-rerun", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-b03v6z_9\\missing.docx"}
+{"timestamp": "2026-04-26T11:14:08.323690+00:00", "event": "state_changed", "job_id": "job-3df0645589d8", "doc_id": "doc-rerun", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.327153+00:00", "event": "reused_blocks", "doc_id": "doc-rerun", "blocks": 3}
+{"timestamp": "2026-04-26T11:14:08.334614+00:00", "event": "state_changed", "job_id": "job-3df0645589d8", "doc_id": "doc-rerun", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.341624+00:00", "event": "state_changed", "job_id": "job-3df0645589d8", "doc_id": "doc-rerun", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.352691+00:00", "event": "completed", "job_id": "job-3df0645589d8", "doc_id": "doc-rerun", "attempt": 1, "duration_s": 0.044, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:14:08.416294+00:00", "event": "started", "job_id": "job-d5b7f6e17d95", "doc_id": "doc-dash-a", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-vdcv305b\\dash-a.docx"}
+{"timestamp": "2026-04-26T11:14:08.423141+00:00", "event": "state_changed", "job_id": "job-d5b7f6e17d95", "doc_id": "doc-dash-a", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.437568+00:00", "event": "state_changed", "job_id": "job-d5b7f6e17d95", "doc_id": "doc-dash-a", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.443690+00:00", "event": "state_changed", "job_id": "job-d5b7f6e17d95", "doc_id": "doc-dash-a", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.465543+00:00", "event": "completed", "job_id": "job-d5b7f6e17d95", "doc_id": "doc-dash-a", "attempt": 1, "duration_s": 0.049, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:08.486373+00:00", "event": "started", "job_id": "job-ba1af08159df", "doc_id": "doc-dash-b", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-vdcv305b\\dash-b.docx"}
+{"timestamp": "2026-04-26T11:14:08.493432+00:00", "event": "state_changed", "job_id": "job-ba1af08159df", "doc_id": "doc-dash-b", "state": "parsing"}
+{"timestamp": "2026-04-26T11:14:08.506358+00:00", "event": "state_changed", "job_id": "job-ba1af08159df", "doc_id": "doc-dash-b", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.512586+00:00", "event": "state_changed", "job_id": "job-ba1af08159df", "doc_id": "doc-dash-b", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.524787+00:00", "event": "completed", "job_id": "job-ba1af08159df", "doc_id": "doc-dash-b", "attempt": 1, "duration_s": 0.038, "blocks": 2, "chunks": 2}
+{"timestamp": "2026-04-26T11:14:08.594169+00:00", "event": "started", "job_id": "job-8037de10c71e", "doc_id": "doc-worker-001", "attempt": 1, "file_path": "C:\\Users\\jiaxi\\AppData\\Local\\Temp\\parsecore-tests-p6mm31rz\\worker.docx"}
+{"timestamp": "2026-04-26T11:14:08.607679+00:00", "event": "state_changed", "job_id": "job-8037de10c71e", "doc_id": "doc-worker-001", "state": "structuring"}
+{"timestamp": "2026-04-26T11:14:08.617089+00:00", "event": "state_changed", "job_id": "job-8037de10c71e", "doc_id": "doc-worker-001", "state": "embedding"}
+{"timestamp": "2026-04-26T11:14:08.627571+00:00", "event": "completed", "job_id": "job-8037de10c71e", "doc_id": "doc-worker-001", "attempt": 1, "duration_s": 0.033, "blocks": 3, "chunks": 3}
+{"timestamp": "2026-04-26T11:34:49.681520+00:00", "event": "started", "job_id": "job-4e0723906652", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "attempt": 1, "file_path": "D:\\app\\uploads\\CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf"}
+{"timestamp": "2026-04-26T11:34:49.686567+00:00", "event": "state_changed", "job_id": "job-4e0723906652", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "state": "parsing"}
+{"timestamp": "2026-04-26T11:41:44.385565+00:00", "event": "state_changed", "job_id": "job-4e0723906652", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "state": "structuring"}
+{"timestamp": "2026-04-26T11:41:44.405881+00:00", "event": "state_changed", "job_id": "job-4e0723906652", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "state": "embedding"}
+{"timestamp": "2026-04-26T11:41:44.503048+00:00", "event": "completed", "job_id": "job-4e0723906652", "doc_id": "regression:CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf", "attempt": 1, "duration_s": 414.822, "blocks": 3596, "chunks": 3596}

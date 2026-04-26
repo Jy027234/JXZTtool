@@ -304,6 +304,29 @@ def _cmd_check(args: argparse.Namespace) -> int:
             f" embedded_ratio={candidate_embedding.get('embedded_chunk_ratio', 0.0):.4f}"
             f" (baseline {baseline_embedding.get('embedded_chunk_ratio', 0.0):.4f})"
         )
+        if (
+            candidate_layout.get("ocr_attempted_pages", 0)
+            or baseline_layout.get("ocr_attempted_pages", 0)
+            or candidate_layout.get("ocr_total_elapsed_s", 0.0)
+            or baseline_layout.get("ocr_total_elapsed_s", 0.0)
+        ):
+            print(
+                f"[check][ocr] {fixture.name}"
+                f" layout_s={candidate_layout.get('layout_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('layout_elapsed_s', 0.0):.3f})"
+                f" ocr_total_s={candidate_layout.get('ocr_total_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_total_elapsed_s', 0.0):.3f})"
+                f" render_s={candidate_layout.get('ocr_render_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_render_elapsed_s', 0.0):.3f})"
+                f" call_s={candidate_layout.get('ocr_call_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_call_elapsed_s', 0.0):.3f})"
+                f" provider_s={candidate_layout.get('ocr_provider_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_provider_elapsed_s', 0.0):.3f})"
+                f" post_s={candidate_layout.get('ocr_postprocess_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_postprocess_elapsed_s', 0.0):.3f})"
+                f" max_page_ocr_s={candidate_layout.get('max_ocr_page_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('max_ocr_page_elapsed_s', 0.0):.3f})"
+            )
         failures.extend(
             _check_drift(name=fixture.name, baseline=base, candidate=candidate, args=args)
         )

@@ -46,10 +46,13 @@
 - [x] Block metadata `semantic_role` 收口（title/paragraph/table + toc/highlights/note/warning/caution/LEP）
 - [x] Chunk 透传 `semantic_role` 并持久化到 SQLite/Postgres
 - [x] 可选 embedding provider（OpenAI-compatible）接入 `STRUCTURING -> EMBEDDING -> index` 状态机
+- 说明：除 `openai-compatible` 外，现已补一条本地验证用 `fake` provider，直接复用现有 `FakeEmbeddingProvider` 产出确定性 1536 维向量，用于在无外部 key 的环境里跑通 `re-embed`、pgvector 落库和 hybrid search。
 - [x] embedding 失败降级为 `embedding_skipped` 事件，不中断主解析作业
 - [x] 结构重算模式 `options.mode = "rerun_chunks_only"`（复用已存 blocks 重算 chunk/embedding/index）
 - [x] embedding 覆盖率质量指标与 regression baseline 接线（`embedded_chunk_ratio` / `mean_embedding_dim_norm`）
 - [x] README 能力边界声明（明确 ParseCore 不承载 RAG/合规比对/宿主业务规则）
+- [x] jobcard 双跑资料与辅助脚本归档
+- [x] 默认自检门禁脚本与结论文档
 
 ### 未完成
 
@@ -57,10 +60,10 @@
 - 收口说明：解析栈已落齐 (1) pypdf 段落切分 + 多列页面文本重排，(2) 双通道 pdfplumber 表格识别，(3) 结构项 / 内联结构项 / TOC 条目切分，(4) 表格续行合并 / HIGHLIGHTS 变更日志合并，(5) 重复页眉页脚剥离 + 极短块合并，(6) CID 乱码 / 空白页自动转图走 RapidOCR 兜底，(7) 可选 LLM 边界精修 hook（仅对低置信段落生效），(8) 所有后处理项均可通过 `[[parsers]] options.post_process` 开关。`var/regression/suite.json` 6 个样本（含 OCR 兜底 + 多版本飞行手册 + 真实 CMM/27-81-17）作为门禁基线，`tools/regression_baseline.py check-suite` 默认 5 OK + 1 slow-tagged SKIP，`--include-tag slow` 可纳入慢样本；69 项单测覆盖含 PDF 各后处理子模块。残差结构差异（jobcard 双跑 raw/展示口径 Block 对位仍有页级块数差）已不再以“向 legacy 收敛”为目标——legacy 在 TOC/表格页常压成单块，向其收敛会降质，所以保留当前更细颗粒度的切分作为生产口径。
 - [x] 图片 OCR（含 PDF 坏页 OCR 兜底）
 - [x] Postgres + pgvector
-- 说明：`bootstrap.py` 已显式按 `database_url` scheme 路由 JobStore（`sqlite:///` → `SQLiteJobStore`，`postgresql://` / `postgres://` → 新增的 `PostgresJobStore`，`memory://`/空 → `InMemoryJobStore`，未知 scheme 直接 raise `ValueError`，避免静默降级）；`_build_index` 在 `index_mode in {pgvector, hybrid}` 且 URL 是 Postgres 时构造 `PgVectorIndex`，否则一律 `NullIndex()`。`PostgresJobStore` 与 SQLite 行为对齐（ISO 文本时间戳 + JSON 字段，`claim_next_job` 走 `FOR UPDATE SKIP LOCKED`）；`PgVectorIndex` 用 `pgvector` 扩展、`vector(dim)` 列、按 `doc_id` 维护索引。新增 `tests/test_bootstrap_routing.py`（路由分支单测）与 `tests/test_postgres_stores.py`（受 `PARSECORE_TEST_POSTGRES_URL` 环境变量门控的真实库 smoke 测）。
+- 说明：`bootstrap.py` 已显式按 `database_url` scheme 路由 JobStore（`sqlite:///` → `SQLiteJobStore`，`postgresql://` / `postgres://` → 新增的 `PostgresJobStore`，`memory://`/空 → `InMemoryJobStore`，未知 scheme 直接 raise `ValueError`，避免静默降级）；`_build_index` 在 `index_mode in {pgvector, hybrid}` 且 URL 是 Postgres 时构造 `PgVectorIndex`，否则一律 `NullIndex()`。`PostgresJobStore` 与 SQLite 行为对齐（ISO 文本时间戳 + JSON 字段，`claim_next_job` 走 `FOR UPDATE SKIP LOCKED`）；`PgVectorIndex` 用 `pgvector` 扩展、`vector(dim)` 列、按 `doc_id` 维护索引。新增 `tests/test_bootstrap_routing.py`（路由分支单测）与 `tests/test_postgres_stores.py`（受 `PARSECORE_TEST_POSTGRES_URL` 环境变量门控的真实库 smoke 测）。本轮进一步把容器运行面补齐：Docker 镜像安装 `storage` extras，`docker-compose.yml` 新增 `pgvector` profile 和 `parsecore-postgres` 服务，并允许通过 `PARSECORE_RUNTIME_CONFIG` 在 `parsecore.queue.toml`、`parsecore.pgvector.toml.example`、`parsecore.pgvector.fake-embedding.toml.example`、`parsecore.remote-http.toml.example` 之间切换；因此即使没有外部 embedding key，也能本地把 `chunk_embeddings` 与 hybrid search 路径跑通。
 - [x] 队列化 worker
-- [~] jobcard 仓库内双跑接入
-- 说明：解析入口已接到 ParseCore，双跑脚本已落到 jobcard backend；当前除按 store 记录比对外，也支持直接对任意文件路径做双跑，便于扩大样本覆盖。本轮已把 ParseCore 的 PDF 文本提取从“按页单块”提升为“按段落切分”，并在 ParseCore 与 jobcard 两侧统一到 `pypdf`；同一真实 PDF 当前基线为 1401 blocks / 1401 chunks，直接文件模式 raw 相似度为 0.9626，且对超长文本已切到按页加权的整体相似度口径，并已输出字段级、页面级、Block/Chunk 级差异摘要、索引命中差异摘要、Block 对位差异摘要、展示口径差异摘要和展示口径 Block 对位摘要。展示口径部分当前在 compare 层模拟“重复页眉页脚去重”后的用户可见文本，对该真实样本给出 0.9641 的展示相似度、legacy/ParseCore 分别有 246/247 页发生去重，长度差收敛到 -1356；展示口径 Block 对位部分在升级为页内动态规划匹配后，对同一样本给出平均对位相似度 0.2927、页级块数差异 221 页；raw Block 对位部分在同样升级后，则从旧的 0.3392 提升到 0.5419，页级块数差异仍为 215 页。这说明顺序错配已明显收敛，但真正的结构切段差异仍然显著；当前索引部分以 compare 层关键词命中探针表达 legacy embedding 状态、ParseCore chunk 可索引性和命中对比，不直接改动线上 Chroma 接线；另一个种子样本仍缺少实际上传文件。本轮进一步在报告里加入双方独立的结构质量指标和块数差异页面人工判读样本：同一真实 PDF 下 legacy 侧 885 blocks（median 55，very_short 11.6%，suspected_header_footer 0，max 2937），ParseCore 侧 1400 blocks（median 33，very_short 15.9%，suspected_header_footer 182，max 2950），gap_page_count 215；在 TOC 与表格标题页上人工判读显示 legacy 常把整页 TOC 压成单块（如 page 23 legacy 2 块 vs ParseCore 17 块，legacy 第二块长度 2044），ParseCore 已经按条目正确切分，说明“向 legacy 收敛”在这些页面会降质，不能把 legacy 默认为 ground truth。本轮又做了一次多引擎 A/B 评估：PyMuPDF 在当前机器被企业 WDAC Code Integrity 策略拦截（Event 3033/3077，Policy ID 0283ac0f-fff1-49ae-ada1-8a933130cad6，`_mupdf.pyd` 无法加载，`Unblock-File` 对 WDAC 无效，单机权限无法放行），故该路线搁置；本地 pdfplumber 测试表明其 `extract_text()` 根本不做段落切分（254 blocks/297 页，TOC 页全部 1 块），legacy 885 blocks 实际来自 jobcard 上层切分而非 pdfplumber 本身；结论是三个引擎里 pypdf 的段落可分性最强，真正的问题是后处理缺位。随即在 ParseCore `PdfTextParser` 里增加重复页眉页脚剥离（≥50% 页复现的首尾行）和极短块合并（<10 字符且非标题的块并入邻段），同一 PDF 重跑：ParseCore 侧从 1400→971 blocks、median 33→60、very_short_ratio 15.86%→2.27%、numeric_heavy 235→5、suspected_header_footer 182→0、gap_page_count 215→142，TOC 页 p23 17 块、p25 18 块均保留细分；raw 相似度由 0.9626 回落到 0.9521（合理，因为 ParseCore 现在剥离的内容与 legacy 的保留口径不同）
+- [~] jobcard 宿主兼容接入（历史双跑已归档）
+- 说明：解析入口已接到 ParseCore，相关历史双跑记录、runbook 与辅助脚本已统一归档到 `archive/jobcard-dual-run/`；当前默认门禁切回 ParseCore 自检，不再继续扩大双跑样本池。既有历史联调结果仍保留为兼容性证据：ParseCore 的 PDF 文本提取已提升为按段落切分，并在 ParseCore 与 jobcard 两侧统一到 `pypdf`；对真实 PDF 的 raw 相似度、展示口径相似度、字段级/页面级/Block/Chunk 级差异摘要、索引命中差异摘要和 Block 对位摘要都已完成过一轮归档验证。宿主原生上传与 store-backed 样本也已经证明 `documents` 与 `mgmt_documents` 两条路径可通，但当前继续推进时应优先解决宿主上传资产保全问题，并以 `unittest`、`tools/regression_baseline.py check-suite`、运行态健康检查和最小灰度作为默认质量门禁。
 
 ## Phase 0: 定稿骨架
 
@@ -94,8 +97,8 @@
 
 - [x] 为 jobcard 增加 ProductAdapter
 - [x] 对接现有文档上传与任务入口
-- [~] 双跑旧实现和 ParseCore 新实现
-- 说明：jobcard 的 `/documents/{id}/parse` 与 `/mgmt-documents/{id}/parse` 已切到 ParseCore，旧逻辑仍作为 bridge 不可用时的回退路径；`backend/parsecore_compare.py` 已可生成带字段级、页面级、Block/Chunk 级差异摘要、索引命中差异摘要、Block 对位差异摘要、展示口径差异摘要和展示口径 Block 对位摘要的 JSON/Markdown 报告，且块对位已从顺序硬对齐升级为页内相似度驱动的动态规划匹配
+- [x] 保留历史兼容性证据并归档双跑资料
+- 说明：jobcard 的 `/documents/{id}/parse` 与 `/mgmt-documents/{id}/parse` 已切到 ParseCore，旧逻辑仍作为 bridge 不可用时的回退路径；既有 `parsecore_compare.py` 与历史双跑报告继续保留，但已从主线资料中移出，统一归档到 `archive/jobcard-dual-run/`，仅在需要复现旧宿主兼容性问题时使用。
 - [~] 记录字段差异、Block 差异和索引命中差异
 - 说明：字段差异摘要、索引命中差异摘要、第一版 Block 对位差异摘要、展示口径差异摘要和展示口径 Block 对位摘要已落地。展示口径部分当前通过重复页眉页脚去重，补充一条更接近 jobcard 入库/前端展示的对比视角；展示口径 Block 对位则在去重后按统一切段对位，用于识别“展示文本更近，但结构切段仍不一致”的情况；索引部分当前包含 legacy embedding 状态、chunk/resource 计数、ParseCore 可索引 chunk 覆盖率，以及沿用现有关键词检索口径的命中探针；Block 对位部分现已从顺序对位升级为页内动态规划匹配，优先吸收插入/缺失块导致的连锁错配，后续再视需要增强为更丰富的块匹配策略
 
@@ -142,9 +145,14 @@
 - 说明：新增 `POST /parse` 与 `POST /v1/parse`，支持 multipart `file` 上传并返回 `file_name / mime_type / total_pages / pages / metadata`；其中 `metadata.parser` 与 PDF 场景下的 `metadata.ocr_enabled` 与企业产品现有 `ParseResult` 契约保持对齐。为支撑该入口，`api` 依赖已显式补入 `python-multipart`。本轮进一步把 `enable_ocr` 接成 request 级开关：显式 `true` 可为该请求打开 PDF OCR 回退，显式 `false` 可覆盖配置默认值关闭 OCR 回退。
 - [x] 提供 parser-service 兼容的健康检查入口
 - 说明：`GET /health` 已升级为 `status / version / services` 结构，其中 `services` 会结合当前注册 parser 与实际 OCR provider 可用性返回 `pdfplumber / python_docx / paddleocr` 能力矩阵；兼容字段名保留 `paddleocr`，在 ParseCore 内部实际映射到 OCR provider 能力探测，便于宿主产品在切换 ParseCore 前复用既有健康检查与能力探测逻辑。本轮同时补齐 `providers.ocr` 抽象，并内置 `rapidocr` 与 `remote-http` 两种 provider，可在保留 `image-ocr` parser 注册的前提下按环境显式启停或切换 OCR provider。另已把 PDF OCR 失败路径显式化：坏页触发 OCR 但 provider 失败时，会在 block metadata 与 `layout_signals` 中保留 `ocr_attempt_reason / ocr_error_reason / ocr_failed_pages` 等信号，便于双跑和回归时直接诊断远程 OCR 问题。
+- [x] 固化 `remote-http` OCR 网关契约并补可执行校验
+- 说明：新增 [docs/ocr-gateway-contract.md](ocr-gateway-contract.md) 固定请求/响应、鉴权、失败语义与验收清单，并补 `tests.test_ocr.OcrProviderTests.test_remote_http_provider_matches_gateway_contract_over_real_http` 作为真实 HTTP contract test；同时补 [docs/ocr-integration-checklist.md](ocr-integration-checklist.md)，把宿主接线前的配置、探活、事件与 Prometheus 验收步骤收口为可执行清单。
+- [x] 提供 jobcard 宿主替换与部署清单
+- 说明：新增 [../archive/jobcard-host/docs/jobcard-replacement-checklist.md](../archive/jobcard-host/docs/jobcard-replacement-checklist.md) 与 [parsecore.remote-http.toml.example](../parsecore.remote-http.toml.example) 作为宿主部署模板，收口配置准备、切流检查、灰度替换与回滚条件；同时把历史联调操作手册归档到 [../archive/jobcard-dual-run/docs/jobcard-dual-run-runbook.md](../archive/jobcard-dual-run/docs/jobcard-dual-run-runbook.md)，避免主线文档继续围绕双跑展开。
 - [x] 补齐宿主系统对接所需的 trace 与统一错误契约
 - 说明：ASGI 关键接口已统一回传 `x-trace-id`，错误体收口为 `error / code / message / trace_id / detail?`；同时 `quota_exceeded` 与 `too_many_inflight_jobs` 等提交期观测事件会记录 `trace_id`，便于把宿主请求、ParseCore API 错误和 observability 事件串成一条排障链路。当前 observability 还额外纳入了 OCR 摘要事件：PDF 坏页触发 OCR 后，会按文档汇总 `ocr_attempted / ocr_fallback / ocr_failed` 进入 `/v1/parse/events`，并把对应页数暴露到 `/v1/parse/prometheus`。
 - [x] 补评测集、基准集和质量报表
+- 说明：新增 [tools/self_check.py](../tools/self_check.py) 作为默认自检入口，统一执行单测、runtime describe smoke 和回归基线套件，并把 JSON 汇总写入 `var/self-check/latest.json`；新增 [self-check-gate.md](self-check-gate.md) 记录退出码语义与 2026-04-26 当前结论。当前快速自检已经稳定通过：`125 passed, 5 skipped`，耗时约 6 秒；默认回归套件中 `primary-default`、`primary-strip-hf`、`sample-25-51-06` 与 `sample-flight-ops-manual-r2` 均在预算内通过，`sample-27-81-17` 依 `slow` 标签默认跳过；剩余长尾风险集中在 `sample-cmm-32-48-21-ocr`，该样本在 600 秒窗口内仍未完成，现阶段应视为 OCR 重样本性能专项而不是通用可靠性失效。本轮已把页级 `layout_elapsed_s / ocr_engine_init_elapsed_s / ocr_render_elapsed_s / ocr_call_elapsed_s / ocr_provider_elapsed_s / ocr_postprocess_elapsed_s / ocr_total_elapsed_s` 纳入 block metadata 与 `layout_signals` 聚合，并通过 `tools/regression_baseline.py check --baseline var/regression/baseline.cmm-32-48-21.json` 跑出真实长尾分布：218 页里 217 页触发 OCR 兜底，累计 `ocr_total_s=381.739`，其中 `render_s=16.313`、`call_s=364.019`、`post_s=0.038`、`max_page_ocr_s=6.101`；结论是 600 秒风险主要由 OCR 调用阶段主导，而不是版面提取或后处理。
 - [x] 增加 chunk-only 重算入口，避免为 embedding/索引重建另起管线
 - [x] ASGI 显式派生重算路由：`rechunk` / `re-embed`（不再依赖隐式 `options.mode`）
 - [x] 混合检索入口：`search` API 默认“向量优先 + 关键词回退”，并支持 `semantic_role` 过滤与角色权重排序

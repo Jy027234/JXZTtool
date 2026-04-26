@@ -33,22 +33,41 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 独立 worker 入口与容器运行骨架
 - 配置模板
 - 面向 jobcard 的接入建议与补丁适配器
+- 历史 jobcard 双跑资料与辅助脚本归档
 - 基础单元测试
 
 ## 建议演进路径
 
 1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
 2. 再把真实解析器、任务队列、数据库和向量检索逐步替换进来。
-3. 用双跑方式接入 jobcard，先保持接口兼容，再替换解析实现。
+3. 以兼容接线加 ParseCore 自检门禁接入 jobcard；历史双跑资料只保留为归档证据。
+
+## 文档导航
+
+- [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径
+- [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)：宿主接 OCR provider 前的配置、探活、事件与回滚检查清单
+- [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
+- [archive/jobcard-host/README.md](archive/jobcard-host/README.md)：jobcard 宿主接线、切流与替换资料归档
+- [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)：jobcard 历史双跑记录、runbook 和辅助脚本归档
 
 ## 目录结构
 
 ```text
 .
+├─ archive/
+│  ├─ jobcard-host/
+│  │  ├─ README.md
+│  │  └─ docs/
+│  └─ jobcard-dual-run/
+│     ├─ README.md
+│     ├─ docs/
+│     └─ tools/
 ├─ docs/
 │  ├─ architecture.md
 │  ├─ implementation-plan.md
-│  └─ jobcard-integration.md
+│  ├─ self-check-gate.md
+│  ├─ ocr-integration-checklist.md
+│  └─ ocr-gateway-contract.md
 ├─ src/
 │  └─ parsecore/
 │     ├─ __init__.py
@@ -72,8 +91,10 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 ├─ app.py
 ├─ docker-compose.yml
 ├─ parsecore.toml
-
 ├─ parsecore.queue.toml
+├─ parsecore.pgvector.toml.example
+├─ parsecore.pgvector.fake-embedding.toml.example
+├─ parsecore.remote-http.toml.example
 └─ pyproject.toml
 ```
 
@@ -121,11 +142,44 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 docker compose up -d --build
 ```
 
+用 Postgres + pgvector profile 启动容器：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.toml.example"
+docker compose --profile pgvector up -d --build
+```
+
+用 Postgres + pgvector + 本地 fake embedding 启动容器：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.fake-embedding.toml.example"
+docker compose --profile pgvector up -d --build
+```
+
+说明：
+
+- `parsecore-api` / `parsecore-worker` 现在统一挂载 `PARSECORE_RUNTIME_CONFIG` 指向的配置文件；不设置时仍默认使用 `parsecore.queue.toml`
+- `parsecore-postgres` 通过 `pgvector` profile 提供，适合本地联调、自检和持久化验证
+- 若只想切 OCR provider，不改存储，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.remote-http.toml.example` 或你自己的配置文件
+- 若只想把 `chunk_embeddings` 与 hybrid search 路径在本地跑通，不依赖外部 key，可使用 `parsecore.pgvector.fake-embedding.toml.example`
+
 运行测试：
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
 ```
+
+运行默认自检门禁：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+```
+
+说明：
+
+- 快速模式会执行单测和 runtime smoke
+- 全量模式去掉 `--skip-regression`，会额外跑 `var/regression/suite.json`
+- 最新 JSON 汇总写入 `var/self-check/latest.json`
 
 只重算 chunk / embedding（跳过重新解析源文件）：
 
@@ -211,6 +265,20 @@ api_key_env = "PARSECORE_EMBEDDING_API_KEY"
 batch_size = 16
 ```
 
+本地 fake embedding provider：
+
+```toml
+[providers.embedding]
+enabled = true
+provider = "fake"
+```
+
+说明：
+
+- `provider = "fake"` 会生成确定性的 1536 维向量，与默认 pgvector 索引维度一致，适合本地 `re-embed`、hybrid search 和 API/存储链路验证
+- `provider = "fake"` / `"test"` / `"stub"` 都会走同一个本地 provider，不需要 `PARSECORE_EMBEDDING_API_KEY`
+- 生产环境仍应切回 `openai-compatible` 或宿主侧真实 embedding provider
+
 控制 OCR provider：
 
 本地 RapidOCR：
@@ -245,6 +313,8 @@ options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" }
 - 当 PDF 坏页触发 OCR 但 provider 失败时，相关 block metadata 现在会显式带出 `ocr_attempted = true`、`ocr_attempt_reason` 与 `ocr_error_reason`，不再和“根本没触发 OCR”混在一起
 - `tools/regression_baseline.py` 的 `layout_signals` 现已额外输出 `ocr_attempted_pages` / `ocr_failed_pages`，可直接观察远程 OCR 网关是否在真实样本上发生失败或退化
 - `event_aggregator` 现会按文档汇总 OCR 摘要事件，并把页数记入 Prometheus 计数；因此 `/v1/parse/events` 更适合看具体 `attempt_reasons / error_reasons`，而 `/v1/parse/prometheus` 更适合看租户维度的 OCR 失败页总量
+- 详细 HTTP 契约见 [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)，宿主侧接入步骤见 [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)
+- 若需要回看 jobcard 宿主资料，先看 [archive/jobcard-host/README.md](archive/jobcard-host/README.md)；若要继续追历史联调细节，再进入 [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)
 
 真实 embedding 端到端 smoke test：
 
@@ -259,9 +329,22 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/_
 - 输出包含 `embedded_chunk_ratio`、`mean_embedding_dim_norm`、`embedding_dim` 和一组 search 命中样本
 - 如果未配置 `PARSECORE_EMBEDDING_API_KEY`，默认输出 `skipped` 并退出；传 `--require-live` 会改为非零退出
 
+本地 fake embedding 验证路径：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.fake-embedding.toml.example"
+docker compose build parsecore-api parsecore-worker
+docker compose --profile pgvector up -d parsecore-postgres parsecore-api parsecore-worker
+```
+
+说明：
+
+- 这条路径不依赖外部 embedding key
+- 适合验证 `chunk_embeddings` 是否落库，以及搜索是否从 `keyword-fallback` 升级为 `hybrid`
+
 ## 下一步优先级
 
-1. 把 `remote-http` OCR provider 的鉴权、headers 约定和宿主网关部署模板收口成可复用接入清单。
-2. 把 SQLite 基线存储升级为 Postgres + pgvector。
-3. 用当前 queue-worker 模式直接接入 jobcard 的文档与管理文库路由，开始双跑验证。
-4. 在 jobcard 双跑稳定后，再把存储切到 Postgres，并把 OCR provider 切换成生产侧统一能力。
+1. 把 `tools/self_check.py` 固化为默认自检入口，并继续收敛 OCR 长尾样本性能。
+2. 在 queue-worker + pgvector 模式下继续做宿主最小灰度，而不再扩写双跑记录。
+3. 把 `parsecore.pgvector.toml.example` 收口成宿主环境正式配置。
+4. 继续优化 OCR provider 的失败诊断、embedding 覆盖率与检索命中质量。

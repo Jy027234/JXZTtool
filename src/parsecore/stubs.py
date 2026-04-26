@@ -93,13 +93,19 @@ class NullEmbeddingProvider(EmbeddingProvider):
 
 
 class FakeEmbeddingProvider(EmbeddingProvider):
-    """Deterministic test helper that stamps a tiny embedding per chunk."""
+    """Deterministic helper that stamps pgvector-compatible embeddings."""
+
+    def __init__(self, *, dim: int = 1536) -> None:
+        self.dim = max(2, int(dim))
 
     def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]:
         embedded: list[Chunk] = []
         for index, chunk in enumerate(chunks, start=1):
+            base = [0.0] * self.dim
+            base[0] = float(index)
+            base[1] = float(len(chunk.text))
             embedded.append(
-                replace(chunk, embedding=(float(index), float(len(chunk.text))))
+                replace(chunk, embedding=tuple(base))
             )
         return tuple(embedded)
 

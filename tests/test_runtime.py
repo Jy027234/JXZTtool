@@ -557,7 +557,11 @@ class ParseRuntimeTests(unittest.TestCase):
                 )
 
         self.assertTrue(all(chunk.embedding is not None for chunk in outcome.chunks))
-        self.assertEqual(outcome.chunks[0].embedding, (1.0, float(len(outcome.chunks[0].text))))
+        self.assertEqual(len(outcome.chunks[0].embedding), 1536)
+        self.assertEqual(
+            outcome.chunks[0].embedding[:2],
+            (1.0, float(len(outcome.chunks[0].text))),
+        )
 
     def test_embed_chunks_retries_per_batch_and_degrades_partially(self) -> None:
         class SelectiveFailureEmbeddingProvider:
