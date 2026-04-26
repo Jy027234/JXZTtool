@@ -5,7 +5,10 @@ import unittest
 from parsecore.parsers import (
     _looks_heading_like,
     _merge_short_blocks,
+    _normalize_ocr_provider_counts,
+    _normalize_ocr_provider_timings,
     _ocr_fallback_reason_for_page,
+    _prepare_ocr_input_image,
     _split_pdf_page_text,
     _strip_repeated_headers_footers,
 )
@@ -124,6 +127,96 @@ class OcrFallbackReasonTests(unittest.TestCase):
                 min_cid_char_ratio=0.12,
             )
         )
+
+
+class PrepareOcrInputImageTests(unittest.TestCase):
+    def test_rapidocr_uses_grayscale_image(self) -> None:
+        from PIL import Image
+
+        class _RapidOcrEngine:
+            pass
+
+        _RapidOcrEngine.__module__ = "rapidocr_onnxruntime.engine"
+        image = Image.new("RGB", (10, 10), color=(255, 0, 0))
+
+        prepared = _prepare_ocr_input_image(image, engine=_RapidOcrEngine())
+
+        self.assertEqual(prepared.mode, "L")
+
+    def test_non_rapidocr_keeps_rgb_image(self) -> None:
+        from PIL import Image
+
+        class _OtherEngine:
+            pass
+
+        _OtherEngine.__module__ = "custom_ocr.engine"
+        image = Image.new("RGB", (10, 10), color=(255, 0, 0))
+
+        prepared = _prepare_ocr_input_image(image, engine=_OtherEngine())
+
+        self.assertEqual(prepared.mode, "RGB")
+
+    def test_parsecore_rapidocr_wrapper_uses_grayscale_image(self) -> None:
+        from PIL import Image
+
+        class _WrappedRapidOcrEngine:
+            _parsecore_rapidocr = True
+
+        image = Image.new("RGB", (10, 10), color=(255, 0, 0))
+
+        prepared = _prepare_ocr_input_image(image, engine=_WrappedRapidOcrEngine())
+
+        self.assertEqual(prepared.mode, "L")
+
+
+class NormalizeOcrProviderTimingsTests(unittest.TestCase):
+    def test_rapidocr_stage_list_becomes_total_and_named_stages(self) -> None:
+        total, det_elapsed_s, cls_elapsed_s, rec_elapsed_s = _normalize_ocr_provider_timings(
+            [0.37, 0.12, 2.01]
+        )
+
+        self.assertAlmostEqual(total, 2.5)
+        self.assertAlmostEqual(det_elapsed_s, 0.37)
+        self.assertAlmostEqual(cls_elapsed_s, 0.12)
+        self.assertAlmostEqual(rec_elapsed_s, 2.01)
+
+    def test_scalar_provider_elapsed_keeps_backward_compatible_total(self) -> None:
+        total, det_elapsed_s, cls_elapsed_s, rec_elapsed_s = _normalize_ocr_provider_timings(0.42)
+
+        self.assertAlmostEqual(total, 0.42)
+        self.assertEqual(det_elapsed_s, 0.0)
+        self.assertEqual(cls_elapsed_s, 0.0)
+        self.assertEqual(rec_elapsed_s, 0.0)
+
+    def test_mapping_provider_elapsed_extracts_named_stages(self) -> None:
+        total, det_elapsed_s, cls_elapsed_s, rec_elapsed_s = _normalize_ocr_provider_timings(
+            {
+                "elapsed": 2.5,
+                "det_elapsed_s": 0.37,
+                "cls_elapsed_s": 0.12,
+                "rec_elapsed_s": 2.01,
+            }
+        )
+
+        self.assertAlmostEqual(total, 2.5)
+        self.assertAlmostEqual(det_elapsed_s, 0.37)
+        self.assertAlmostEqual(cls_elapsed_s, 0.12)
+        self.assertAlmostEqual(rec_elapsed_s, 2.01)
+
+
+class NormalizeOcrProviderCountsTests(unittest.TestCase):
+    def test_mapping_provider_counts_extracts_classifier_hits(self) -> None:
+        crop_count, rotate_positive_count, rotate_high_count = _normalize_ocr_provider_counts(
+            {
+                "crop_count": 92,
+                "cls_rotate_positive_count": 8,
+                "cls_rotate_high_count": 4,
+            }
+        )
+
+        self.assertEqual(crop_count, 92)
+        self.assertEqual(rotate_positive_count, 8)
+        self.assertEqual(rotate_high_count, 4)
 
 
 if __name__ == "__main__":

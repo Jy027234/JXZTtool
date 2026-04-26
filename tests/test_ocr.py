@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import numpy as np
 import os
 import tempfile
 import threading
@@ -30,6 +31,252 @@ class _FakeHttpResponse:
 
 
 class OcrProviderTests(unittest.TestCase):
+    def test_rapidocr_partial_rec_override_injects_default_model_path(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeRapidOCR:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+
+        settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={"rec_batch_num": 12},
+        )
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+
+        self.assertIsInstance(engine._engine, _FakeRapidOCR)
+        self.assertEqual(captured["rec_batch_num"], 12)
+        self.assertEqual(captured["rec_model_path"], "")
+
+    def test_rapidocr_partial_det_and_cls_overrides_inject_model_paths(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeRapidOCR:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+
+        settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={"det_limit_side_len": 960, "cls_batch_num": 8},
+        )
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+
+        self.assertIsInstance(engine._engine, _FakeRapidOCR)
+        self.assertEqual(captured["det_limit_side_len"], 960)
+        self.assertEqual(captured["cls_batch_num"], 8)
+        self.assertEqual(captured["det_model_path"], "")
+        self.assertEqual(captured["cls_model_path"], "")
+
+    def test_rapidocr_adapter_options_do_not_leak_into_upstream_constructor(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeRapidOCR:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+
+        settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={
+                "rec_batch_num": 12,
+                "parsecore_angle_cls_probe_crops": 8,
+                "parsecore_angle_cls_probe_min_crops": 40,
+            },
+        )
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+
+        self.assertEqual(captured["rec_batch_num"], 12)
+        self.assertNotIn("parsecore_angle_cls_probe_crops", captured)
+        self.assertEqual(engine._angle_cls_probe_crops, 8)
+        self.assertEqual(engine._angle_cls_probe_min_crops, 40)
+
+    def test_rapidocr_adapter_reports_classifier_hit_counts(self) -> None:
+        class _FakeTextCls:
+            cls_thresh = 0.9
+
+            def __call__(self, img_list):
+                return img_list, [["0", 0.2], ["180", 0.95], ["180", 0.4]], 0.12
+
+        class _FakeRapidOCR:
+            def __init__(self, **_kwargs) -> None:
+                self.text_score = 0.5
+                self.min_height = 30
+                self.width_height_ratio = 8
+                self.use_text_det = True
+                self.use_angle_cls = True
+                self.print_verbose = False
+                self.text_cls = _FakeTextCls()
+
+            def load_img(self, source):
+                return source
+
+            def text_detector(self, _img):
+                return [
+                    np.array([[0, 0], [1, 0], [1, 1], [0, 1]]),
+                    np.array([[0, 0], [2, 0], [2, 1], [0, 1]]),
+                    np.array([[0, 0], [3, 0], [3, 1], [0, 1]]),
+                ], 0.21
+
+            def sorted_boxes(self, boxes):
+                return boxes
+
+            def get_crop_img_list(self, _img, boxes):
+                return [np.zeros((8, 8, 3), dtype=np.uint8) for _ in boxes]
+
+            def text_recognizer(self, img_list):
+                return [(f"text-{index}", 0.99) for index, _ in enumerate(img_list, start=1)], 0.34
+
+            def filter_boxes_rec_by_score(self, boxes, rec_res):
+                return boxes, rec_res
+
+        settings = OcrProviderSettings(enabled=True, provider="rapidocr")
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+            result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
+
+        self.assertEqual(len(result or []), 3)
+        self.assertEqual(provider_metrics["crop_count"], 3)
+        self.assertEqual(provider_metrics["cls_rotate_positive_count"], 2)
+        self.assertEqual(provider_metrics["cls_rotate_high_count"], 1)
+        self.assertAlmostEqual(float(provider_metrics["det_elapsed_s"]), 0.21)
+        self.assertAlmostEqual(float(provider_metrics["cls_elapsed_s"]), 0.12)
+        self.assertAlmostEqual(float(provider_metrics["rec_elapsed_s"]), 0.34)
+
+    def test_rapidocr_adapter_probe_skips_remaining_cls_when_sample_has_no_high_hits(self) -> None:
+        class _FakeTextCls:
+            cls_thresh = 0.9
+
+            def __init__(self) -> None:
+                self.call_sizes: list[int] = []
+
+            def __call__(self, img_list):
+                self.call_sizes.append(len(img_list))
+                return img_list, [["0", 0.2] for _ in img_list], 0.01 * len(img_list)
+
+        class _FakeRapidOCR:
+            def __init__(self, **_kwargs) -> None:
+                self.text_score = 0.5
+                self.min_height = 30
+                self.width_height_ratio = 8
+                self.use_text_det = True
+                self.use_angle_cls = True
+                self.print_verbose = False
+                self.text_cls = _FakeTextCls()
+
+            def load_img(self, source):
+                return source
+
+            def text_detector(self, _img):
+                return [
+                    np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+                    for _ in range(6)
+                ], 0.21
+
+            def sorted_boxes(self, boxes):
+                return boxes
+
+            def get_crop_img_list(self, _img, boxes):
+                return [np.full((8, 8, 3), fill_value=index, dtype=np.uint8) for index, _ in enumerate(boxes)]
+
+            def text_recognizer(self, img_list):
+                return [(f"text-{index}", 0.99) for index, _ in enumerate(img_list, start=1)], 0.34
+
+            def filter_boxes_rec_by_score(self, boxes, rec_res):
+                return boxes, rec_res
+
+        settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={
+                "parsecore_angle_cls_probe_crops": 2,
+                "parsecore_angle_cls_probe_min_crops": 4,
+            },
+        )
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+            _result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
+
+        self.assertEqual(engine._engine.text_cls.call_sizes, [2])
+        self.assertAlmostEqual(float(provider_metrics["cls_elapsed_s"]), 0.02)
+        self.assertEqual(provider_metrics["cls_rotate_high_count"], 0)
+
+    def test_rapidocr_adapter_probe_continues_with_remaining_cls_when_sample_hits_high_rotation(self) -> None:
+        class _FakeTextCls:
+            cls_thresh = 0.9
+
+            def __init__(self) -> None:
+                self.call_sizes: list[int] = []
+
+            def __call__(self, img_list):
+                self.call_sizes.append(len(img_list))
+                results = []
+                for item in img_list:
+                    crop_id = int(item[0, 0, 0])
+                    if crop_id == 0:
+                        results.append(["180", 0.95])
+                    else:
+                        results.append(["0", 0.2])
+                return img_list, results, 0.01 * len(img_list)
+
+        class _FakeRapidOCR:
+            def __init__(self, **_kwargs) -> None:
+                self.text_score = 0.5
+                self.min_height = 30
+                self.width_height_ratio = 8
+                self.use_text_det = True
+                self.use_angle_cls = True
+                self.print_verbose = False
+                self.text_cls = _FakeTextCls()
+
+            def load_img(self, source):
+                return source
+
+            def text_detector(self, _img):
+                return [
+                    np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+                    for _ in range(6)
+                ], 0.21
+
+            def sorted_boxes(self, boxes):
+                return boxes
+
+            def get_crop_img_list(self, _img, boxes):
+                return [np.full((8, 8, 3), fill_value=index, dtype=np.uint8) for index, _ in enumerate(boxes)]
+
+            def text_recognizer(self, img_list):
+                return [(f"text-{index}", 0.99) for index, _ in enumerate(img_list, start=1)], 0.34
+
+            def filter_boxes_rec_by_score(self, boxes, rec_res):
+                return boxes, rec_res
+
+        settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={
+                "parsecore_angle_cls_probe_crops": 2,
+                "parsecore_angle_cls_probe_min_crops": 4,
+            },
+        )
+
+        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+            engine = build_ocr_engine(settings)
+            _result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
+
+        self.assertEqual(engine._engine.text_cls.call_sizes, [2, 4])
+        self.assertAlmostEqual(float(provider_metrics["cls_elapsed_s"]), 0.06)
+        self.assertEqual(provider_metrics["cls_rotate_positive_count"], 1)
+        self.assertEqual(provider_metrics["cls_rotate_high_count"], 1)
+
     def test_remote_http_provider_requires_base_url(self) -> None:
         settings = OcrProviderSettings(
             enabled=True,

@@ -1,0 +1,112 @@
+[project]
+name = "parsecore-starter"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+# 0 = auto(max_workers * 4), set explicit value to cap in-flight jobs
+max_inflight_jobs = 0
+poll_interval_ms = 500
+# Enforce quota units at submission time.
+quota_enforce = false
+quota_window_hours = 24
+quota_default_limit_units = 0
+# [runtime.quota_limits]
+# "tenant-a:starter" = 200
+# "tenant-a:*" = 500
+# "*:*" = 1000
+max_attempts = 3
+log_path = "var/logs/job_events.jsonl"
+
+[storage]
+database_url = "sqlite:///./var/parsecore.db"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+# Optional: LLM provider for semantic block-boundary refinement (A4).
+# Embedded-SDK mode: when ParseCore is hosted by another application, the host
+# should override these via its own config and inject the API key through the
+# referenced env var instead of writing it here.
+[providers.llm]
+enabled = false
+provider = "qwen-dashscope"
+model = "qwen3.6-35b-a3b"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "PARSECORE_LLM_API_KEY"
+timeout_seconds = 30.0
+max_retries = 2
+# options.temperature = 0.0
+# options.top_p = 0.1
+
+[providers.embedding]
+enabled = false
+provider = "openai-compatible"
+model = "text-embedding-3-small"
+base_url = "https://api.openai.com/v1"
+api_key_env = "PARSECORE_EMBEDDING_API_KEY"
+timeout_seconds = 30.0
+max_retries = 2
+batch_size = 16
+# options.dimensions = 1536
+
+# OCR provider abstraction used by image-ocr parser and PDF bad-page fallback.
+# Set enabled = false to keep the image-ocr parser registered but report OCR
+# unavailable and skip PDF OCR fallback recovery.
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+# To reuse a host OCR gateway instead of local RapidOCR, switch to:
+# provider = "remote-http"
+# base_url = "https://ocr.example.com"
+# api_key_env = "PARSECORE_OCR_API_KEY"
+# timeout_seconds = 10.0
+# max_retries = 2
+# options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" } }
+# options.det_use_dilation = true
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+# 鍙€夊悗澶勭悊閰嶇疆锛堥粯璁ゅ€煎涓嬶紱璋冩暣闇€璋ㄦ厧锛屽缓璁厛鐢?
+# tools/min_length_scan.py 璺戜竴娆＄伒鏁忓害鎵弿鍚庡啀鏀?short_block_min_length锛?
+# 娉ㄦ剰锛欰3+.1 璧凤紝strip_headers_footers 榛樿 false锛堜繚鐣欏畬鏁撮〉闈㈠唴瀹癸級銆?
+# 闇€瑕佸幓鎺夎法椤甸噸澶嶉〉鐪夐〉鑴氭椂鏄惧紡寮€鍚細
+#   options.post_process = { strip_headers_footers = true }
+# options.post_process = { strip_headers_footers = false, merge_short_blocks = true, short_block_min_length = 10, hf_threshold = 0.5, hf_head_n = 3, hf_tail_n = 3, hf_min_line_len = 4, split_structural_items = true, structural_min_lines_trigger = 10, split_inline_structural_items = true, inline_structural_min_length_trigger = 120, split_toc_entries = true, toc_min_entries_trigger = 3, merge_table_continuations = true, merge_highlights_entries = true }
+# A3 鍙岄€氶亾锛氬紑鍚悗鐢?pdfplumber 鎶藉彇琛ㄦ牸 + 鍘昏〃鏍煎尯鍩熸枃鏈紝pypdf 浠嶈蛋鍘熺绾?
+[parsers.options.post_process]
+dual_channel = true
+dual_table_min_rows = 2
+dual_table_min_cols = 2
+ocr_bad_pages = true
+ocr_bad_page_min_cid_tokens = 5
+ocr_bad_page_min_cid_char_ratio = 0.25
+ocr_render_resolution = 96
+ocr_confidence_threshold = 0.5
+ocr_merge_line_gap_ratio = 1.6
+
+[[parsers]]
+name = "image-ocr"
+media_types = ["image/png", "image/jpeg"]
+extensions = [".png", ".jpg", ".jpeg"]
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt", ".md"]

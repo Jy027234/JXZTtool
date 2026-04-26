@@ -92,8 +92,31 @@ def _report_to_dict(report: StructuralQualityReport, *, top_pages: int) -> dict[
     }
 
 
-def _layout_signals_to_dict(layout_signals: Any) -> dict[str, Any]:
-    return dataclasses.asdict(layout_signals)
+def _layout_signals_to_dict(layout_signals: Any, *, top_pages: int) -> dict[str, Any]:
+    payload = dataclasses.asdict(layout_signals)
+    payload.pop("ocr_page_signals", None)
+    payload["ocr_hot_pages"] = [
+        dataclasses.asdict(page) for page in layout_signals.ocr_hot_pages(top=top_pages)
+    ]
+    payload["ocr_sparse_cls_pages"] = [
+        dataclasses.asdict(page)
+        for page in layout_signals.ocr_sparse_cls_pages(top=top_pages)
+    ]
+    return payload
+
+
+def _format_ocr_page_signal(page: dict[str, Any]) -> str:
+    crop_count = int(page.get("ocr_provider_crop_count", 0) or 0)
+    rotate_high_count = int(page.get("ocr_provider_cls_rotate_high_count", 0) or 0)
+    return (
+        f"p{int(page.get('page_number', 0))}"
+        f":total={float(page.get('ocr_total_elapsed_s', 0.0)):.3f}s"
+        f",engine={float(page.get('ocr_engine_exec_elapsed_s', 0.0)):.3f}s"
+        f",cls={float(page.get('ocr_provider_cls_elapsed_s', 0.0)):.3f}s"
+        f",crops={crop_count}"
+        f",hi={rotate_high_count}/{crop_count}"
+        f"({float(page.get('cls_rotate_high_ratio', 0.0)):.1%})"
+    )
 
 
 def _embedding_quality_to_dict(embedding_quality: Any) -> dict[str, Any]:
@@ -144,7 +167,7 @@ def _run_one(runtime, *, fixture: Path, top_pages: int) -> dict[str, Any]:
             "chunks": len(outcome.chunks),
         },
         "quality": _report_to_dict(quality, top_pages=top_pages),
-        "layout_signals": _layout_signals_to_dict(layout_signals),
+        "layout_signals": _layout_signals_to_dict(layout_signals, top_pages=top_pages),
         "embedding_quality": _embedding_quality_to_dict(embedding_quality),
     }
 
@@ -318,15 +341,43 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 f" (baseline {baseline_layout.get('ocr_total_elapsed_s', 0.0):.3f})"
                 f" render_s={candidate_layout.get('ocr_render_elapsed_s', 0.0):.3f}"
                 f" (baseline {baseline_layout.get('ocr_render_elapsed_s', 0.0):.3f})"
+                f" prep_s={candidate_layout.get('ocr_input_prepare_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_input_prepare_elapsed_s', 0.0):.3f})"
+                f" engine_s={candidate_layout.get('ocr_engine_exec_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_engine_exec_elapsed_s', 0.0):.3f})"
                 f" call_s={candidate_layout.get('ocr_call_elapsed_s', 0.0):.3f}"
                 f" (baseline {baseline_layout.get('ocr_call_elapsed_s', 0.0):.3f})"
                 f" provider_s={candidate_layout.get('ocr_provider_elapsed_s', 0.0):.3f}"
                 f" (baseline {baseline_layout.get('ocr_provider_elapsed_s', 0.0):.3f})"
+                f" det_s={candidate_layout.get('ocr_provider_det_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_provider_det_elapsed_s', 0.0):.3f})"
+                f" cls_s={candidate_layout.get('ocr_provider_cls_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_provider_cls_elapsed_s', 0.0):.3f})"
+                f" rec_s={candidate_layout.get('ocr_provider_rec_elapsed_s', 0.0):.3f}"
+                f" (baseline {baseline_layout.get('ocr_provider_rec_elapsed_s', 0.0):.3f})"
+                f" crops={int(candidate_layout.get('ocr_provider_crop_count', 0))}"
+                f" (baseline {int(baseline_layout.get('ocr_provider_crop_count', 0))})"
+                f" cls_180={int(candidate_layout.get('ocr_provider_cls_rotate_positive_count', 0))}"
+                f" (baseline {int(baseline_layout.get('ocr_provider_cls_rotate_positive_count', 0))})"
+                f" cls_180_hi={int(candidate_layout.get('ocr_provider_cls_rotate_high_count', 0))}"
+                f" (baseline {int(baseline_layout.get('ocr_provider_cls_rotate_high_count', 0))})"
                 f" post_s={candidate_layout.get('ocr_postprocess_elapsed_s', 0.0):.3f}"
                 f" (baseline {baseline_layout.get('ocr_postprocess_elapsed_s', 0.0):.3f})"
                 f" max_page_ocr_s={candidate_layout.get('max_ocr_page_elapsed_s', 0.0):.3f}"
                 f" (baseline {baseline_layout.get('max_ocr_page_elapsed_s', 0.0):.3f})"
             )
+            hot_pages = list(candidate_layout.get("ocr_hot_pages") or [])[: min(args.top_pages, 5)]
+            if hot_pages:
+                print(
+                    f"[check][ocr-hot-pages] {fixture.name} "
+                    + "; ".join(_format_ocr_page_signal(page) for page in hot_pages)
+                )
+            sparse_pages = list(candidate_layout.get("ocr_sparse_cls_pages") or [])[: min(args.top_pages, 5)]
+            if sparse_pages:
+                print(
+                    f"[check][ocr-sparse-cls] {fixture.name} "
+                    + "; ".join(_format_ocr_page_signal(page) for page in sparse_pages)
+                )
         failures.extend(
             _check_drift(name=fixture.name, baseline=base, candidate=candidate, args=args)
         )

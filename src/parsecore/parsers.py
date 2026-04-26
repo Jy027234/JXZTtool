@@ -281,8 +281,20 @@ class PdfTextParser(ParserAdapter):
             merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
         )
         timings.render_elapsed_s = extract_timings.render_elapsed_s
+        timings.input_prepare_elapsed_s = getattr(extract_timings, "input_prepare_elapsed_s", 0.0)
+        timings.engine_exec_elapsed_s = getattr(extract_timings, "engine_exec_elapsed_s", 0.0)
         timings.call_elapsed_s = extract_timings.call_elapsed_s
         timings.provider_elapsed_s = extract_timings.provider_elapsed_s
+        timings.provider_det_elapsed_s = getattr(extract_timings, "provider_det_elapsed_s", 0.0)
+        timings.provider_cls_elapsed_s = getattr(extract_timings, "provider_cls_elapsed_s", 0.0)
+        timings.provider_rec_elapsed_s = getattr(extract_timings, "provider_rec_elapsed_s", 0.0)
+        timings.provider_crop_count = int(getattr(extract_timings, "provider_crop_count", 0) or 0)
+        timings.provider_cls_rotate_positive_count = int(
+            getattr(extract_timings, "provider_cls_rotate_positive_count", 0) or 0
+        )
+        timings.provider_cls_rotate_high_count = int(
+            getattr(extract_timings, "provider_cls_rotate_high_count", 0) or 0
+        )
         timings.postprocess_elapsed_s = extract_timings.postprocess_elapsed_s
         timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
         if not text:
@@ -1137,8 +1149,16 @@ class _PageLayout:
     ocr_error_reason: str | None = None
     ocr_engine_init_elapsed_s: float = 0.0
     ocr_render_elapsed_s: float = 0.0
+    ocr_input_prepare_elapsed_s: float = 0.0
+    ocr_engine_exec_elapsed_s: float = 0.0
     ocr_call_elapsed_s: float = 0.0
     ocr_provider_elapsed_s: float = 0.0
+    ocr_provider_det_elapsed_s: float = 0.0
+    ocr_provider_cls_elapsed_s: float = 0.0
+    ocr_provider_rec_elapsed_s: float = 0.0
+    ocr_provider_crop_count: int = 0
+    ocr_provider_cls_rotate_positive_count: int = 0
+    ocr_provider_cls_rotate_high_count: int = 0
     ocr_postprocess_elapsed_s: float = 0.0
     ocr_total_elapsed_s: float = 0.0
 
@@ -1147,8 +1167,16 @@ class _PageLayout:
 class _OcrStageTimings:
     engine_init_elapsed_s: float = 0.0
     render_elapsed_s: float = 0.0
+    input_prepare_elapsed_s: float = 0.0
+    engine_exec_elapsed_s: float = 0.0
     call_elapsed_s: float = 0.0
     provider_elapsed_s: float = 0.0
+    provider_det_elapsed_s: float = 0.0
+    provider_cls_elapsed_s: float = 0.0
+    provider_rec_elapsed_s: float = 0.0
+    provider_crop_count: int = 0
+    provider_cls_rotate_positive_count: int = 0
+    provider_cls_rotate_high_count: int = 0
     postprocess_elapsed_s: float = 0.0
     total_elapsed_s: float = 0.0
 
@@ -1257,8 +1285,16 @@ def _extract_pdfplumber_layout(
                     ocr_error_reason=ocr_error_reason,
                     ocr_engine_init_elapsed_s=ocr_timings.engine_init_elapsed_s,
                     ocr_render_elapsed_s=ocr_timings.render_elapsed_s,
+                    ocr_input_prepare_elapsed_s=ocr_timings.input_prepare_elapsed_s,
+                    ocr_engine_exec_elapsed_s=ocr_timings.engine_exec_elapsed_s,
                     ocr_call_elapsed_s=ocr_timings.call_elapsed_s,
                     ocr_provider_elapsed_s=ocr_timings.provider_elapsed_s,
+                    ocr_provider_det_elapsed_s=ocr_timings.provider_det_elapsed_s,
+                    ocr_provider_cls_elapsed_s=ocr_timings.provider_cls_elapsed_s,
+                    ocr_provider_rec_elapsed_s=ocr_timings.provider_rec_elapsed_s,
+                    ocr_provider_crop_count=ocr_timings.provider_crop_count,
+                    ocr_provider_cls_rotate_positive_count=ocr_timings.provider_cls_rotate_positive_count,
+                    ocr_provider_cls_rotate_high_count=ocr_timings.provider_cls_rotate_high_count,
                     ocr_postprocess_elapsed_s=ocr_timings.postprocess_elapsed_s,
                     ocr_total_elapsed_s=ocr_timings.total_elapsed_s,
                 )
@@ -1284,10 +1320,38 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
         metadata["ocr_engine_init_elapsed_s"] = page_layout.ocr_engine_init_elapsed_s
     if page_layout.ocr_render_elapsed_s > 0.0:
         metadata["ocr_render_elapsed_s"] = page_layout.ocr_render_elapsed_s
+    input_prepare_elapsed_s = getattr(page_layout, "ocr_input_prepare_elapsed_s", 0.0)
+    if input_prepare_elapsed_s > 0.0:
+        metadata["ocr_input_prepare_elapsed_s"] = input_prepare_elapsed_s
+    engine_exec_elapsed_s = getattr(page_layout, "ocr_engine_exec_elapsed_s", 0.0)
+    if engine_exec_elapsed_s > 0.0:
+        metadata["ocr_engine_exec_elapsed_s"] = engine_exec_elapsed_s
     if page_layout.ocr_call_elapsed_s > 0.0:
         metadata["ocr_call_elapsed_s"] = page_layout.ocr_call_elapsed_s
     if page_layout.ocr_provider_elapsed_s > 0.0:
         metadata["ocr_provider_elapsed_s"] = page_layout.ocr_provider_elapsed_s
+    provider_det_elapsed_s = getattr(page_layout, "ocr_provider_det_elapsed_s", 0.0)
+    if provider_det_elapsed_s > 0.0:
+        metadata["ocr_provider_det_elapsed_s"] = provider_det_elapsed_s
+    provider_cls_elapsed_s = getattr(page_layout, "ocr_provider_cls_elapsed_s", 0.0)
+    if provider_cls_elapsed_s > 0.0:
+        metadata["ocr_provider_cls_elapsed_s"] = provider_cls_elapsed_s
+    provider_rec_elapsed_s = getattr(page_layout, "ocr_provider_rec_elapsed_s", 0.0)
+    if provider_rec_elapsed_s > 0.0:
+        metadata["ocr_provider_rec_elapsed_s"] = provider_rec_elapsed_s
+    provider_crop_count = int(getattr(page_layout, "ocr_provider_crop_count", 0) or 0)
+    if provider_crop_count > 0:
+        metadata["ocr_provider_crop_count"] = provider_crop_count
+    provider_cls_rotate_positive_count = int(
+        getattr(page_layout, "ocr_provider_cls_rotate_positive_count", 0) or 0
+    )
+    if provider_cls_rotate_positive_count > 0:
+        metadata["ocr_provider_cls_rotate_positive_count"] = provider_cls_rotate_positive_count
+    provider_cls_rotate_high_count = int(
+        getattr(page_layout, "ocr_provider_cls_rotate_high_count", 0) or 0
+    )
+    if provider_cls_rotate_high_count > 0:
+        metadata["ocr_provider_cls_rotate_high_count"] = provider_cls_rotate_high_count
     if page_layout.ocr_postprocess_elapsed_s > 0.0:
         metadata["ocr_postprocess_elapsed_s"] = page_layout.ocr_postprocess_elapsed_s
     if page_layout.ocr_total_elapsed_s > 0.0:
@@ -1313,6 +1377,81 @@ def _ocr_fallback_reason_for_page(
     if cid_chars / max(len(stripped), 1) >= min_cid_char_ratio:
         return "cid_dense"
     return None
+
+
+def _normalize_ocr_provider_timings(provider_elapsed: Any) -> tuple[float, float, float, float]:
+    if isinstance(provider_elapsed, Mapping):
+        try:
+            total_elapsed_s = float(
+                provider_elapsed.get(
+                    "elapsed",
+                    provider_elapsed.get("elapsed_s", provider_elapsed.get("provider_elapsed_s", 0.0)),
+                )
+            )
+        except (TypeError, ValueError):
+            total_elapsed_s = 0.0
+        try:
+            det_elapsed_s = float(
+                provider_elapsed.get("det_elapsed_s", provider_elapsed.get("provider_det_elapsed_s", 0.0))
+            )
+        except (TypeError, ValueError):
+            det_elapsed_s = 0.0
+        try:
+            cls_elapsed_s = float(
+                provider_elapsed.get("cls_elapsed_s", provider_elapsed.get("provider_cls_elapsed_s", 0.0))
+            )
+        except (TypeError, ValueError):
+            cls_elapsed_s = 0.0
+        try:
+            rec_elapsed_s = float(
+                provider_elapsed.get("rec_elapsed_s", provider_elapsed.get("provider_rec_elapsed_s", 0.0))
+            )
+        except (TypeError, ValueError):
+            rec_elapsed_s = 0.0
+        if total_elapsed_s <= 0.0:
+            total_elapsed_s = round(det_elapsed_s + cls_elapsed_s + rec_elapsed_s, 6)
+        return total_elapsed_s, det_elapsed_s, cls_elapsed_s, rec_elapsed_s
+
+    if isinstance(provider_elapsed, Sequence) and not isinstance(
+        provider_elapsed,
+        (str, bytes, bytearray),
+    ):
+        values: list[float] = []
+        for item in provider_elapsed:
+            try:
+                values.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        if values:
+            det_elapsed_s = values[0] if len(values) > 0 else 0.0
+            cls_elapsed_s = values[1] if len(values) > 1 else 0.0
+            rec_elapsed_s = values[2] if len(values) > 2 else 0.0
+            return round(sum(values), 6), det_elapsed_s, cls_elapsed_s, rec_elapsed_s
+
+    try:
+        return float(provider_elapsed), 0.0, 0.0, 0.0
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0, 0.0
+
+
+def _normalize_ocr_provider_counts(provider_elapsed: Any) -> tuple[int, int, int]:
+    if not isinstance(provider_elapsed, Mapping):
+        return 0, 0, 0
+
+    def _as_int(*keys: str) -> int:
+        for key in keys:
+            raw_value = provider_elapsed.get(key)
+            try:
+                return int(raw_value)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    return (
+        _as_int("crop_count", "provider_crop_count"),
+        _as_int("cls_rotate_positive_count", "provider_cls_rotate_positive_count"),
+        _as_int("cls_rotate_high_count", "provider_cls_rotate_high_count"),
+    )
 
 
 def _extract_ocr_text_from_page(
@@ -1357,20 +1496,44 @@ def _extract_ocr_text_from_page(
     timings.render_elapsed_s = round(time.monotonic() - render_started, 6)
 
     call_started = time.monotonic()
+    prepare_started = time.monotonic()
     try:
-        result, provider_elapsed = engine(np.array(rendered))
+        ocr_input = _prepare_ocr_input_image(rendered, engine=engine)
+        ocr_array = np.array(ocr_input)
+        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
+    except Exception:
+        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
+        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+        timings.total_elapsed_s = round(
+            timings.render_elapsed_s + timings.call_elapsed_s,
+            6,
+        )
+        return None, "ocr_input_prepare_failed", timings
+
+    engine_started = time.monotonic()
+    try:
+        result, provider_elapsed = engine(ocr_array)
     except Exception as exc:
+        timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
         timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
         timings.total_elapsed_s = round(
             timings.render_elapsed_s + timings.call_elapsed_s,
             6,
         )
         return None, _classify_ocr_error(exc), timings
+    timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
     timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
-    try:
-        timings.provider_elapsed_s = float(provider_elapsed)
-    except (TypeError, ValueError):
-        timings.provider_elapsed_s = 0.0
+    (
+        timings.provider_elapsed_s,
+        timings.provider_det_elapsed_s,
+        timings.provider_cls_elapsed_s,
+        timings.provider_rec_elapsed_s,
+    ) = _normalize_ocr_provider_timings(provider_elapsed)
+    (
+        timings.provider_crop_count,
+        timings.provider_cls_rotate_positive_count,
+        timings.provider_cls_rotate_high_count,
+    ) = _normalize_ocr_provider_counts(provider_elapsed)
 
     postprocess_started = time.monotonic()
     lines = _collect_ocr_lines(
@@ -1388,6 +1551,15 @@ def _extract_ocr_text_from_page(
     if not paragraphs:
         return None, "empty_ocr_text", timings
     return "\n\n".join(paragraphs), None, timings
+
+
+def _prepare_ocr_input_image(rendered: Any, *, engine: Any) -> Any:
+    if getattr(engine, "_parsecore_rapidocr", False):
+        return rendered.convert("L")
+    module_name = getattr(type(engine), "__module__", "")
+    if "rapidocr" in module_name.lower():
+        return rendered.convert("L")
+    return rendered
 
 
 def _collect_ocr_lines(

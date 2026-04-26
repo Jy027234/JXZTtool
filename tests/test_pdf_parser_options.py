@@ -25,6 +25,26 @@ class _FakePdfReader:
         self.pages = [_FakePdfPage("broken text")]
 
 
+def _fake_page_layout(*, text_without_tables: str, ocr_fallback_reason: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        text_without_tables=text_without_tables,
+        tables=[],
+        width=100.0,
+        height=100.0,
+        column_count_hint=1,
+        layout_elapsed_s=0.0,
+        ocr_attempt_reason=ocr_fallback_reason,
+        ocr_fallback_reason=ocr_fallback_reason,
+        ocr_error_reason=None,
+        ocr_engine_init_elapsed_s=0.0,
+        ocr_render_elapsed_s=0.0,
+        ocr_call_elapsed_s=0.0,
+        ocr_provider_elapsed_s=0.0,
+        ocr_postprocess_elapsed_s=0.0,
+        ocr_total_elapsed_s=0.0,
+    )
+
+
 class PdfTextParserOptionsTests(unittest.TestCase):
     def test_defaults_keep_opt_in_features_off(self) -> None:
         parser = PdfTextParser(media_types=["application/pdf"], extensions=[".pdf"])
@@ -117,16 +137,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
             captured["ocr_page_text_fn"] = kwargs.get("ocr_page_text_fn")
-            return [
-                SimpleNamespace(
-                    text_without_tables="Recovered OCR text",
-                    tables=[],
-                    width=100.0,
-                    height=100.0,
-                    column_count_hint=1,
-                    ocr_fallback_reason="cid_ratio",
-                )
-            ]
+            return [_fake_page_layout(text_without_tables="Recovered OCR text", ocr_fallback_reason="cid_ratio")]
 
         with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
             pdf_path = Path(temp_dir) / "sample.pdf"
@@ -157,16 +168,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
             captured["ocr_page_text_fn"] = kwargs.get("ocr_page_text_fn")
-            return [
-                SimpleNamespace(
-                    text_without_tables="Native text path",
-                    tables=[],
-                    width=100.0,
-                    height=100.0,
-                    column_count_hint=1,
-                    ocr_fallback_reason=None,
-                )
-            ]
+            return [_fake_page_layout(text_without_tables="Native text path", ocr_fallback_reason=None)]
 
         with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
             pdf_path = Path(temp_dir) / "sample.pdf"
@@ -194,7 +196,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         )
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
-            recovered_text, attempt_reason, error_reason = kwargs["ocr_page_text_fn"](
+            recovered_text, attempt_reason, error_reason, _timings = kwargs["ocr_page_text_fn"](
                 SimpleNamespace(),
                 [],
                 1,
@@ -208,9 +210,16 @@ class PdfTextParserOptionsTests(unittest.TestCase):
                     width=100.0,
                     height=100.0,
                     column_count_hint=1,
+                    layout_elapsed_s=0.0,
                     ocr_attempt_reason=attempt_reason,
                     ocr_fallback_reason=attempt_reason if recovered_text else None,
                     ocr_error_reason=error_reason,
+                    ocr_engine_init_elapsed_s=0.0,
+                    ocr_render_elapsed_s=0.0,
+                    ocr_call_elapsed_s=0.0,
+                    ocr_provider_elapsed_s=0.0,
+                    ocr_postprocess_elapsed_s=0.0,
+                    ocr_total_elapsed_s=0.0,
                 )
             ]
 
@@ -228,10 +237,19 @@ class PdfTextParserOptionsTests(unittest.TestCase):
                 side_effect=fake_extract_pdfplumber_layout,
             ), patch(
                 "parsecore.parsers.PdfTextParser._ensure_pdf_ocr_engine",
-                return_value=(object(), None),
+                return_value=(object(), None, 0.0),
             ), patch(
                 "parsecore.parsers._extract_ocr_text_from_page",
-                return_value=(None, "provider_request_failed"),
+                return_value=(
+                    None,
+                    "provider_request_failed",
+                    SimpleNamespace(
+                        render_elapsed_s=0.0,
+                        call_elapsed_s=0.0,
+                        provider_elapsed_s=0.0,
+                        postprocess_elapsed_s=0.0,
+                    ),
+                ),
             ):
                 blocks = parser.parse(request)
 

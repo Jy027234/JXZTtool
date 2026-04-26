@@ -90,8 +90,16 @@ class EvaluateLayoutSignalsTests(unittest.TestCase):
                     "layout_elapsed_s": 1.5,
                     "ocr_attempted": True,
                     "ocr_render_elapsed_s": 2.0,
+                    "ocr_input_prepare_elapsed_s": 0.01,
+                    "ocr_engine_exec_elapsed_s": 2.99,
                     "ocr_call_elapsed_s": 3.0,
                     "ocr_provider_elapsed_s": 2.5,
+                    "ocr_provider_det_elapsed_s": 0.4,
+                    "ocr_provider_cls_elapsed_s": 0.1,
+                    "ocr_provider_rec_elapsed_s": 2.0,
+                    "ocr_provider_crop_count": 12,
+                    "ocr_provider_cls_rotate_positive_count": 3,
+                    "ocr_provider_cls_rotate_high_count": 1,
                     "ocr_postprocess_elapsed_s": 0.5,
                     "ocr_total_elapsed_s": 5.5,
                 },
@@ -107,8 +115,16 @@ class EvaluateLayoutSignalsTests(unittest.TestCase):
                     "layout_elapsed_s": 1.5,
                     "ocr_attempted": True,
                     "ocr_render_elapsed_s": 2.0,
+                    "ocr_input_prepare_elapsed_s": 0.01,
+                    "ocr_engine_exec_elapsed_s": 2.99,
                     "ocr_call_elapsed_s": 3.0,
                     "ocr_provider_elapsed_s": 2.5,
+                    "ocr_provider_det_elapsed_s": 0.4,
+                    "ocr_provider_cls_elapsed_s": 0.1,
+                    "ocr_provider_rec_elapsed_s": 2.0,
+                    "ocr_provider_crop_count": 12,
+                    "ocr_provider_cls_rotate_positive_count": 3,
+                    "ocr_provider_cls_rotate_high_count": 1,
                     "ocr_postprocess_elapsed_s": 0.5,
                     "ocr_total_elapsed_s": 5.5,
                 },
@@ -125,8 +141,16 @@ class EvaluateLayoutSignalsTests(unittest.TestCase):
                     "ocr_attempted": True,
                     "ocr_engine_init_elapsed_s": 0.2,
                     "ocr_render_elapsed_s": 1.0,
+                    "ocr_input_prepare_elapsed_s": 0.02,
+                    "ocr_engine_exec_elapsed_s": 3.98,
                     "ocr_call_elapsed_s": 4.0,
                     "ocr_provider_elapsed_s": 3.5,
+                    "ocr_provider_det_elapsed_s": 0.6,
+                    "ocr_provider_cls_elapsed_s": 0.2,
+                    "ocr_provider_rec_elapsed_s": 2.7,
+                    "ocr_provider_crop_count": 8,
+                    "ocr_provider_cls_rotate_positive_count": 2,
+                    "ocr_provider_cls_rotate_high_count": 0,
                     "ocr_postprocess_elapsed_s": 0.25,
                     "ocr_total_elapsed_s": 5.25,
                 },
@@ -138,11 +162,26 @@ class EvaluateLayoutSignalsTests(unittest.TestCase):
         self.assertAlmostEqual(report.layout_elapsed_s, 2.25)
         self.assertAlmostEqual(report.ocr_engine_init_elapsed_s, 0.2)
         self.assertAlmostEqual(report.ocr_render_elapsed_s, 3.0)
+        self.assertAlmostEqual(report.ocr_input_prepare_elapsed_s, 0.03)
+        self.assertAlmostEqual(report.ocr_engine_exec_elapsed_s, 6.97)
         self.assertAlmostEqual(report.ocr_call_elapsed_s, 7.0)
         self.assertAlmostEqual(report.ocr_provider_elapsed_s, 6.0)
+        self.assertAlmostEqual(report.ocr_provider_det_elapsed_s, 1.0)
+        self.assertAlmostEqual(report.ocr_provider_cls_elapsed_s, 0.3)
+        self.assertAlmostEqual(report.ocr_provider_rec_elapsed_s, 4.7)
+        self.assertEqual(report.ocr_provider_crop_count, 20)
+        self.assertEqual(report.ocr_provider_cls_rotate_positive_count, 5)
+        self.assertEqual(report.ocr_provider_cls_rotate_high_count, 1)
         self.assertAlmostEqual(report.ocr_postprocess_elapsed_s, 0.75)
         self.assertAlmostEqual(report.ocr_total_elapsed_s, 10.75)
         self.assertAlmostEqual(report.max_ocr_page_elapsed_s, 5.5)
+        self.assertEqual(len(report.ocr_page_signals), 2)
+        hot_page = report.ocr_hot_pages(top=1)[0]
+        self.assertEqual(hot_page.page_number, 1)
+        self.assertAlmostEqual(hot_page.cls_rotate_high_ratio, 1 / 12)
+        sparse_page = report.ocr_sparse_cls_pages(top=1)[0]
+        self.assertEqual(sparse_page.page_number, 2)
+        self.assertAlmostEqual(sparse_page.cls_rotate_high_ratio, 0.0)
 
 
 if __name__ == "__main__":

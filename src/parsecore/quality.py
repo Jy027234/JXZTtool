@@ -41,6 +41,19 @@ class PageQuality:
 
 
 @dataclass(slots=True)
+class OcrPageSignal:
+    page_number: int
+    ocr_total_elapsed_s: float
+    ocr_engine_exec_elapsed_s: float
+    ocr_provider_cls_elapsed_s: float
+    ocr_provider_crop_count: int
+    ocr_provider_cls_rotate_positive_count: int
+    ocr_provider_cls_rotate_high_count: int
+    cls_rotate_positive_ratio: float
+    cls_rotate_high_ratio: float
+
+
+@dataclass(slots=True)
 class LayoutSignalsReport:
     pages_with_layout_metadata: int
     multi_column_pages: int
@@ -55,11 +68,48 @@ class LayoutSignalsReport:
     layout_elapsed_s: float
     ocr_engine_init_elapsed_s: float
     ocr_render_elapsed_s: float
+    ocr_input_prepare_elapsed_s: float
+    ocr_engine_exec_elapsed_s: float
     ocr_call_elapsed_s: float
     ocr_provider_elapsed_s: float
+    ocr_provider_det_elapsed_s: float
+    ocr_provider_cls_elapsed_s: float
+    ocr_provider_rec_elapsed_s: float
+    ocr_provider_crop_count: int
+    ocr_provider_cls_rotate_positive_count: int
+    ocr_provider_cls_rotate_high_count: int
     ocr_postprocess_elapsed_s: float
     ocr_total_elapsed_s: float
     max_ocr_page_elapsed_s: float
+    ocr_page_signals: tuple[OcrPageSignal, ...] = field(default_factory=tuple)
+
+    def ocr_hot_pages(self, *, top: int = 10) -> tuple[OcrPageSignal, ...]:
+        ranked = sorted(
+            (page for page in self.ocr_page_signals if page.ocr_total_elapsed_s > 0.0),
+            key=lambda page: (
+                page.ocr_total_elapsed_s,
+                page.ocr_engine_exec_elapsed_s,
+                page.ocr_provider_crop_count,
+            ),
+            reverse=True,
+        )
+        return tuple(ranked[:top])
+
+    def ocr_sparse_cls_pages(self, *, top: int = 10) -> tuple[OcrPageSignal, ...]:
+        ranked = sorted(
+            (
+                page
+                for page in self.ocr_page_signals
+                if page.ocr_total_elapsed_s > 0.0 and page.ocr_provider_crop_count > 0
+            ),
+            key=lambda page: (
+                page.cls_rotate_high_ratio,
+                page.ocr_total_elapsed_s * -1.0,
+                page.ocr_provider_crop_count * -1,
+                page.page_number,
+            ),
+        )
+        return tuple(ranked[:top])
 
 
 @dataclass(slots=True)
@@ -202,10 +252,20 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
         "layout_elapsed_s",
         "ocr_engine_init_elapsed_s",
         "ocr_render_elapsed_s",
+        "ocr_input_prepare_elapsed_s",
+        "ocr_engine_exec_elapsed_s",
         "ocr_call_elapsed_s",
         "ocr_provider_elapsed_s",
+        "ocr_provider_det_elapsed_s",
+        "ocr_provider_cls_elapsed_s",
+        "ocr_provider_rec_elapsed_s",
         "ocr_postprocess_elapsed_s",
         "ocr_total_elapsed_s",
+    )
+    count_keys = (
+        "ocr_provider_crop_count",
+        "ocr_provider_cls_rotate_positive_count",
+        "ocr_provider_cls_rotate_high_count",
     )
 
     for block in blocks:
@@ -245,18 +305,61 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
             if value <= 0.0:
                 continue
             page_timing[key] = max(page_timing.get(key, 0.0), value)
+        for key in count_keys:
+            raw_value = metadata.get(key)
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            page_timing[key] = max(page_timing.get(key, 0.0), float(value))
 
     layout_elapsed_s = sum(item.get("layout_elapsed_s", 0.0) for item in page_timings.values())
     ocr_engine_init_elapsed_s = sum(item.get("ocr_engine_init_elapsed_s", 0.0) for item in page_timings.values())
     ocr_render_elapsed_s = sum(item.get("ocr_render_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_input_prepare_elapsed_s = sum(item.get("ocr_input_prepare_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_engine_exec_elapsed_s = sum(item.get("ocr_engine_exec_elapsed_s", 0.0) for item in page_timings.values())
     ocr_call_elapsed_s = sum(item.get("ocr_call_elapsed_s", 0.0) for item in page_timings.values())
     ocr_provider_elapsed_s = sum(item.get("ocr_provider_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_provider_det_elapsed_s = sum(item.get("ocr_provider_det_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_provider_cls_elapsed_s = sum(item.get("ocr_provider_cls_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_provider_rec_elapsed_s = sum(item.get("ocr_provider_rec_elapsed_s", 0.0) for item in page_timings.values())
+    ocr_provider_crop_count = int(sum(item.get("ocr_provider_crop_count", 0.0) for item in page_timings.values()))
+    ocr_provider_cls_rotate_positive_count = int(
+        sum(item.get("ocr_provider_cls_rotate_positive_count", 0.0) for item in page_timings.values())
+    )
+    ocr_provider_cls_rotate_high_count = int(
+        sum(item.get("ocr_provider_cls_rotate_high_count", 0.0) for item in page_timings.values())
+    )
     ocr_postprocess_elapsed_s = sum(item.get("ocr_postprocess_elapsed_s", 0.0) for item in page_timings.values())
     ocr_total_elapsed_s = sum(item.get("ocr_total_elapsed_s", 0.0) for item in page_timings.values())
     max_ocr_page_elapsed_s = max(
         (item.get("ocr_total_elapsed_s", 0.0) for item in page_timings.values()),
         default=0.0,
     )
+    ocr_page_signals: list[OcrPageSignal] = []
+    for page_number in sorted(page_timings):
+        item = page_timings[page_number]
+        if not item:
+            continue
+        crop_count = int(item.get("ocr_provider_crop_count", 0.0))
+        rotate_positive_count = int(item.get("ocr_provider_cls_rotate_positive_count", 0.0))
+        rotate_high_count = int(item.get("ocr_provider_cls_rotate_high_count", 0.0))
+        crop_base = max(crop_count, 1)
+        ocr_page_signals.append(
+            OcrPageSignal(
+                page_number=page_number,
+                ocr_total_elapsed_s=item.get("ocr_total_elapsed_s", 0.0),
+                ocr_engine_exec_elapsed_s=item.get("ocr_engine_exec_elapsed_s", 0.0),
+                ocr_provider_cls_elapsed_s=item.get("ocr_provider_cls_elapsed_s", 0.0),
+                ocr_provider_crop_count=crop_count,
+                ocr_provider_cls_rotate_positive_count=rotate_positive_count,
+                ocr_provider_cls_rotate_high_count=rotate_high_count,
+                cls_rotate_positive_ratio=rotate_positive_count / crop_base if crop_count else 0.0,
+                cls_rotate_high_ratio=rotate_high_count / crop_base if crop_count else 0.0,
+            )
+        )
 
     return LayoutSignalsReport(
         pages_with_layout_metadata=len(pages_with_layout_metadata),
@@ -272,11 +375,20 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
         layout_elapsed_s=layout_elapsed_s,
         ocr_engine_init_elapsed_s=ocr_engine_init_elapsed_s,
         ocr_render_elapsed_s=ocr_render_elapsed_s,
+        ocr_input_prepare_elapsed_s=ocr_input_prepare_elapsed_s,
+        ocr_engine_exec_elapsed_s=ocr_engine_exec_elapsed_s,
         ocr_call_elapsed_s=ocr_call_elapsed_s,
         ocr_provider_elapsed_s=ocr_provider_elapsed_s,
+        ocr_provider_det_elapsed_s=ocr_provider_det_elapsed_s,
+        ocr_provider_cls_elapsed_s=ocr_provider_cls_elapsed_s,
+        ocr_provider_rec_elapsed_s=ocr_provider_rec_elapsed_s,
+        ocr_provider_crop_count=ocr_provider_crop_count,
+        ocr_provider_cls_rotate_positive_count=ocr_provider_cls_rotate_positive_count,
+        ocr_provider_cls_rotate_high_count=ocr_provider_cls_rotate_high_count,
         ocr_postprocess_elapsed_s=ocr_postprocess_elapsed_s,
         ocr_total_elapsed_s=ocr_total_elapsed_s,
         max_ocr_page_elapsed_s=max_ocr_page_elapsed_s,
+        ocr_page_signals=tuple(ocr_page_signals),
     )
 
 
@@ -330,6 +442,7 @@ def diff_reports(
 __all__ = [
     "EmbeddingQualityReport",
     "LayoutSignalsReport",
+    "OcrPageSignal",
     "PageQuality",
     "StructuralQualityReport",
     "evaluate_blocks",

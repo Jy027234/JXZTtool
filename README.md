@@ -46,6 +46,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径
 - [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)：宿主接 OCR provider 前的配置、探活、事件与回滚检查清单
+- [docs/go-live-readiness.md](docs/go-live-readiness.md)：主线版本进入产品灰度前的必做项、遗留问题分级与回滚口径
 - [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
 - [archive/jobcard-host/README.md](archive/jobcard-host/README.md)：jobcard 宿主接线、切流与替换资料归档
 - [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)：jobcard 历史双跑记录、runbook 和辅助脚本归档
@@ -64,6 +65,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │     └─ tools/
 ├─ docs/
 │  ├─ architecture.md
+│  ├─ go-live-readiness.md
 │  ├─ implementation-plan.md
 │  ├─ self-check-gate.md
 │  ├─ ocr-integration-checklist.md

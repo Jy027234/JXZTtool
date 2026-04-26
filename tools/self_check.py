@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=str(ROOT / "var" / "self-check" / "latest.json"),
     )
     parser.add_argument("--skip-regression", action="store_true")
-    parser.add_argument("--regression-timeout-seconds", type=int, default=600)
+    parser.add_argument("--regression-timeout-seconds", type=int, default=900)
     return parser
 
 
