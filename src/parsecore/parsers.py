@@ -6,9 +6,27 @@ from typing import Any, Callable, Mapping, Sequence
 import xml.etree.ElementTree as ET
 import zipfile
 
+from .config import OcrProviderSettings
 from .contracts import ParserAdapter
 from .models import Block, BlockType, ParseRequest, SemanticRole
+from .ocr import OcrConfigurationError, OcrRequestError, build_ocr_engine
 from .stubs import StubParser
+
+
+_DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
+    enabled=True,
+    provider="rapidocr",
+)
+
+
+def _classify_ocr_error(exc: Exception) -> str:
+    if isinstance(exc, OcrConfigurationError):
+        return "provider_configuration_error"
+    if isinstance(exc, OcrRequestError):
+        return "provider_request_failed"
+    if isinstance(exc, RuntimeError):
+        return "provider_unavailable"
+    return "provider_execution_failed"
 
 
 class DocxParser(ParserAdapter):
@@ -38,6 +56,7 @@ class DocxParser(ParserAdapter):
                 content=document_path.stem,
                 metadata={
                     "page": 1,
+                    "page_type": "body",
                     "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
                 },
@@ -57,6 +76,7 @@ class DocxParser(ParserAdapter):
                     content=content,
                     metadata={
                         "page": 1,
+                        "page_type": "body",
                         "parser": self.name,
                         "position": position,
                         "semantic_role": SemanticRole.PARAGRAPH.value,
@@ -90,6 +110,7 @@ class TextParser(ParserAdapter):
                 content=Path(request.file_path).stem,
                 metadata={
                     "page": 1,
+                    "page_type": "body",
                     "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
                 },
@@ -104,6 +125,7 @@ class TextParser(ParserAdapter):
                     content=paragraph,
                     metadata={
                         "page": 1,
+                        "page_type": "body",
                         "parser": self.name,
                         "position": position,
                         "semantic_role": SemanticRole.PARAGRAPH.value,
@@ -122,6 +144,7 @@ class PdfTextParser(ParserAdapter):
         media_types: Sequence[str],
         extensions: Sequence[str],
         options: Mapping[str, Any] | None = None,
+        ocr_provider_settings: OcrProviderSettings | None = None,
         boundary_refiner: Any = None,
     ) -> None:
         self._media_types = {item.lower() for item in media_types}
@@ -194,6 +217,9 @@ class PdfTextParser(ParserAdapter):
         self._ocr_merge_line_gap_ratio = float(
             post_process.get("ocr_merge_line_gap_ratio", 1.6)
         )
+        self._ocr_provider_settings = (
+            ocr_provider_settings or _DEFAULT_OCR_PROVIDER_SETTINGS
+        )
         self._ocr_parser: ImageOcrParser | None = None
         # A4 LLM hookup: optional boundary refiner invoked on low-confidence
         # paragraphs only. None == feature disabled (default).
@@ -210,17 +236,18 @@ class PdfTextParser(ParserAdapter):
         normalized_suffix = suffix.lower()
         return normalized_type in self._media_types or normalized_suffix in self._extensions
 
-    def _ensure_pdf_ocr_engine(self) -> Any | None:
+    def _ensure_pdf_ocr_engine(self) -> tuple[Any | None, str | None]:
         if self._ocr_parser is None:
             self._ocr_parser = ImageOcrParser(
                 media_types=["image/png", "image/jpeg"],
                 extensions=[".png", ".jpg", ".jpeg"],
                 options={"confidence_threshold": self._ocr_confidence_threshold},
+                ocr_provider_settings=self._ocr_provider_settings,
             )
         try:
-            return self._ocr_parser._ensure_engine()
-        except Exception:
-            return None
+            return self._ocr_parser._ensure_engine(), None
+        except Exception as exc:
+            return None, _classify_ocr_error(exc)
 
     def _maybe_recover_page_with_ocr(
         self,
@@ -228,20 +255,18 @@ class PdfTextParser(ParserAdapter):
         table_bboxes: Sequence[tuple[float, float, float, float]],
         column_count_hint: int,
         extracted_text: str | None,
-    ) -> tuple[str | None, str | None]:
-        if not self._ocr_bad_pages_enabled:
-            return None, None
+    ) -> tuple[str | None, str | None, str | None]:
         reason = _ocr_fallback_reason_for_page(
             extracted_text or "",
             min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
             min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
         )
         if reason is None:
-            return None, None
-        engine = self._ensure_pdf_ocr_engine()
+            return None, None, None
+        engine, engine_error_reason = self._ensure_pdf_ocr_engine()
         if engine is None:
-            return None, None
-        text = _extract_ocr_text_from_page(
+            return None, reason, engine_error_reason or "provider_unavailable"
+        text, ocr_error_reason = _extract_ocr_text_from_page(
             page,
             engine=engine,
             table_bboxes=table_bboxes,
@@ -251,11 +276,20 @@ class PdfTextParser(ParserAdapter):
             merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
         )
         if not text:
-            return None, None
-        return text, reason
+            return None, reason, ocr_error_reason or "empty_ocr_text"
+        return text, reason, None
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
+        request_enable_ocr = _resolve_request_enable_ocr(request)
+        effective_ocr_bad_pages_enabled = (
+            self._ocr_bad_pages_enabled
+            if request_enable_ocr is None
+            else request_enable_ocr
+        )
+        effective_dual_channel_enabled = (
+            self._dual_channel_enabled or effective_ocr_bad_pages_enabled
+        )
 
         if self._boundary_refiner is not None:
             reset = getattr(self._boundary_refiner, "reset", None)
@@ -265,12 +299,13 @@ class PdfTextParser(ParserAdapter):
         reader = PdfReader(request.file_path)
         page_texts = [page.extract_text() or "" for page in reader.pages]
         layout_pages: list[_PageLayout] = []
-        if self._dual_channel_enabled:
+        if effective_dual_channel_enabled:
+            ocr_page_text_fn = self._maybe_recover_page_with_ocr if effective_ocr_bad_pages_enabled else None
             layout_pages = _extract_pdfplumber_layout(
                 request.file_path,
                 min_rows=self._dual_table_min_rows,
                 min_cols=self._dual_table_min_cols,
-                ocr_page_text_fn=self._maybe_recover_page_with_ocr,
+                ocr_page_text_fn=ocr_page_text_fn,
             )
             # Replace per-page text with the table-stripped pdfplumber text so
             # the existing splitters do not see table contents twice.
@@ -301,6 +336,7 @@ class PdfTextParser(ParserAdapter):
                 content=Path(request.file_path).stem,
                 metadata={
                     "page": 1,
+                    "page_type": "body",
                     "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
                 },
@@ -310,37 +346,9 @@ class PdfTextParser(ParserAdapter):
         for page_number, page_text in enumerate(cleaned_page_texts, start=1):
             page_layout = (
                 layout_pages[page_number - 1]
-                if self._dual_channel_enabled and page_number - 1 < len(layout_pages)
+                if effective_dual_channel_enabled and page_number - 1 < len(layout_pages)
                 else None
             )
-            if page_layout is not None:
-                for table_index, table in enumerate(page_layout.tables, start=1):
-                    blocks.append(
-                        Block(
-                            block_id=f"{request.doc_id}-t-{position}",
-                            doc_id=request.doc_id,
-                            type=BlockType.TABLE,
-                            content=table.render_text(),
-                            metadata={
-                                "page": page_number,
-                                "parser": self.name,
-                                "position": position,
-                                "kind": "table",
-                                "semantic_role": SemanticRole.TABLE.value,
-                                "rows": table.row_count,
-                                "cols": table.col_count,
-                                "bbox": table.bbox,
-                                "page_width": page_layout.width,
-                                "page_height": page_layout.height,
-                                "column_count_hint": page_layout.column_count_hint,
-                                "cells": table.cells,
-                                "table_index": table_index,
-                                "ocr_fallback_used": bool(page_layout.ocr_fallback_reason),
-                                "ocr_fallback_reason": page_layout.ocr_fallback_reason,
-                            },
-                        )
-                    )
-                    position += 1
             paragraphs = _split_pdf_page_text(page_text)
             if self._split_structural_enabled:
                 paragraphs = _split_structural_items(
@@ -370,28 +378,80 @@ class PdfTextParser(ParserAdapter):
                     min_length=self._llm_min_length,
                     min_markers=self._llm_min_markers,
                 )
+            is_highlights_page = _is_highlights_page(paragraphs)
+            paragraph_roles = [
+                _infer_semantic_role(paragraph, is_highlights_page=is_highlights_page)
+                for paragraph in paragraphs
+            ]
+            page_type = _infer_page_type(
+                page_number=page_number,
+                roles=paragraph_roles,
+                full_text="\n\n".join(paragraphs),
+                has_title=(page_number == 1),
+            )
+            if page_layout is not None:
+                for table_index, table in enumerate(page_layout.tables, start=1):
+                    blocks.append(
+                        Block(
+                            block_id=f"{request.doc_id}-t-{position}",
+                            doc_id=request.doc_id,
+                            type=BlockType.TABLE,
+                            content=table.render_text(),
+                            metadata={
+                                "page": page_number,
+                                "page_type": page_type,
+                                "parser": self.name,
+                                "position": position,
+                                "kind": "table",
+                                "semantic_role": SemanticRole.TABLE.value,
+                                "rows": table.row_count,
+                                "cols": table.col_count,
+                                "bbox": table.bbox,
+                                "page_width": page_layout.width,
+                                "page_height": page_layout.height,
+                                "column_count_hint": page_layout.column_count_hint,
+                                "cells": table.cells,
+                                "table_index": table_index,
+                            },
+                        )
+                    )
+                    ocr_attempt_reason = getattr(page_layout, "ocr_attempt_reason", None)
+                    if ocr_attempt_reason is not None:
+                        blocks[-1].metadata["ocr_attempted"] = True
+                        blocks[-1].metadata["ocr_attempt_reason"] = ocr_attempt_reason
+                    if page_layout.ocr_fallback_reason is not None:
+                        blocks[-1].metadata["ocr_fallback_used"] = True
+                        blocks[-1].metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
+                    ocr_error_reason = getattr(page_layout, "ocr_error_reason", None)
+                    if ocr_error_reason is not None:
+                        blocks[-1].metadata["ocr_error_reason"] = ocr_error_reason
+                    position += 1
             if not paragraphs:
                 continue
-            is_highlights_page = _is_highlights_page(paragraphs)
-            for page_position, paragraph in enumerate(paragraphs, start=1):
+            for page_position, (paragraph, semantic_role) in enumerate(zip(paragraphs, paragraph_roles), start=1):
                 metadata: dict[str, Any] = {
                     "page": page_number,
+                    "page_type": page_type,
                     "parser": self.name,
                     "position": position,
                     "page_position": page_position,
-                    "semantic_role": _infer_semantic_role(
-                        paragraph,
-                        is_highlights_page=is_highlights_page,
-                    ),
+                    "semantic_role": semantic_role,
                 }
                 if page_layout is not None:
                     metadata["page_width"] = page_layout.width
                     metadata["page_height"] = page_layout.height
                     metadata["layout_source"] = "pdfplumber"
                     metadata["column_count_hint"] = page_layout.column_count_hint
+                    ocr_attempt_reason = getattr(page_layout, "ocr_attempt_reason", None)
+                    if ocr_attempt_reason is not None:
+                        metadata["ocr_attempted"] = True
+                        metadata["ocr_attempt_reason"] = ocr_attempt_reason
                     if page_layout.ocr_fallback_reason is not None:
                         metadata["ocr_fallback_used"] = True
                         metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
+                    ocr_error_reason = getattr(page_layout, "ocr_error_reason", None)
+                    if ocr_error_reason is not None:
+                        metadata["ocr_error_reason"] = ocr_error_reason
                 if page_number in stripped_page_numbers:
                     metadata["header_footer_stripped"] = True
                 blocks.append(
@@ -553,6 +613,41 @@ def _infer_semantic_role(
         if _HIGHLIGHTS_CHANGE_START_PATTERN.match(stripped) or _HIGHLIGHTS_PAGE_REF_PATTERN.search(stripped):
             return SemanticRole.HIGHLIGHTS_ENTRY.value
     return SemanticRole.PARAGRAPH.value
+
+
+def _infer_page_type(
+    *,
+    page_number: int,
+    roles: Sequence[str],
+    full_text: str,
+    has_title: bool,
+) -> str:
+    role_set = set(roles)
+    normalized_text = full_text.lower()
+    stripped_text = full_text.strip()
+    if SemanticRole.TOC_ENTRY.value in role_set or SemanticRole.LEP_ENTRY.value in role_set:
+        return "toc"
+    if any(token in normalized_text for token in ("signature", "signed by", "approved by", "签字", "签名", "审批")):
+        return "signature"
+    if any(token in normalized_text for token in ("appendix", "annex", "附录")):
+        return "appendix"
+    if page_number == 1 and has_title and not stripped_text:
+        return "cover"
+    return "body"
+
+
+def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
+    if "enable_ocr" not in request.options:
+        return None
+    value = request.options.get("enable_ocr")
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(value)
 
 
 def _split_structural_items(
@@ -911,6 +1006,7 @@ class ImageOcrParser(ParserAdapter):
         media_types: Sequence[str],
         extensions: Sequence[str],
         options: Mapping[str, Any] | None = None,
+        ocr_provider_settings: OcrProviderSettings | None = None,
     ) -> None:
         self._media_types = {item.lower() for item in media_types}
         self._extensions = {item.lower() for item in extensions}
@@ -918,6 +1014,9 @@ class ImageOcrParser(ParserAdapter):
         self._confidence_threshold = float(opts.get("confidence_threshold", 0.5))
         self._merge_short_enabled = bool(opts.get("merge_short_blocks", False))
         self._short_block_min_length = int(opts.get("short_block_min_length", 3))
+        self._ocr_provider_settings = (
+            ocr_provider_settings or _DEFAULT_OCR_PROVIDER_SETTINGS
+        )
         # Cached singleton; RapidOCR initialisation loads ~50MB of ONNX models.
         self._engine: Any = None
 
@@ -928,14 +1027,7 @@ class ImageOcrParser(ParserAdapter):
 
     def _ensure_engine(self) -> Any:
         if self._engine is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR  # type: ignore
-            except ImportError as exc:
-                raise RuntimeError(
-                    "rapidocr_onnxruntime is required for image-ocr parser; "
-                    "install via `pip install rapidocr_onnxruntime`"
-                ) from exc
-            self._engine = RapidOCR()
+            self._engine = build_ocr_engine(self._ocr_provider_settings)
         return self._engine
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
@@ -1054,7 +1146,9 @@ class _PageLayout:
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
     column_count_hint: int = 1
+    ocr_attempt_reason: str | None = None
     ocr_fallback_reason: str | None = None
+    ocr_error_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -1072,7 +1166,7 @@ def _extract_pdfplumber_layout(
     min_cols: int,
     ocr_page_text_fn: Callable[
         [Any, Sequence[tuple[float, float, float, float]], int, str | None],
-        tuple[str | None, str | None],
+        tuple[str | None, str | None, str | None],
     ] | None = None,
 ) -> list[_PageLayout]:
     """Extract per-page layout (tables + table-stripped text) using pdfplumber.
@@ -1116,7 +1210,9 @@ def _extract_pdfplumber_layout(
 
             column_count_hint = _estimate_column_count(page)
             text_without_tables: str | None
+            ocr_attempt_reason: str | None = None
             ocr_fallback_reason: str | None = None
+            ocr_error_reason: str | None = None
             try:
                 if _should_rebuild_multi_column_text(page, column_count_hint=column_count_hint):
                     text_without_tables = _extract_text_by_columns(
@@ -1132,7 +1228,7 @@ def _extract_pdfplumber_layout(
                 text_without_tables = None
 
             if ocr_page_text_fn is not None:
-                recovered_text, ocr_fallback_reason = ocr_page_text_fn(
+                recovered_text, ocr_attempt_reason, ocr_error_reason = ocr_page_text_fn(
                     page,
                     table_bboxes,
                     column_count_hint,
@@ -1140,6 +1236,7 @@ def _extract_pdfplumber_layout(
                 )
                 if recovered_text:
                     text_without_tables = recovered_text
+                    ocr_fallback_reason = ocr_attempt_reason
 
             layouts.append(
                 _PageLayout(
@@ -1149,7 +1246,9 @@ def _extract_pdfplumber_layout(
                     text_without_tables=text_without_tables,
                     tables=tables,
                     column_count_hint=column_count_hint,
+                    ocr_attempt_reason=ocr_attempt_reason,
                     ocr_fallback_reason=ocr_fallback_reason,
+                    ocr_error_reason=ocr_error_reason,
                 )
             )
     return layouts
@@ -1190,12 +1289,12 @@ def _extract_ocr_text_from_page(
         import numpy as np  # type: ignore
         from PIL import ImageDraw  # type: ignore
     except ImportError:
-        return None
+        return None, "ocr_dependencies_missing"
 
     try:
         rendered = page.to_image(resolution=resolution).original.convert("RGB")
     except Exception:
-        return None
+        return None, "ocr_render_failed"
 
     if table_bboxes:
         draw = ImageDraw.Draw(rendered)
@@ -1214,8 +1313,8 @@ def _extract_ocr_text_from_page(
 
     try:
         result, _elapsed = engine(np.array(rendered))
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, _classify_ocr_error(exc)
 
     lines = _collect_ocr_lines(
         result,
@@ -1225,8 +1324,8 @@ def _extract_ocr_text_from_page(
     )
     paragraphs = _group_ocr_lines(lines, merge_line_gap_ratio=merge_line_gap_ratio)
     if not paragraphs:
-        return None
-    return "\n\n".join(paragraphs)
+        return None, "empty_ocr_text"
+    return "\n\n".join(paragraphs), None
 
 
 def _collect_ocr_lines(
@@ -1539,6 +1638,7 @@ def build_parser(
     media_types: Sequence[str],
     extensions: Sequence[str],
     options: Mapping[str, Any] | None = None,
+    ocr_provider_settings: OcrProviderSettings | None = None,
     boundary_refiner: Any = None,
 ) -> ParserAdapter:
     normalized = name.strip().lower()
@@ -1551,10 +1651,14 @@ def build_parser(
             media_types=media_types,
             extensions=extensions,
             options=options,
+            ocr_provider_settings=ocr_provider_settings,
             boundary_refiner=boundary_refiner,
         )
     if normalized == "image-ocr":
         return ImageOcrParser(
-            media_types=media_types, extensions=extensions, options=options
+            media_types=media_types,
+            extensions=extensions,
+            options=options,
+            ocr_provider_settings=ocr_provider_settings,
         )
     return StubParser(name=name, media_types=media_types, extensions=extensions)

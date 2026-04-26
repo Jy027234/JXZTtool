@@ -26,6 +26,11 @@ def _sqlite_path(database_url: str) -> Path:
     return Path(raw_path)
 
 
+def _normalize_tenant_id(tenant_id: str | None) -> str:
+    value = str(tenant_id or "").strip()
+    return value or "default"
+
+
 class SQLiteJobStore(JobStore):
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
@@ -41,6 +46,9 @@ class SQLiteJobStore(JobStore):
             file_path=request.file_path,
             media_type=request.media_type,
             options=dict(request.options),
+            tenant_id=request.tenant_id,
+            quota_key=request.quota_key,
+            quota_units=max(1, int(request.quota_units or 1)),
             state=ParseJobState.PENDING,
             created_at=now,
             updated_at=now,
@@ -50,8 +58,9 @@ class SQLiteJobStore(JobStore):
                 """
                 INSERT INTO parse_jobs (
                     job_id, doc_id, file_path, media_type, options_json,
+                    tenant_id, quota_key, quota_units,
                     state, created_at, updated_at, failure_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -59,6 +68,9 @@ class SQLiteJobStore(JobStore):
                     job.file_path,
                     job.media_type,
                     json.dumps(job.options, ensure_ascii=False),
+                    job.tenant_id,
+                    job.quota_key,
+                    int(job.quota_units),
                     job.state.value,
                     job.created_at,
                     job.updated_at,
@@ -89,17 +101,22 @@ class SQLiteJobStore(JobStore):
             raise KeyError(job_id)
         return job
 
-    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block]) -> None:
+    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block], tenant_id: str | None = None) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn:
-            conn.execute("DELETE FROM blocks WHERE doc_id = ?", (doc_id,))
+            conn.execute(
+                "DELETE FROM blocks WHERE doc_id = ? AND tenant_id = ?",
+                (doc_id, normalized_tenant),
+            )
             conn.executemany(
                 """
-                INSERT INTO blocks (doc_id, position, block_id, type, content, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO blocks (doc_id, tenant_id, position, block_id, type, content, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         doc_id,
+                        normalized_tenant,
                         position,
                         block.block_id,
                         block.type.value,
@@ -110,17 +127,22 @@ class SQLiteJobStore(JobStore):
                 ],
             )
 
-    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None:
+    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn:
-            conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+            conn.execute(
+                "DELETE FROM chunks WHERE doc_id = ? AND tenant_id = ?",
+                (doc_id, normalized_tenant),
+            )
             conn.executemany(
                 """
-                INSERT INTO chunks (doc_id, position, chunk_id, block_ids_json, text, language, semantic_role, embedding_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chunks (doc_id, tenant_id, position, chunk_id, block_ids_json, text, language, semantic_role, embedding_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         doc_id,
+                        normalized_tenant,
                         position,
                         chunk.chunk_id,
                         json.dumps(chunk.block_ids, ensure_ascii=False),
@@ -140,6 +162,7 @@ class SQLiteJobStore(JobStore):
             row = conn.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs
@@ -164,6 +187,7 @@ class SQLiteJobStore(JobStore):
             claimed = conn.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs
@@ -180,6 +204,7 @@ class SQLiteJobStore(JobStore):
             row = conn.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs
@@ -196,6 +221,7 @@ class SQLiteJobStore(JobStore):
             row = conn.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs
@@ -212,6 +238,7 @@ class SQLiteJobStore(JobStore):
     def list_jobs(self, *, doc_id: str | None = None) -> Sequence[ParseJob]:
         query = (
             "SELECT job_id, doc_id, file_path, media_type, options_json, "
+            "tenant_id, quota_key, quota_units, "
             "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at FROM parse_jobs"
         )
         params: tuple[str, ...] = ()
@@ -223,16 +250,17 @@ class SQLiteJobStore(JobStore):
             rows = conn.execute(query, params).fetchall()
         return tuple(self._row_to_job(row) for row in rows)
 
-    def get_blocks(self, *, doc_id: str) -> Sequence[Block]:
+    def get_blocks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Block]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT block_id, doc_id, type, content, metadata_json
                 FROM blocks
-                WHERE doc_id = ?
+                WHERE doc_id = ? AND tenant_id = ?
                 ORDER BY position ASC
                 """,
-                (doc_id,),
+                (doc_id, normalized_tenant),
             ).fetchall()
         return tuple(
             Block(
@@ -245,16 +273,17 @@ class SQLiteJobStore(JobStore):
             for row in rows
         )
 
-    def get_chunks(self, *, doc_id: str) -> Sequence[Chunk]:
+    def get_chunks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Chunk]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT chunk_id, doc_id, block_ids_json, text, language, semantic_role, embedding_json
                 FROM chunks
-                WHERE doc_id = ?
+                WHERE doc_id = ? AND tenant_id = ?
                 ORDER BY position ASC
                 """,
-                (doc_id,),
+                (doc_id, normalized_tenant),
             ).fetchall()
         return tuple(
             Chunk(
@@ -269,6 +298,35 @@ class SQLiteJobStore(JobStore):
             for row in rows
         )
 
+    def increment_attempt(self, *, job_id: str) -> int:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE parse_jobs SET attempt_count = attempt_count + 1, updated_at = ? WHERE job_id = ?",
+                (now, job_id),
+            )
+            row = conn.execute(
+                "SELECT attempt_count FROM parse_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE parse_jobs
+                SET state = ?, failure_reason = ?, dead_lettered_at = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (ParseJobState.FAILED.value, reason, now, now, job_id),
+            )
+        job = self.get_job(job_id=job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
+
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(
@@ -279,6 +337,9 @@ class SQLiteJobStore(JobStore):
                     file_path TEXT NOT NULL,
                     media_type TEXT,
                     options_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    quota_key TEXT NOT NULL DEFAULT 'default',
+                    quota_units INTEGER NOT NULL DEFAULT 1,
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -291,6 +352,7 @@ class SQLiteJobStore(JobStore):
                 CREATE TABLE IF NOT EXISTS blocks (
                     block_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     position INTEGER NOT NULL,
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
@@ -298,11 +360,12 @@ class SQLiteJobStore(JobStore):
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_blocks_doc_position
-                ON blocks (doc_id, position ASC);
+                ON blocks (tenant_id, doc_id, position ASC);
 
                 CREATE TABLE IF NOT EXISTS chunks (
                     chunk_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     position INTEGER NOT NULL,
                     block_ids_json TEXT NOT NULL,
                     text TEXT NOT NULL,
@@ -312,7 +375,7 @@ class SQLiteJobStore(JobStore):
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
-                ON chunks (doc_id, position ASC);
+                ON chunks (tenant_id, doc_id, position ASC);
                 """
             )
             # Lightweight migrations for B1 columns. SQLite cannot use
@@ -322,11 +385,28 @@ class SQLiteJobStore(JobStore):
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
             if "dead_lettered_at" not in existing:
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN dead_lettered_at TEXT")
+            if "tenant_id" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            if "quota_key" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN quota_key TEXT NOT NULL DEFAULT 'default'")
+            if "quota_units" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN quota_units INTEGER NOT NULL DEFAULT 1")
             chunk_columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            block_columns = {row[1] for row in conn.execute("PRAGMA table_info(blocks)").fetchall()}
+            if "tenant_id" not in block_columns:
+                conn.execute("ALTER TABLE blocks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             if "semantic_role" not in chunk_columns:
                 conn.execute(
                     "ALTER TABLE chunks ADD COLUMN semantic_role TEXT NOT NULL DEFAULT 'paragraph'"
                 )
+            if "tenant_id" not in chunk_columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parse_jobs_tenant_doc_created ON parse_jobs (tenant_id, doc_id, created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parse_jobs_state_created ON parse_jobs (state, created_at ASC)"
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -358,10 +438,13 @@ class SQLiteJobStore(JobStore):
             file_path=row[2],
             media_type=row[3],
             options=json.loads(row[4]),
-            state=ParseJobState(row[5]),
-            created_at=row[6],
-            updated_at=row[7],
-            failure_reason=row[8],
+            tenant_id=row[5] or "default",
+            quota_key=row[6] or "default",
+            quota_units=max(1, int(row[7] or 1)),
+            state=ParseJobState(row[8]),
+            created_at=row[9],
+            updated_at=row[10],
+            failure_reason=row[11],
             attempt_count=attempt_count,
             dead_lettered_at=dead_lettered_at,
         )
@@ -387,10 +470,9 @@ def _normalize_postgres_url(database_url: str) -> str:
 class PostgresJobStore(JobStore):
     """Postgres-backed JobStore mirroring the SQLite schema.
 
-    Connections are created per-call via psycopg with autocommit. This keeps
-    the implementation simple and dependency-free (no extra pool); for high
-    QPS the worker can be wrapped with ``psycopg_pool`` later without
-    changing the public surface.
+    Prefer ``psycopg_pool`` when available to amortize connection setup
+    overhead under concurrent worker/API traffic. If the pool dependency is
+    not installed we transparently fall back to per-call connections.
     """
 
     def __init__(self, database_url: str) -> None:
@@ -402,6 +484,20 @@ class PostgresJobStore(JobStore):
                 "pip install 'parsecore-starter[storage]'"
             ) from exc
         self.database_url = _normalize_postgres_url(database_url)
+        self._pool: Any | None = None
+        try:
+            from psycopg_pool import ConnectionPool
+
+            self._pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=1,
+                max_size=10,
+                timeout=10,
+                kwargs={"autocommit": True},
+                open=True,
+            )
+        except ImportError:
+            self._pool = None
         self._lock = threading.Lock()
         self._ensure_schema()
 
@@ -417,6 +513,9 @@ class PostgresJobStore(JobStore):
                     file_path TEXT NOT NULL,
                     media_type TEXT,
                     options_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    quota_key TEXT NOT NULL DEFAULT 'default',
+                    quota_units INTEGER NOT NULL DEFAULT 1,
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -430,17 +529,19 @@ class PostgresJobStore(JobStore):
                 CREATE TABLE IF NOT EXISTS blocks (
                     block_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     position INTEGER NOT NULL,
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
                     metadata_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_blocks_doc_position
-                    ON blocks (doc_id, position ASC);
+                    ON blocks (tenant_id, doc_id, position ASC);
 
                 CREATE TABLE IF NOT EXISTS chunks (
                     chunk_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     position INTEGER NOT NULL,
                     block_ids_json TEXT NOT NULL,
                     text TEXT NOT NULL,
@@ -455,6 +556,17 @@ class PostgresJobStore(JobStore):
             cur.execute(
                 "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS semantic_role TEXT NOT NULL DEFAULT 'paragraph'"
             )
+            cur.execute("ALTER TABLE blocks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS quota_key TEXT NOT NULL DEFAULT 'default'")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS quota_units INTEGER NOT NULL DEFAULT 1")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parse_jobs_tenant_doc_created ON parse_jobs (tenant_id, doc_id, created_at DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parse_jobs_state_created ON parse_jobs (state, created_at ASC)"
+            )
 
     # -- write paths ------------------------------------------------------
 
@@ -466,6 +578,9 @@ class PostgresJobStore(JobStore):
             file_path=request.file_path,
             media_type=request.media_type,
             options=dict(request.options),
+            tenant_id=request.tenant_id,
+            quota_key=request.quota_key,
+            quota_units=max(1, int(request.quota_units or 1)),
             state=ParseJobState.PENDING,
             created_at=now,
             updated_at=now,
@@ -475,8 +590,9 @@ class PostgresJobStore(JobStore):
                 """
                 INSERT INTO parse_jobs (
                     job_id, doc_id, file_path, media_type, options_json,
+                    tenant_id, quota_key, quota_units,
                     state, created_at, updated_at, failure_reason
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     job.job_id,
@@ -484,6 +600,9 @@ class PostgresJobStore(JobStore):
                     job.file_path,
                     job.media_type,
                     json.dumps(job.options, ensure_ascii=False),
+                    job.tenant_id,
+                    job.quota_key,
+                    int(job.quota_units),
                     job.state.value,
                     job.created_at,
                     job.updated_at,
@@ -514,11 +633,13 @@ class PostgresJobStore(JobStore):
             raise KeyError(job_id)
         return job
 
-    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block]) -> None:
+    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block], tenant_id: str | None = None) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         rows = [
             (
                 block.block_id,
                 doc_id,
+                normalized_tenant,
                 position,
                 block.type.value,
                 block.content,
@@ -527,21 +648,23 @@ class PostgresJobStore(JobStore):
             for position, block in enumerate(blocks)
         ]
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM blocks WHERE doc_id = %s", (doc_id,))
+            cur.execute("DELETE FROM blocks WHERE doc_id = %s AND tenant_id = %s", (doc_id, normalized_tenant))
             if rows:
                 cur.executemany(
                     """
-                    INSERT INTO blocks (block_id, doc_id, position, type, content, metadata_json)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO blocks (block_id, doc_id, tenant_id, position, type, content, metadata_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
 
-    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None:
+    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         rows = [
             (
                 chunk.chunk_id,
                 doc_id,
+                normalized_tenant,
                 position,
                 json.dumps(chunk.block_ids, ensure_ascii=False),
                 chunk.text,
@@ -554,12 +677,12 @@ class PostgresJobStore(JobStore):
             for position, chunk in enumerate(chunks)
         ]
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
+            cur.execute("DELETE FROM chunks WHERE doc_id = %s AND tenant_id = %s", (doc_id, normalized_tenant))
             if rows:
                 cur.executemany(
                     """
-                    INSERT INTO chunks (chunk_id, doc_id, position, block_ids_json, text, language, semantic_role, embedding_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO chunks (chunk_id, doc_id, tenant_id, position, block_ids_json, text, language, semantic_role, embedding_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -598,6 +721,7 @@ class PostgresJobStore(JobStore):
             cur.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs WHERE job_id = %s
@@ -614,6 +738,7 @@ class PostgresJobStore(JobStore):
             cur.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs WHERE job_id = %s
@@ -630,6 +755,7 @@ class PostgresJobStore(JobStore):
             cur.execute(
                 """
                 SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
                        attempt_count, dead_lettered_at
                 FROM parse_jobs
@@ -647,6 +773,7 @@ class PostgresJobStore(JobStore):
     def list_jobs(self, *, doc_id: str | None = None) -> Sequence[ParseJob]:
         query = (
             "SELECT job_id, doc_id, file_path, media_type, options_json, "
+            "tenant_id, quota_key, quota_units, "
             "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at "
             "FROM parse_jobs"
         )
@@ -660,16 +787,17 @@ class PostgresJobStore(JobStore):
             rows = cur.fetchall()
         return tuple(self._row_to_job(row) for row in rows)
 
-    def get_blocks(self, *, doc_id: str) -> Sequence[Block]:
+    def get_blocks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Block]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT block_id, doc_id, type, content, metadata_json
                 FROM blocks
-                WHERE doc_id = %s
+                WHERE doc_id = %s AND tenant_id = %s
                 ORDER BY position ASC
                 """,
-                (doc_id,),
+                (doc_id, normalized_tenant),
             )
             rows = cur.fetchall()
         return tuple(
@@ -683,16 +811,17 @@ class PostgresJobStore(JobStore):
             for row in rows
         )
 
-    def get_chunks(self, *, doc_id: str) -> Sequence[Chunk]:
+    def get_chunks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Chunk]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT chunk_id, doc_id, block_ids_json, text, language, semantic_role, embedding_json
                 FROM chunks
-                WHERE doc_id = %s
+                WHERE doc_id = %s AND tenant_id = %s
                 ORDER BY position ASC
                 """,
-                (doc_id,),
+                (doc_id, normalized_tenant),
             )
             rows = cur.fetchall()
         return tuple(
@@ -714,29 +843,75 @@ class PostgresJobStore(JobStore):
     def _connect(self) -> Iterator[Any]:
         import psycopg
 
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                yield conn
+            return
+
         conn = psycopg.connect(self.database_url, autocommit=True)
         try:
             yield conn
         finally:
             conn.close()
 
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
+
     @staticmethod
     def _row_to_job(row: Sequence[Any]) -> ParseJob:
-        attempt_count = int(row[9]) if row[9] is not None else 0
-        dead_lettered_at = row[10] if len(row) > 10 else None
+        attempt_count = int(row[12]) if row[12] is not None else 0
+        dead_lettered_at = row[13] if len(row) > 13 else None
         return ParseJob(
             job_id=row[0],
             doc_id=row[1],
             file_path=row[2],
             media_type=row[3],
             options=json.loads(row[4]),
-            state=ParseJobState(row[5]),
-            created_at=row[6],
-            updated_at=row[7],
-            failure_reason=row[8],
+            tenant_id=row[5] or "default",
+            quota_key=row[6] or "default",
+            quota_units=max(1, int(row[7] or 1)),
+            state=ParseJobState(row[8]),
+            created_at=row[9],
+            updated_at=row[10],
+            failure_reason=row[11],
             attempt_count=attempt_count,
             dead_lettered_at=dead_lettered_at,
         )
+
+    def increment_attempt(self, *, job_id: str) -> int:
+        now = _utc_now()
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE parse_jobs
+                SET attempt_count = attempt_count + 1, updated_at = %s
+                WHERE job_id = %s
+                """,
+                (now, job_id),
+            )
+            cur.execute(
+                "SELECT attempt_count FROM parse_jobs WHERE job_id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
+        now = _utc_now()
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE parse_jobs
+                SET state = %s, failure_reason = %s, dead_lettered_at = %s, updated_at = %s
+                WHERE job_id = %s
+                """,
+                (ParseJobState.FAILED.value, reason, now, now, job_id),
+            )
+        job = self.get_job(job_id=job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
 
 
 class PgVectorIndex(IndexAdapter):
@@ -759,12 +934,24 @@ class PgVectorIndex(IndexAdapter):
             ) from exc
         self.database_url = _normalize_postgres_url(database_url)
         self.dim = int(dim)
+        self._pool: Any | None = None
+        try:
+            from psycopg_pool import ConnectionPool
+
+            self._pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=1,
+                max_size=10,
+                timeout=10,
+                kwargs={"autocommit": True},
+                open=True,
+            )
+        except ImportError:
+            self._pool = None
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        import psycopg
-
-        with psycopg.connect(self.database_url, autocommit=True) as conn:
+        with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 cur.execute(
@@ -772,19 +959,21 @@ class PgVectorIndex(IndexAdapter):
                     CREATE TABLE IF NOT EXISTS chunk_embeddings (
                         chunk_id TEXT PRIMARY KEY,
                         doc_id   TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL DEFAULT 'default',
                         embedding vector({self.dim}) NOT NULL,
                         updated_at TEXT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_doc
-                        ON chunk_embeddings (doc_id);
+                        ON chunk_embeddings (tenant_id, doc_id);
                     """
                 )
+                cur.execute("ALTER TABLE chunk_embeddings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
 
-    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None:
-        import psycopg
+    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
         from pgvector.psycopg import register_vector
 
-        rows: list[tuple[str, str, list[float], str]] = []
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        rows: list[tuple[str, str, str, list[float], str]] = []
         now = _utc_now()
         for chunk in chunks:
             if chunk.embedding is None:
@@ -795,50 +984,39 @@ class PgVectorIndex(IndexAdapter):
                     f"chunk {chunk.chunk_id} embedding dim={len(vec)} "
                     f"mismatch with index dim={self.dim}"
                 )
-            rows.append((chunk.chunk_id, doc_id, vec, now))
+            rows.append((chunk.chunk_id, doc_id, normalized_tenant, vec, now))
 
-        with psycopg.connect(self.database_url, autocommit=True) as conn:
+        with self._connect() as conn:
             register_vector(conn)
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM chunk_embeddings WHERE doc_id = %s",
-                    (doc_id,),
+                    "DELETE FROM chunk_embeddings WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
                 )
                 if rows:
                     cur.executemany(
                         """
-                        INSERT INTO chunk_embeddings (chunk_id, doc_id, embedding, updated_at)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO chunk_embeddings (chunk_id, doc_id, tenant_id, embedding, updated_at)
+                        VALUES (%s, %s, %s, %s, %s)
                         """,
                         rows,
                     )
 
-    def increment_attempt(self, *, job_id: str) -> int:
-        """Atomically bump the per-job attempt counter and return the new value."""
+    @contextmanager
+    def _connect(self) -> Iterator[Any]:
+        import psycopg
 
-        now = _utc_now()
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE parse_jobs SET attempt_count = attempt_count + 1, updated_at = ? WHERE job_id = ?",
-                (now, job_id),
-            )
-            row = conn.execute(
-                "SELECT attempt_count FROM parse_jobs WHERE job_id = ?", (job_id,)
-            ).fetchone()
-        return int(row[0]) if row is not None else 0
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                yield conn
+            return
 
-    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
-        now = _utc_now()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE parse_jobs
-                SET state = ?, failure_reason = ?, dead_lettered_at = ?, updated_at = ?
-                WHERE job_id = ?
-                """,
-                (ParseJobState.FAILED.value, reason, now, now, job_id),
-            )
-        job = self.get_job(job_id=job_id)
-        if job is None:
-            raise KeyError(job_id)
-        return job
+        conn = psycopg.connect(self.database_url, autocommit=True)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()

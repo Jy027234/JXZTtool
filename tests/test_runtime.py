@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
 from parsecore.bootstrap import build_runtime
-from parsecore.models import Chunk, ParseJobState, ParseRequest, SemanticRole
+from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
+from parsecore.runtime import QuotaExceededError
 from parsecore.stubs import FakeEmbeddingProvider
 from tests.support import TemporaryWorkspace
 
@@ -94,6 +96,37 @@ extensions = [".docx"]
 """.strip()
 
 
+QUOTA_ENFORCED_CONFIG = """
+[project]
+name = "test-parsecore"
+mode = "embedded-sdk"
+
+[runtime]
+quota_enforce = true
+quota_window_hours = 24
+quota_default_limit_units = 3
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+""".strip()
+
+
 class ParseRuntimeTests(unittest.TestCase):
     def test_describe_returns_registered_parsers(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -123,6 +156,77 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(outcome.chunks[0].semantic_role, SemanticRole.TITLE.value)
         self.assertEqual(outcome.chunks[1].semantic_role, SemanticRole.PARAGRAPH.value)
 
+    def test_submit_records_ocr_observability_events(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("ocr.docx", ["Engine Manual"])
+            runtime = build_runtime(workspace.config_path)
+            blocks = (
+                Block(
+                    block_id="blk-1",
+                    doc_id="doc-ocr",
+                    type=BlockType.PARAGRAPH,
+                    content="native text kept",
+                    metadata={
+                        "page": 1,
+                        "ocr_attempted": True,
+                        "ocr_attempt_reason": "empty_text",
+                        "ocr_error_reason": "provider_request_failed",
+                    },
+                ),
+                Block(
+                    block_id="blk-2",
+                    doc_id="doc-ocr",
+                    type=BlockType.PARAGRAPH,
+                    content="ocr recovered text",
+                    metadata={
+                        "page": 2,
+                        "ocr_attempted": True,
+                        "ocr_attempt_reason": "cid_dense",
+                        "ocr_fallback_used": True,
+                        "ocr_fallback_reason": "cid_dense",
+                    },
+                ),
+            )
+            with patch.object(runtime, "_load_blocks_for_request", return_value=blocks), patch.object(
+                runtime,
+                "_load_chunks_for_request",
+                return_value=(),
+            ), patch.object(runtime, "_embed_chunks", return_value=()):
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-ocr",
+                        file_path=str(document_path),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        tenant_id="tenant-ocr",
+                        quota_key="ocr-plan",
+                    )
+                )
+
+        attempted = runtime.event_aggregator.get_events(limit=10, event_type_filter="ocr_attempted")
+        fallback = runtime.event_aggregator.get_events(limit=10, event_type_filter="ocr_fallback")
+        failed = runtime.event_aggregator.get_events(limit=10, event_type_filter="ocr_failed")
+
+        self.assertEqual(len(attempted), 1)
+        self.assertEqual(attempted[0]["tenant_id"], "tenant-ocr")
+        self.assertEqual(attempted[0]["quota_key"], "ocr-plan")
+        self.assertEqual(attempted[0]["page_count"], 2)
+        self.assertEqual(attempted[0]["block_count"], 2)
+        self.assertEqual(attempted[0]["attempt_reasons"], ["cid_dense", "empty_text"])
+
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0]["page_count"], 1)
+        self.assertEqual(fallback[0]["block_count"], 1)
+
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["page_count"], 1)
+        self.assertEqual(failed[0]["block_count"], 1)
+        self.assertEqual(failed[0]["error_reasons"], ["provider_request_failed"])
+
+        counters = runtime.event_aggregator.get_counters()
+        self.assertEqual(counters["tenant-ocr:ocr-plan:ocr_attempted"], 2)
+        self.assertEqual(counters["tenant-ocr:ocr-plan:ocr_fallback"], 1)
+        self.assertEqual(counters["tenant-ocr:ocr-plan:ocr_failed"], 1)
+
     def test_submit_persists_job_and_document_snapshot(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("manual.docx", ["Revision A", "Replace filter"])
@@ -132,6 +236,9 @@ class ParseRuntimeTests(unittest.TestCase):
                     doc_id="doc-002",
                     file_path=str(document_path),
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-acme",
+                    quota_key="starter",
+                    quota_units=2,
                 )
             )
             rebuilt = build_runtime(workspace.config_path)
@@ -142,6 +249,9 @@ class ParseRuntimeTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job.doc_id, "doc-002")
         self.assertEqual(job.state, ParseJobState.DONE)
+        self.assertEqual(job.tenant_id, "tenant-acme")
+        self.assertEqual(job.quota_key, "starter")
+        self.assertEqual(job.quota_units, 2)
         self.assertEqual(document["job"].job_id, outcome.job.job_id)
         self.assertEqual(len(document["blocks"]), len(outcome.blocks))
         self.assertEqual(len(document["chunks"]), len(outcome.chunks))
@@ -155,6 +265,9 @@ class ParseRuntimeTests(unittest.TestCase):
                     doc_id="doc-003",
                     file_path=str(document_path),
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-bravo",
+                    quota_key="batch",
+                    quota_units=5,
                 )
             )
             second = runtime.retry_latest(doc_id="doc-003")
@@ -162,6 +275,195 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first.job.job_id, second.job.job_id)
         self.assertEqual(second.job.doc_id, "doc-003")
         self.assertEqual(second.job.file_path, str(document_path))
+        self.assertEqual(second.job.tenant_id, "tenant-bravo")
+        self.assertEqual(second.job.quota_key, "batch")
+        self.assertEqual(second.job.quota_units, 5)
+
+    def test_list_jobs_and_quota_usage_support_tenant_filters(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_a = workspace.create_docx("tenant-a.docx", ["A"])
+            document_b = workspace.create_docx("tenant-b.docx", ["B"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-tenant-a",
+                    file_path=str(document_a),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-a",
+                    quota_key="starter",
+                    quota_units=2,
+                )
+            )
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-tenant-b",
+                    file_path=str(document_b),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-b",
+                    quota_key="pro",
+                    quota_units=4,
+                )
+            )
+
+            tenant_a_jobs = runtime.list_jobs(tenant_id="tenant-a")
+            usage_all = runtime.quota_usage()
+            usage_tenant_a = runtime.quota_usage(tenant_id="tenant-a")
+
+        self.assertEqual(len(tenant_a_jobs), 1)
+        self.assertEqual(tenant_a_jobs[0].tenant_id, "tenant-a")
+        self.assertEqual(usage_all["total_jobs"], 2)
+        self.assertEqual(usage_all["total_quota_units"], 6)
+        self.assertEqual(usage_tenant_a["tenant_id"], "tenant-a")
+        self.assertEqual(usage_tenant_a["total_jobs"], 1)
+        self.assertEqual(usage_tenant_a["total_quota_units"], 2)
+
+    def test_quota_enforcement_rejects_request_when_limit_exceeded(self) -> None:
+        with TemporaryWorkspace(QUOTA_ENFORCED_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            doc_a = workspace.create_docx("quota-a.docx", ["A"])
+            doc_b = workspace.create_docx("quota-b.docx", ["B"])
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-quota-a",
+                    file_path=str(doc_a),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-q",
+                    quota_key="starter",
+                    quota_units=2,
+                )
+            )
+
+            with self.assertRaises(QuotaExceededError):
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-quota-b",
+                        file_path=str(doc_b),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        tenant_id="tenant-q",
+                        quota_key="starter",
+                        quota_units=2,
+                    )
+                )
+
+    def test_document_and_reparse_are_isolated_by_tenant(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("tenant-doc.docx", ["Tenant content"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-tenant-iso",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-iso-a",
+                    quota_key="starter",
+                    quota_units=1,
+                )
+            )
+
+            tenant_a_snapshot = runtime.get_document(doc_id="doc-tenant-iso", tenant_id="tenant-iso-a")
+            tenant_b_snapshot = runtime.get_document(doc_id="doc-tenant-iso", tenant_id="tenant-iso-b")
+
+            self.assertIsNotNone(tenant_a_snapshot["job"])
+            self.assertIsNone(tenant_b_snapshot["job"])
+            self.assertEqual(tuple(tenant_b_snapshot["blocks"]), ())
+            self.assertEqual(tuple(tenant_b_snapshot["chunks"]), ())
+
+            with self.assertRaises(LookupError):
+                runtime.restart_latest(doc_id="doc-tenant-iso", tenant_id="tenant-iso-b")
+
+    def test_runtime_metrics_returns_failure_rate_and_duration_summary(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            # 成功任务
+            success_doc = workspace.create_docx("metrics-ok.docx", ["ok"])
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-metrics-ok",
+                    file_path=str(success_doc),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-metrics",
+                )
+            )
+            # 失败任务（文件不存在）
+            failed_job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-metrics-fail",
+                    file_path=str(workspace.root / "missing-metrics.docx"),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-metrics",
+                )
+            )
+            with self.assertRaises(Exception):
+                runtime.execute(job_id=failed_job.job_id)
+
+            metrics = runtime.runtime_metrics(tenant_id="tenant-metrics", sample_size=50, since_hours=24)
+
+        self.assertEqual(metrics["tenant_id"], "tenant-metrics")
+        self.assertEqual(metrics["since_hours"], 24.0)
+        self.assertGreaterEqual(metrics["total_jobs"], 2)
+        self.assertGreaterEqual(metrics["done_jobs"], 1)
+        self.assertGreaterEqual(metrics["failed_jobs"], 1)
+        self.assertGreater(metrics["failure_rate"], 0.0)
+        self.assertIn("durations_s", metrics)
+        self.assertGreaterEqual(metrics["durations_s"]["count"], 1)
+        self.assertGreaterEqual(metrics["durations_s"]["p99"], metrics["durations_s"]["p50"])
+
+    def test_tenant_dashboard_aggregates_usage_metrics_and_recent_jobs(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            doc_a = workspace.create_docx("dash-a.docx", ["A"])
+            doc_b = workspace.create_docx("dash-b.docx", ["B"])
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-dash-a",
+                    file_path=str(doc_a),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-dashboard",
+                    quota_key="starter",
+                    quota_units=2,
+                )
+            )
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-dash-b",
+                    file_path=str(doc_b),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-dashboard",
+                    quota_key="starter",
+                    quota_units=3,
+                )
+            )
+
+            dashboard = runtime.tenant_dashboard(
+                tenant_id="tenant-dashboard",
+                sample_size=50,
+                recent_limit=2,
+                since_hours=24,
+            )
+
+        self.assertEqual(dashboard["tenant_id"], "tenant-dashboard")
+        self.assertEqual(dashboard["since_hours"], 24.0)
+        self.assertEqual(dashboard["usage"]["tenant_id"], "tenant-dashboard")
+        self.assertEqual(dashboard["metrics"]["tenant_id"], "tenant-dashboard")
+        self.assertGreaterEqual(dashboard["usage"]["total_jobs"], 2)
+        self.assertGreaterEqual(dashboard["metrics"]["done_jobs"], 2)
+        self.assertLessEqual(len(dashboard["recent_jobs"]), 2)
+
+    def test_since_hours_filter_can_exclude_old_jobs(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            doc = workspace.create_docx("old-job.docx", ["old"])
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-old",
+                    file_path=str(doc),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    tenant_id="tenant-old",
+                )
+            )
+            filtered = runtime.list_jobs(tenant_id="tenant-old", since_hours=0)
+
+        self.assertEqual(filtered, ())
 
     def test_pdf_submit_splits_page_text_into_multiple_blocks(self) -> None:
         class FakePage:
@@ -256,6 +558,49 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertTrue(all(chunk.embedding is not None for chunk in outcome.chunks))
         self.assertEqual(outcome.chunks[0].embedding, (1.0, float(len(outcome.chunks[0].text))))
+
+    def test_embed_chunks_retries_per_batch_and_degrades_partially(self) -> None:
+        class SelectiveFailureEmbeddingProvider:
+            def __init__(self) -> None:
+                self.fail_calls = 0
+
+            def embed(self, *, doc_id: str, chunks):
+                if any("FAIL" in (chunk.text or "") for chunk in chunks):
+                    self.fail_calls += 1
+                    raise RuntimeError("embedding unavailable for FAIL batch")
+                return tuple(
+                    replace(chunk, embedding=(1.0, float(len(chunk.text))))
+                    for chunk in chunks
+                )
+
+        config = EMBEDDING_SAMPLE_CONFIG.replace(
+            'api_key_env = "PARSECORE_EMBEDDING_API_KEY"',
+            'api_key_env = "PARSECORE_EMBEDDING_API_KEY"\n'
+            'batch_size = 1\n'
+            'max_retries = 1',
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_docx("embed-partial.docx", ["FAIL segment", "OK segment"])
+            provider = SelectiveFailureEmbeddingProvider()
+            with patch(
+                "parsecore.bootstrap.build_embedding_provider",
+                return_value=provider,
+            ):
+                runtime = build_runtime(workspace.config_path)
+                outcome = runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-embed-partial",
+                        file_path=str(document_path),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                )
+
+        self.assertEqual(outcome.job.state, ParseJobState.DONE)
+        embedded_count = sum(1 for chunk in outcome.chunks if chunk.embedding is not None)
+        skipped_count = sum(1 for chunk in outcome.chunks if chunk.embedding is None)
+        self.assertGreaterEqual(embedded_count, 1)
+        self.assertGreaterEqual(skipped_count, 1)
+        self.assertGreaterEqual(provider.fail_calls, 2)
 
     def test_submit_rerun_chunks_only_reuses_saved_blocks(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

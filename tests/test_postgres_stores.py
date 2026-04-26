@@ -31,12 +31,18 @@ class PostgresJobStoreTests(unittest.TestCase):
             file_path="/tmp/x.pdf",
             media_type="application/pdf",
             options={"foo": "bar"},
+            tenant_id="tenant-pg",
+            quota_key="pro",
+            quota_units=4,
         )
         job = self.store.create(request)
         self.assertEqual(job.state, ParseJobState.PENDING)
         fetched = self.store.get_job(job_id=job.job_id)
         self.assertIsNotNone(fetched)
         self.assertEqual(fetched.options, {"foo": "bar"})
+        self.assertEqual(fetched.tenant_id, "tenant-pg")
+        self.assertEqual(fetched.quota_key, "pro")
+        self.assertEqual(fetched.quota_units, 4)
 
     def test_save_and_read_blocks_chunks(self) -> None:
         request = ParseRequest(

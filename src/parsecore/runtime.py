@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from math import sqrt
 from pathlib import Path
 from typing import Any, Sequence
@@ -30,6 +31,183 @@ _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
 }
 
 
+class QuotaExceededError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        quota_key: str,
+        limit_units: int,
+        used_units: int,
+        requested_units: int,
+        window_hours: float | None,
+    ) -> None:
+        self.tenant_id = tenant_id
+        self.quota_key = quota_key
+        self.limit_units = int(limit_units)
+        self.used_units = int(used_units)
+        self.requested_units = int(requested_units)
+        self.window_hours = float(window_hours) if window_hours is not None else None
+        super().__init__(
+            f"quota exceeded for {tenant_id}:{quota_key} "
+            f"used={used_units}, requested={requested_units}, limit={limit_units}"
+        )
+
+
+class EventAggregator:
+    """
+    In-memory aggregator for observability events (quota_exceeded, too_many_inflight_jobs, etc.).
+    Maintains ringbuffer for recent events and counters by dimension (tenant_id, quota_key, event_type).
+    """
+    def __init__(self, max_ringbuffer_size: int = 1000) -> None:
+        self.max_ringbuffer_size = max_ringbuffer_size
+        self.ringbuffer: list[dict[str, Any]] = []
+        self.counters: dict[tuple[str, str, str], int] = {}  # (tenant_id, quota_key, event_type) -> count
+
+    def record_event(
+        self,
+        event_type: str,
+        *,
+        tenant_id: str = "*",
+        quota_key: str = "*",
+        doc_id: str | None = None,
+        details: dict[str, Any] | None = None,
+        count: int = 1,
+    ) -> None:
+        """Record an observability event."""
+        now = datetime.now(timezone.utc).isoformat()
+        event: dict[str, Any] = {
+            "timestamp": now,
+            "event_type": event_type,
+            "tenant_id": tenant_id,
+            "quota_key": quota_key,
+        }
+        if doc_id is not None:
+            event["doc_id"] = doc_id
+        if details:
+            event.update(details)
+
+        # Add to ringbuffer (FIFO with max size)
+        self.ringbuffer.append(event)
+        if len(self.ringbuffer) > self.max_ringbuffer_size:
+            self.ringbuffer.pop(0)
+
+        # Update counters
+        key = (tenant_id, quota_key, event_type)
+        self.counters[key] = self.counters.get(key, 0) + max(1, int(count))
+
+    def get_events(
+        self,
+        limit: int = 100,
+        event_type_filter: str | None = None,
+        tenant_id_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent events with optional filtering."""
+        filtered = self.ringbuffer
+        if event_type_filter:
+            filtered = [e for e in filtered if e["event_type"] == event_type_filter]
+        if tenant_id_filter:
+            filtered = [e for e in filtered if e["tenant_id"] == tenant_id_filter]
+        # Return most recent first (reverse order)
+        return list(reversed(filtered[-limit:]))
+
+    def get_counters(
+        self,
+        event_type_filter: str | None = None,
+        tenant_id_filter: str | None = None,
+    ) -> dict[str, int]:
+        """Get event counters with optional filtering."""
+        result = {}
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type_filter and event_type != event_type_filter:
+                continue
+            if tenant_id_filter and tenant_id != tenant_id_filter:
+                continue
+            key = f"{tenant_id}:{quota_key}:{event_type}"
+            result[key] = count
+        return result
+
+    def get_prometheus_metrics(self) -> str:
+        """Generate Prometheus-format metrics."""
+        lines = [
+            "# HELP parse_quota_exceeded_total Total quota exceeded errors",
+            "# TYPE parse_quota_exceeded_total counter",
+        ]
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "quota_exceeded":
+                lines.append(
+                    f'parse_quota_exceeded_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_inflight_full_total Total inflight backpressure rejections",
+            "# TYPE parse_inflight_full_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "too_many_inflight_jobs":
+                lines.append(
+                    f'parse_inflight_full_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_embedding_retry_total Total embedding retry attempts",
+            "# TYPE parse_embedding_retry_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "embedding_retry":
+                lines.append(
+                    f'parse_embedding_retry_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_embedding_skipped_total Total embedding skip failures",
+            "# TYPE parse_embedding_skipped_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "embedding_skipped":
+                lines.append(
+                    f'parse_embedding_skipped_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_ocr_attempt_total Total pages where OCR was attempted",
+            "# TYPE parse_ocr_attempt_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "ocr_attempted":
+                lines.append(
+                    f'parse_ocr_attempt_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_ocr_fallback_total Total pages where OCR fallback succeeded",
+            "# TYPE parse_ocr_fallback_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "ocr_fallback":
+                lines.append(
+                    f'parse_ocr_fallback_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_ocr_failed_total Total pages where OCR was attempted but failed",
+            "# TYPE parse_ocr_failed_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "ocr_failed":
+                lines.append(
+                    f'parse_ocr_failed_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_ringbuffer_size Current event ringbuffer size",
+            "# TYPE parse_ringbuffer_size gauge",
+            f"parse_ringbuffer_size {len(self.ringbuffer)}",
+        ])
+
+        return "\n".join(lines)
+
+
 class ParseRuntime:
     def __init__(
         self,
@@ -53,6 +231,7 @@ class ParseRuntime:
         self.product_adapter = product_adapter
         self.job_store = job_store
         self.event_logger = event_logger or JobEventLogger(settings.runtime.log_path)
+        self.event_aggregator = EventAggregator(max_ringbuffer_size=1000)
 
     def describe(self) -> dict[str, object]:
         return {
@@ -65,6 +244,7 @@ class ParseRuntime:
                 "execution_mode": self.settings.runtime.execution_mode,
                 "max_workers": self.settings.runtime.max_workers,
                 "poll_interval_ms": self.settings.runtime.poll_interval_ms,
+                "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
             },
             "translation": {
                 "enabled": self.settings.translation_enabled,
@@ -84,6 +264,7 @@ class ParseRuntime:
         return self.execute(job_id=job.job_id)
 
     def start(self, request: ParseRequest):
+        self._check_quota_limit(request)
         job = self.job_store.create(request)
         self.product_adapter.before_parse(request=request, job=job)
 
@@ -103,6 +284,9 @@ class ParseRuntime:
             file_path=job.file_path,
             media_type=job.media_type,
             options=dict(job.options),
+            tenant_id=job.tenant_id,
+            quota_key=job.quota_key,
+            quota_units=job.quota_units,
         )
         started_at = time.monotonic()
         self.event_logger.log(
@@ -122,8 +306,13 @@ class ParseRuntime:
                     state=ParseJobState.PARSING.value,
                 )
             blocks = self._load_blocks_for_request(request)
+            self._record_ocr_observability(request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request):
-                self.job_store.save_blocks(doc_id=request.doc_id, blocks=blocks)
+                self.job_store.save_blocks(
+                    doc_id=request.doc_id,
+                    blocks=blocks,
+                    tenant_id=request.tenant_id,
+                )
             self.job_store.update_state(job_id=job.job_id, state=ParseJobState.STRUCTURING)
             self.event_logger.log(
                 "state_changed",
@@ -142,8 +331,16 @@ class ParseRuntime:
             )
             chunks = tuple(self._embed_chunks(doc_id=request.doc_id, chunks=chunks))
 
-            self.job_store.save_chunks(doc_id=request.doc_id, chunks=chunks)
-            self.index.upsert(doc_id=request.doc_id, chunks=chunks)
+            self.job_store.save_chunks(
+                doc_id=request.doc_id,
+                chunks=chunks,
+                tenant_id=request.tenant_id,
+            )
+            self.index.upsert(
+                doc_id=request.doc_id,
+                chunks=chunks,
+                tenant_id=request.tenant_id,
+            )
             final_job = self.job_store.update_state(job_id=job.job_id, state=ParseJobState.DONE)
             outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
             self.event_logger.log(
@@ -206,13 +403,19 @@ class ParseRuntime:
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
 
-    def get_document(self, *, doc_id: str) -> dict[str, Any]:
-        latest_job = self.job_store.get_latest_job(doc_id=doc_id)
+    def get_document(self, *, doc_id: str, tenant_id: str | None = None) -> dict[str, Any]:
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        if latest_job is None:
+            blocks: tuple[Any, ...] = ()
+            chunks: tuple[Any, ...] = ()
+        else:
+            blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
+            chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
         return {
             "doc_id": doc_id,
             "job": latest_job,
-            "blocks": tuple(self.job_store.get_blocks(doc_id=doc_id)),
-            "chunks": tuple(self.job_store.get_chunks(doc_id=doc_id)),
+            "blocks": blocks,
+            "chunks": chunks,
         }
 
     def search_document(
@@ -222,12 +425,14 @@ class ParseRuntime:
         query: str,
         limit: int = 10,
         semantic_roles: Sequence[str] | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[ChunkSearchHit, ...]:
         hits, _mode = self.search_document_with_mode(
             doc_id=doc_id,
             query=query,
             limit=limit,
             semantic_roles=semantic_roles,
+            tenant_id=tenant_id,
         )
         return hits
 
@@ -238,8 +443,12 @@ class ParseRuntime:
         query: str,
         limit: int = 10,
         semantic_roles: Sequence[str] | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[tuple[ChunkSearchHit, ...], str]:
-        chunks = tuple(self.job_store.get_chunks(doc_id=doc_id))
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        if latest_job is None:
+            return (), "keyword-fallback"
+        chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
         if not chunks:
             return (), "keyword-fallback"
 
@@ -300,39 +509,244 @@ class ParseRuntime:
             return None
         return tuple(float(item) for item in embedded[0].embedding)
 
-    def retry_latest(self, *, doc_id: str) -> ParseOutcome:
-        latest_job = self.job_store.get_latest_job(doc_id=doc_id)
+    def retry_latest(self, *, doc_id: str, tenant_id: str | None = None) -> ParseOutcome:
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         if latest_job is None:
             raise LookupError(f"No parse job found for doc_id={doc_id!r}")
         return self.submit(self._request_from_job(latest_job))
 
-    def restart_latest(self, *, doc_id: str):
-        latest_job = self.job_store.get_latest_job(doc_id=doc_id)
+    def restart_latest(self, *, doc_id: str, tenant_id: str | None = None):
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         if latest_job is None:
             raise LookupError(f"No parse job found for doc_id={doc_id!r}")
         return self.start(self._request_from_job(latest_job))
 
-    def rechunk_latest(self, *, doc_id: str):
-        latest_job = self.job_store.get_latest_job(doc_id=doc_id)
+    def rechunk_latest(self, *, doc_id: str, tenant_id: str | None = None):
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         if latest_job is None:
             raise LookupError(f"No parse job found for doc_id={doc_id!r}")
         request = self._request_from_job(latest_job)
         request.options["mode"] = _RERUN_CHUNKS_ONLY_MODE
         return self.start(request)
 
-    def reembed_latest(self, *, doc_id: str):
-        latest_job = self.job_store.get_latest_job(doc_id=doc_id)
+    def reembed_latest(self, *, doc_id: str, tenant_id: str | None = None):
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         if latest_job is None:
             raise LookupError(f"No parse job found for doc_id={doc_id!r}")
         request = self._request_from_job(latest_job)
         request.options["mode"] = _RERUN_EMBEDDINGS_ONLY_MODE
         return self.start(request)
 
-    def list_jobs(self, *, doc_id: str | None = None):
-        return tuple(self.job_store.list_jobs(doc_id=doc_id))
+    def list_jobs(
+        self,
+        *,
+        doc_id: str | None = None,
+        tenant_id: str | None = None,
+        quota_key: str | None = None,
+        since_hours: float | None = None,
+    ):
+        jobs = tuple(self.job_store.list_jobs(doc_id=doc_id))
+        normalized_tenant = (tenant_id or "").strip()
+        normalized_quota = (quota_key or "").strip()
+        if normalized_tenant:
+            jobs = tuple(job for job in jobs if (job.tenant_id or "default") == normalized_tenant)
+        if normalized_quota:
+            jobs = tuple(job for job in jobs if (job.quota_key or "default") == normalized_quota)
+        return _filter_jobs_by_since_hours(jobs, since_hours=since_hours)
+
+    def quota_usage(self, *, tenant_id: str | None = None, since_hours: float | None = None) -> dict[str, Any]:
+        jobs = self.list_jobs(tenant_id=tenant_id, since_hours=since_hours)
+        by_bucket: dict[tuple[str, str], dict[str, Any]] = {}
+        for job in jobs:
+            t_id = job.tenant_id or "default"
+            q_key = job.quota_key or "default"
+            units = max(1, int(job.quota_units or 1))
+            key = (t_id, q_key)
+            bucket = by_bucket.get(key)
+            if bucket is None:
+                bucket = {
+                    "tenant_id": t_id,
+                    "quota_key": q_key,
+                    "job_count": 0,
+                    "total_quota_units": 0,
+                    "done_jobs": 0,
+                    "failed_jobs": 0,
+                }
+                by_bucket[key] = bucket
+            bucket["job_count"] += 1
+            bucket["total_quota_units"] += units
+            if job.state == ParseJobState.DONE:
+                bucket["done_jobs"] += 1
+            if job.state == ParseJobState.FAILED:
+                bucket["failed_jobs"] += 1
+
+        items = sorted(
+            by_bucket.values(),
+            key=lambda item: (str(item["tenant_id"]), str(item["quota_key"])),
+        )
+        return {
+            "tenant_id": (tenant_id or "").strip() or None,
+            "since_hours": float(since_hours) if since_hours is not None else None,
+            "total_jobs": len(jobs),
+            "total_quota_units": sum(int(item["total_quota_units"]) for item in items),
+            "items": items,
+        }
+
+    def _check_quota_limit(self, request: ParseRequest) -> None:
+        settings = self.settings.runtime
+        if not bool(settings.quota_enforce):
+            return
+        tenant_id = (request.tenant_id or "default").strip() or "default"
+        quota_key = (request.quota_key or "default").strip() or "default"
+        limit_units = _resolve_quota_limit(
+            quota_limits=settings.quota_limits,
+            tenant_id=tenant_id,
+            quota_key=quota_key,
+            default_limit_units=int(settings.quota_default_limit_units),
+        )
+        if limit_units <= 0:
+            return
+        requested_units = max(1, int(request.quota_units or 1))
+        since_hours: float | None = None
+        if float(settings.quota_window_hours) > 0:
+            since_hours = float(settings.quota_window_hours)
+        usage = self.quota_usage(tenant_id=tenant_id, since_hours=since_hours)
+        used_units = 0
+        for item in usage.get("items", []):
+            if str(item.get("quota_key") or "default") == quota_key:
+                used_units = int(item.get("total_quota_units") or 0)
+                break
+        if used_units + requested_units > limit_units:
+            self.event_aggregator.record_event(
+                "quota_exceeded",
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                doc_id=request.doc_id,
+                details={
+                    "used_units": used_units,
+                    "requested_units": requested_units,
+                    "limit_units": limit_units,
+                },
+            )
+            raise QuotaExceededError(
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                limit_units=limit_units,
+                used_units=used_units,
+                requested_units=requested_units,
+                window_hours=since_hours,
+            )
+
+    def runtime_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        sample_size: int = 200,
+        since_hours: float | None = None,
+    ) -> dict[str, Any]:
+        bounded_size = max(1, min(5000, int(sample_size)))
+        jobs = self.list_jobs(tenant_id=tenant_id, since_hours=since_hours)[:bounded_size]
+        if not jobs:
+            return {
+                "tenant_id": (tenant_id or "").strip() or None,
+                "since_hours": float(since_hours) if since_hours is not None else None,
+                "sample_size": bounded_size,
+                "total_jobs": 0,
+                "done_jobs": 0,
+                "failed_jobs": 0,
+                "active_jobs": 0,
+                "failure_rate": 0.0,
+                "durations_s": {
+                    "count": 0,
+                    "mean": 0.0,
+                    "min": 0.0,
+                    "max": 0.0,
+                    "p50": 0.0,
+                    "p90": 0.0,
+                    "p99": 0.0,
+                },
+            }
+
+        done_jobs = [job for job in jobs if job.state == ParseJobState.DONE]
+        failed_jobs = [job for job in jobs if job.state == ParseJobState.FAILED]
+        active_jobs = [
+            job
+            for job in jobs
+            if job.state in (ParseJobState.PENDING, ParseJobState.PARSING, ParseJobState.STRUCTURING, ParseJobState.EMBEDDING)
+        ]
+        durations = [duration for duration in (_job_duration_seconds(job) for job in done_jobs) if duration is not None]
+        duration_stats = _duration_summary(durations)
+        total_terminal = len(done_jobs) + len(failed_jobs)
+        failure_rate = round((len(failed_jobs) / total_terminal), 4) if total_terminal > 0 else 0.0
+
+        return {
+            "tenant_id": (tenant_id or "").strip() or None,
+            "since_hours": float(since_hours) if since_hours is not None else None,
+            "sample_size": bounded_size,
+            "total_jobs": len(jobs),
+            "done_jobs": len(done_jobs),
+            "failed_jobs": len(failed_jobs),
+            "active_jobs": len(active_jobs),
+            "failure_rate": failure_rate,
+            "durations_s": duration_stats,
+        }
+
+    def tenant_dashboard(
+        self,
+        *,
+        tenant_id: str | None = None,
+        sample_size: int = 200,
+        recent_limit: int = 5,
+        since_hours: float | None = None,
+    ) -> dict[str, Any]:
+        bounded_recent = max(1, min(100, int(recent_limit)))
+        normalized_tenant = (tenant_id or "").strip() or None
+        usage = self.quota_usage(tenant_id=normalized_tenant, since_hours=since_hours)
+        metrics = self.runtime_metrics(
+            tenant_id=normalized_tenant,
+            sample_size=sample_size,
+            since_hours=since_hours,
+        )
+        recent_jobs = [
+            {
+                "job_id": job.job_id,
+                "doc_id": job.doc_id,
+                "state": job.state.value,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+                "quota_key": job.quota_key,
+                "quota_units": int(job.quota_units or 1),
+            }
+            for job in self.list_jobs(tenant_id=normalized_tenant, since_hours=since_hours)[:bounded_recent]
+        ]
+        # Add observability data
+        recent_events = self.event_aggregator.get_events(
+            limit=10,
+            tenant_id_filter=normalized_tenant,
+        )
+        event_counters = self.event_aggregator.get_counters(
+            tenant_id_filter=normalized_tenant,
+        )
+        return {
+            "tenant_id": normalized_tenant,
+            "since_hours": float(since_hours) if since_hours is not None else None,
+            "usage": usage,
+            "metrics": metrics,
+            "recent_jobs": recent_jobs,
+            "observability": {
+                "recent_events": recent_events,
+                "event_counters": event_counters,
+            },
+        }
 
     def claim_next_job(self):
         return self.job_store.claim_next_job()
+
+    def _resolve_latest_job(self, *, doc_id: str, tenant_id: str | None = None):
+        jobs = self.list_jobs(doc_id=doc_id, tenant_id=tenant_id)
+        if not jobs:
+            return None
+        return jobs[0]
 
     def _request_from_job(self, job):
         return ParseRequest(
@@ -340,11 +754,19 @@ class ParseRuntime:
             file_path=job.file_path,
             media_type=job.media_type,
             options=dict(job.options),
+            tenant_id=job.tenant_id,
+            quota_key=job.quota_key,
+            quota_units=job.quota_units,
         )
 
     def _load_blocks_for_request(self, request: ParseRequest):
         if self._is_rerun_chunks_only(request) or self._is_rerun_embeddings_only(request):
-            blocks = tuple(self.job_store.get_blocks(doc_id=request.doc_id))
+            blocks = tuple(
+                self.job_store.get_blocks(
+                    doc_id=request.doc_id,
+                    tenant_id=request.tenant_id,
+                )
+            )
             if not blocks:
                 raise LookupError(
                     f"No existing blocks found for doc_id={request.doc_id!r}; cannot rerun derived outputs"
@@ -361,7 +783,12 @@ class ParseRuntime:
 
     def _load_chunks_for_request(self, request: ParseRequest, *, blocks: Sequence[Any]):
         if self._is_rerun_embeddings_only(request):
-            chunks = tuple(self.job_store.get_chunks(doc_id=request.doc_id))
+            chunks = tuple(
+                self.job_store.get_chunks(
+                    doc_id=request.doc_id,
+                    tenant_id=request.tenant_id,
+                )
+            )
             if not chunks:
                 raise LookupError(
                     f"No existing chunks found for doc_id={request.doc_id!r}; cannot rerun embeddings only"
@@ -391,21 +818,290 @@ class ParseRuntime:
                 return parser
         raise LookupError(f"No parser registered for media_type={request.media_type!r}, suffix={suffix!r}")
 
+    def _record_ocr_observability(
+        self,
+        *,
+        request: ParseRequest,
+        blocks: Sequence[Any],
+    ) -> None:
+        attempted_pages: set[int] = set()
+        fallback_pages: set[int] = set()
+        failed_pages: set[int] = set()
+        attempted_blocks = 0
+        fallback_blocks = 0
+        failed_blocks = 0
+        attempt_reasons: set[str] = set()
+        error_reasons: set[str] = set()
+
+        for block in blocks:
+            metadata = getattr(block, "metadata", {}) or {}
+            try:
+                page_number = int(metadata.get("page", 0) or 0)
+            except (TypeError, ValueError):
+                page_number = 0
+
+            if bool(metadata.get("ocr_attempted")):
+                attempted_pages.add(page_number)
+                attempted_blocks += 1
+                attempt_reason = metadata.get("ocr_attempt_reason")
+                if attempt_reason:
+                    attempt_reasons.add(str(attempt_reason))
+
+            if bool(metadata.get("ocr_fallback_used")):
+                fallback_pages.add(page_number)
+                fallback_blocks += 1
+
+            error_reason = metadata.get("ocr_error_reason")
+            if error_reason:
+                failed_pages.add(page_number)
+                failed_blocks += 1
+                error_reasons.add(str(error_reason))
+
+        if attempted_pages:
+            self.event_aggregator.record_event(
+                "ocr_attempted",
+                tenant_id=request.tenant_id,
+                quota_key=request.quota_key,
+                doc_id=request.doc_id,
+                details={
+                    "provider": self.settings.providers.ocr.provider,
+                    "page_count": len(attempted_pages),
+                    "block_count": attempted_blocks,
+                    "attempt_reasons": sorted(attempt_reasons),
+                },
+                count=len(attempted_pages),
+            )
+
+        if fallback_pages:
+            self.event_aggregator.record_event(
+                "ocr_fallback",
+                tenant_id=request.tenant_id,
+                quota_key=request.quota_key,
+                doc_id=request.doc_id,
+                details={
+                    "provider": self.settings.providers.ocr.provider,
+                    "page_count": len(fallback_pages),
+                    "block_count": fallback_blocks,
+                },
+                count=len(fallback_pages),
+            )
+
+        if failed_pages:
+            self.event_aggregator.record_event(
+                "ocr_failed",
+                tenant_id=request.tenant_id,
+                quota_key=request.quota_key,
+                doc_id=request.doc_id,
+                details={
+                    "provider": self.settings.providers.ocr.provider,
+                    "page_count": len(failed_pages),
+                    "block_count": failed_blocks,
+                    "error_reasons": sorted(error_reasons),
+                },
+                count=len(failed_pages),
+            )
+
     def _embed_chunks(self, *, doc_id: str, chunks: Sequence[Any]) -> Sequence[Any]:
-        try:
-            return self.embedding_provider.embed(doc_id=doc_id, chunks=chunks)
-        except Exception as exc:
+        if not chunks:
+            return tuple(chunks)
+        provider_settings = self.settings.providers.embedding
+        batch_size = max(1, int(provider_settings.batch_size or len(chunks)))
+        max_retries = max(0, int(provider_settings.max_retries))
+        base_backoff_seconds = 0.05
+        embedded: list[Any] = []
+        failed_batches = 0
+        for batch_index, start in enumerate(range(0, len(chunks), batch_size), start=1):
+            batch = tuple(chunks[start : start + batch_size])
+            result = self._embed_batch_with_retry(
+                doc_id=doc_id,
+                batch=batch,
+                batch_index=batch_index,
+                max_retries=max_retries,
+                base_backoff_seconds=base_backoff_seconds,
+            )
+            if result is None:
+                failed_batches += 1
+                embedded.extend(batch)
+            else:
+                embedded.extend(result)
+
+        if failed_batches > 0:
             self.event_logger.log(
                 "embedding_skipped",
                 doc_id=doc_id,
-                error=str(exc),
                 chunks=len(chunks),
+                failed_batches=failed_batches,
+                total_batches=((len(chunks) + batch_size - 1) // batch_size),
             )
-            return tuple(chunks)
+        return tuple(embedded)
+
+    def _embed_batch_with_retry(
+        self,
+        *,
+        doc_id: str,
+        batch: Sequence[Any],
+        batch_index: int,
+        max_retries: int,
+        base_backoff_seconds: float,
+    ) -> tuple[Any, ...] | None:
+        attempts = max(1, max_retries + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                embedded_batch = tuple(self.embedding_provider.embed(doc_id=doc_id, chunks=batch))
+                if len(embedded_batch) != len(batch):
+                    raise RuntimeError(
+                        f"embedding_provider_mismatch: got {len(embedded_batch)} for {len(batch)}"
+                    )
+                return embedded_batch
+            except Exception as exc:
+                if attempt < attempts:
+                    delay = min(base_backoff_seconds * (2 ** (attempt - 1)), 0.5)
+                    self.event_logger.log(
+                        "embedding_retry",
+                        doc_id=doc_id,
+                        batch_index=batch_index,
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        delay_s=round(delay, 3),
+                        error=str(exc),
+                    )
+                    self.event_aggregator.record_event(
+                        "embedding_retry",
+                        doc_id=doc_id,
+                        details={
+                            "batch_index": batch_index,
+                            "attempt": attempt,
+                            "max_attempts": attempts,
+                            "delay_s": round(delay, 3),
+                        },
+                    )
+                    time.sleep(delay)
+                    continue
+                self.event_logger.log(
+                    "embedding_batch_skipped",
+                    doc_id=doc_id,
+                    batch_index=batch_index,
+                    attempts=attempts,
+                    chunks=len(batch),
+                    error=str(exc),
+                )
+                self.event_aggregator.record_event(
+                    "embedding_skipped",
+                    doc_id=doc_id,
+                    details={
+                        "batch_index": batch_index,
+                        "attempts": attempts,
+                        "chunks": len(batch),
+                    },
+                )
+                return None
 
 
 def _tokenize(text: str) -> list[str]:
     return [token.lower() for token in _TOKEN_PATTERN.findall(text or "") if token.strip()]
+
+
+def _job_duration_seconds(job: Any) -> float | None:
+    created_at = getattr(job, "created_at", None)
+    updated_at = getattr(job, "updated_at", None)
+    if not created_at or not updated_at:
+        return None
+    try:
+        started = datetime.fromisoformat(str(created_at))
+        finished = datetime.fromisoformat(str(updated_at))
+    except ValueError:
+        return None
+    delta = (finished - started).total_seconds()
+    if delta < 0:
+        return None
+    return float(delta)
+
+
+def _duration_summary(values: Sequence[float]) -> dict[str, float | int]:
+    if not values:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p90": 0.0,
+            "p99": 0.0,
+        }
+    ordered = sorted(float(item) for item in values)
+    count = len(ordered)
+    mean = sum(ordered) / count
+    return {
+        "count": count,
+        "mean": round(mean, 3),
+        "min": round(ordered[0], 3),
+        "max": round(ordered[-1], 3),
+        "p50": round(_percentile(ordered, 0.50), 3),
+        "p90": round(_percentile(ordered, 0.90), 3),
+        "p99": round(_percentile(ordered, 0.99), 3),
+    }
+
+
+def _percentile(sorted_values: Sequence[float], ratio: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    target = max(0.0, min(1.0, float(ratio)))
+    index = int(round(target * (len(sorted_values) - 1)))
+    return float(sorted_values[index])
+
+
+def _filter_jobs_by_since_hours(jobs: Sequence[Any], *, since_hours: float | None) -> tuple[Any, ...]:
+    if since_hours is None:
+        return tuple(jobs)
+    hours = float(since_hours)
+    if hours <= 0:
+        return ()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    filtered: list[Any] = []
+    for job in jobs:
+        updated = _parse_datetime(getattr(job, "updated_at", None))
+        if updated is None:
+            continue
+        if updated >= cutoff:
+            filtered.append(job)
+    return tuple(filtered)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _resolve_quota_limit(
+    *,
+    quota_limits: dict[str, Any] | Any,
+    tenant_id: str,
+    quota_key: str,
+    default_limit_units: int,
+) -> int:
+    mapping = dict(quota_limits or {})
+    candidates = (
+        f"{tenant_id}:{quota_key}",
+        f"{tenant_id}:*",
+        f"*:{quota_key}",
+        "*:*",
+    )
+    for key in candidates:
+        if key in mapping:
+            try:
+                return int(mapping[key])
+            except (TypeError, ValueError):
+                continue
+    return int(default_limit_units)
 
 
 def _score_chunk(

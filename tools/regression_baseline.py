@@ -186,7 +186,9 @@ def _cmd_save(args: argparse.Namespace) -> int:
             f" layout_pages={layout['pages_with_layout_metadata']}"
             f" multi_col={layout['multi_column_pages']}"
             f" stripped_pages={layout['header_footer_stripped_pages']}"
+            f" ocr_attempted={layout.get('ocr_attempted_pages', 0)}"
             f" ocr_pages={layout.get('ocr_fallback_pages', 0)}"
+            f" ocr_failed={layout.get('ocr_failed_pages', 0)}"
             f" embedded_ratio={fixture['embedding_quality']['embedded_chunk_ratio']:.4f}"
             f" elapsed={fixture['elapsed_s']}s"
         )

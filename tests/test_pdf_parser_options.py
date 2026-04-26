@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from parsecore.parsers import PdfTextParser, build_parser
+from parsecore.config import OcrProviderSettings
+from parsecore.models import ParseRequest
+from parsecore.ocr import OcrRequestError
+from parsecore.parsers import ImageOcrParser, PdfTextParser, build_parser
+
+
+class _FakePdfPage:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def extract_text(self) -> str:
+        return self._text
+
+
+class _FakePdfReader:
+    def __init__(self, _path: str) -> None:
+        self.pages = [_FakePdfPage("broken text")]
 
 
 class PdfTextParserOptionsTests(unittest.TestCase):
@@ -67,6 +87,159 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         )
         self.assertIsInstance(parser, PdfTextParser)
         self.assertEqual(parser._short_block_min_length, 10)  # type: ignore[attr-defined]
+
+    def test_image_ocr_parser_uses_shared_ocr_provider_builder(self) -> None:
+        provider_settings = OcrProviderSettings(
+            enabled=True,
+            provider="rapidocr",
+            options={"det_use_dilation": True},
+        )
+        parser = ImageOcrParser(
+            media_types=["image/png"],
+            extensions=[".png"],
+            ocr_provider_settings=provider_settings,
+        )
+        engine = object()
+
+        with patch("parsecore.parsers.build_ocr_engine", return_value=engine) as mocked:
+            self.assertIs(parser._ensure_engine(), engine)
+            self.assertIs(parser._ensure_engine(), engine)
+
+        mocked.assert_called_once_with(provider_settings)
+
+    def test_request_enable_ocr_turns_on_dual_channel_and_ocr_callback(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": False, "ocr_bad_pages": False}},
+        )
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["ocr_page_text_fn"] = kwargs.get("ocr_page_text_fn")
+            return [
+                SimpleNamespace(
+                    text_without_tables="Recovered OCR text",
+                    tables=[],
+                    width=100.0,
+                    height=100.0,
+                    column_count_hint=1,
+                    ocr_fallback_reason="cid_ratio",
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-on",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"enable_ocr": True},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertIsNotNone(captured.get("ocr_page_text_fn"))
+        self.assertEqual(blocks[1].content, "Recovered OCR text")
+        self.assertTrue(blocks[1].metadata["ocr_fallback_used"])
+
+    def test_request_enable_ocr_false_disables_ocr_callback_even_if_config_default_on(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["ocr_page_text_fn"] = kwargs.get("ocr_page_text_fn")
+            return [
+                SimpleNamespace(
+                    text_without_tables="Native text path",
+                    tables=[],
+                    width=100.0,
+                    height=100.0,
+                    column_count_hint=1,
+                    ocr_fallback_reason=None,
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-off",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"enable_ocr": False},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertIsNone(captured.get("ocr_page_text_fn"))
+        self.assertEqual(blocks[1].content, "Native text path")
+
+    def test_failed_ocr_attempt_surfaces_attempt_and_error_metadata(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": False, "ocr_bad_pages": False}},
+        )
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            recovered_text, attempt_reason, error_reason = kwargs["ocr_page_text_fn"](
+                SimpleNamespace(),
+                [],
+                1,
+                "",
+            )
+            self.assertIsNone(recovered_text)
+            return [
+                SimpleNamespace(
+                    text_without_tables="broken native text",
+                    tables=[],
+                    width=100.0,
+                    height=100.0,
+                    column_count_hint=1,
+                    ocr_attempt_reason=attempt_reason,
+                    ocr_fallback_reason=attempt_reason if recovered_text else None,
+                    ocr_error_reason=error_reason,
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-failed",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"enable_ocr": True},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ), patch(
+                "parsecore.parsers.PdfTextParser._ensure_pdf_ocr_engine",
+                return_value=(object(), None),
+            ), patch(
+                "parsecore.parsers._extract_ocr_text_from_page",
+                return_value=(None, "provider_request_failed"),
+            ):
+                blocks = parser.parse(request)
+
+        self.assertEqual(blocks[1].content, "broken native text")
+        self.assertTrue(blocks[1].metadata["ocr_attempted"])
+        self.assertEqual(blocks[1].metadata["ocr_attempt_reason"], "empty_text")
+        self.assertEqual(blocks[1].metadata["ocr_error_reason"], "provider_request_failed")
+        self.assertNotIn("ocr_fallback_used", blocks[1].metadata)
 
 
 if __name__ == "__main__":

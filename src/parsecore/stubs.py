@@ -108,8 +108,14 @@ class NullIndex(IndexAdapter):
     def __init__(self) -> None:
         self.upserts: list[dict[str, object]] = []
 
-    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None:
-        self.upserts.append({"doc_id": doc_id, "chunks": len(chunks)})
+    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
+        self.upserts.append(
+            {
+                "doc_id": doc_id,
+                "tenant_id": tenant_id or "default",
+                "chunks": len(chunks),
+            }
+        )
 
 
 class EchoTranslator(TranslationAdapter):
@@ -149,8 +155,8 @@ class EmbeddedProductAdapter(ProductAdapter):
 class InMemoryJobStore(JobStore):
     def __init__(self) -> None:
         self.jobs: dict[str, ParseJob] = {}
-        self.blocks_by_doc: dict[str, tuple[Block, ...]] = {}
-        self.chunks_by_doc: dict[str, tuple[Chunk, ...]] = {}
+        self.blocks_by_doc: dict[tuple[str, str], tuple[Block, ...]] = {}
+        self.chunks_by_doc: dict[tuple[str, str], tuple[Chunk, ...]] = {}
 
     def create(self, request: ParseRequest) -> ParseJob:
         now = _utc_now()
@@ -160,6 +166,9 @@ class InMemoryJobStore(JobStore):
             file_path=request.file_path,
             media_type=request.media_type,
             options=dict(request.options),
+            tenant_id=request.tenant_id,
+            quota_key=request.quota_key,
+            quota_units=max(1, int(request.quota_units or 1)),
             state=ParseJobState.PENDING,
             created_at=now,
             updated_at=now,
@@ -180,11 +189,13 @@ class InMemoryJobStore(JobStore):
         job.updated_at = _utc_now()
         return job
 
-    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block]) -> None:
-        self.blocks_by_doc[doc_id] = tuple(blocks)
+    def save_blocks(self, *, doc_id: str, blocks: Sequence[Block], tenant_id: str | None = None) -> None:
+        key = ((tenant_id or "default"), doc_id)
+        self.blocks_by_doc[key] = tuple(blocks)
 
-    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk]) -> None:
-        self.chunks_by_doc[doc_id] = tuple(chunks)
+    def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
+        key = ((tenant_id or "default"), doc_id)
+        self.chunks_by_doc[key] = tuple(chunks)
 
     def claim_next_job(self) -> ParseJob | None:
         pending = [job for job in self.jobs.values() if job.state == ParseJobState.PENDING]
@@ -210,11 +221,13 @@ class InMemoryJobStore(JobStore):
             jobs = [job for job in jobs if job.doc_id == doc_id]
         return tuple(sorted(jobs, key=lambda item: item.created_at, reverse=True))
 
-    def get_blocks(self, *, doc_id: str) -> Sequence[Block]:
-        return self.blocks_by_doc.get(doc_id, ())
+    def get_blocks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Block]:
+        key = ((tenant_id or "default"), doc_id)
+        return self.blocks_by_doc.get(key, ())
 
-    def get_chunks(self, *, doc_id: str) -> Sequence[Chunk]:
-        return self.chunks_by_doc.get(doc_id, ())
+    def get_chunks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Chunk]:
+        key = ((tenant_id or "default"), doc_id)
+        return self.chunks_by_doc.get(key, ())
 
     def increment_attempt(self, *, job_id: str) -> int:
         job = self.jobs[job_id]

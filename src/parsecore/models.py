@@ -45,6 +45,9 @@ class ParseRequest:
     file_path: str
     media_type: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
+    quota_key: str = "default"
+    quota_units: int = 1
 
 
 @dataclass(slots=True)
@@ -55,6 +58,9 @@ class ParseJob:
     state: ParseJobState
     media_type: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
+    quota_key: str = "default"
+    quota_units: int = 1
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
     failure_reason: str | None = None

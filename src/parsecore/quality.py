@@ -46,8 +46,12 @@ class LayoutSignalsReport:
     multi_column_pages: int
     header_footer_stripped_pages: int
     header_footer_stripped_blocks: int
+    ocr_attempted_pages: int
+    ocr_attempted_blocks: int
     ocr_fallback_pages: int
     ocr_fallback_blocks: int
+    ocr_failed_pages: int
+    ocr_failed_blocks: int
 
 
 @dataclass(slots=True)
@@ -179,8 +183,12 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
     multi_column_pages: set[int] = set()
     header_footer_stripped_pages: set[int] = set()
     header_footer_stripped_blocks = 0
+    ocr_attempted_pages: set[int] = set()
+    ocr_attempted_blocks = 0
     ocr_fallback_pages: set[int] = set()
     ocr_fallback_blocks = 0
+    ocr_failed_pages: set[int] = set()
+    ocr_failed_blocks = 0
 
     for block in blocks:
         page_number = _page_number_of(block)
@@ -200,17 +208,27 @@ def evaluate_layout_signals(blocks: Iterable[Block]) -> LayoutSignalsReport:
         if bool(metadata.get("header_footer_stripped")):
             header_footer_stripped_pages.add(page_number)
             header_footer_stripped_blocks += 1
+        if bool(metadata.get("ocr_attempted")):
+            ocr_attempted_pages.add(page_number)
+            ocr_attempted_blocks += 1
         if bool(metadata.get("ocr_fallback_used")):
             ocr_fallback_pages.add(page_number)
             ocr_fallback_blocks += 1
+        if metadata.get("ocr_error_reason"):
+            ocr_failed_pages.add(page_number)
+            ocr_failed_blocks += 1
 
     return LayoutSignalsReport(
         pages_with_layout_metadata=len(pages_with_layout_metadata),
         multi_column_pages=len(multi_column_pages),
         header_footer_stripped_pages=len(header_footer_stripped_pages),
         header_footer_stripped_blocks=header_footer_stripped_blocks,
+        ocr_attempted_pages=len(ocr_attempted_pages),
+        ocr_attempted_blocks=ocr_attempted_blocks,
         ocr_fallback_pages=len(ocr_fallback_pages),
         ocr_fallback_blocks=ocr_fallback_blocks,
+        ocr_failed_pages=len(ocr_failed_pages),
+        ocr_failed_blocks=ocr_failed_blocks,
     )
 
 

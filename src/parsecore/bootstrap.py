@@ -58,6 +58,7 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
             media_types=item.media_types,
             extensions=item.extensions,
             options=item.options,
+            ocr_provider_settings=settings.providers.ocr,
             boundary_refiner=boundary_refiner if item.name == "pdf-text" else None,
         )
         for item in settings.parsers

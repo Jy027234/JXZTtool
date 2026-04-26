@@ -5,7 +5,17 @@ mode = "embedded-sdk"
 [runtime]
 execution_mode = "inline"
 max_workers = 2
+# 0 = auto(max_workers * 4), set explicit value to cap in-flight jobs
+max_inflight_jobs = 0
 poll_interval_ms = 500
+# Enforce quota units at submission time.
+quota_enforce = false
+quota_window_hours = 24
+quota_default_limit_units = 0
+# [runtime.quota_limits]
+# "tenant-a:starter" = 200
+# "tenant-a:*" = 500
+# "*:*" = 1000
 max_attempts = 3
 log_path = "var/logs/job_events.jsonl"
 
@@ -48,6 +58,21 @@ timeout_seconds = 30.0
 max_retries = 2
 batch_size = 16
 # options.dimensions = 1536
+
+# OCR provider abstraction used by image-ocr parser and PDF bad-page fallback.
+# Set enabled = false to keep the image-ocr parser registered but report OCR
+# unavailable and skip PDF OCR fallback recovery.
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+# To reuse a host OCR gateway instead of local RapidOCR, switch to:
+# provider = "remote-http"
+# base_url = "https://ocr.example.com"
+# api_key_env = "PARSECORE_OCR_API_KEY"
+# timeout_seconds = 10.0
+# max_retries = 2
+# options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" } }
+# options.det_use_dilation = true
 
 [[parsers]]
 name = "docx-native"

@@ -127,7 +127,23 @@
 目标：为多产品复用做准备，但不提前过度建设。
 
 - [x] 抽象多产品配置中的 provider 层（LLM / embedding 分离配置）
-- [ ] 加入租户与配额字段
+- [x] 加入租户与配额字段
+- 说明：`ParseRequest`/`ParseJob` 已新增 `tenant_id`、`quota_key`、`quota_units` 字段（默认 `default/default/1`）；ASGI `POST /v1/parse/jobs` 支持透传并做 `quota_units >= 1` 校验；SQLite/Postgres `parse_jobs` 新增三列及迁移逻辑，重跑与派生任务（retry/reparse/rechunk/re-embed）均保留租户与配额上下文。`GET /v1/parse/jobs` 已支持 `tenant_id`/`quota_key` 过滤，`GET /v1/parse/quotas/usage` 已提供租户与配额维度聚合视图；文档读取/搜索/重跑接口已按 `tenant_id` 做硬隔离（默认 `default`），跨租户访问返回 `document_not_found`。本轮进一步完成 `blocks/chunks` 与 pgvector upsert 的 `tenant_id + doc_id` 物理分区，避免同 `doc_id` 跨租户覆盖。
+- 说明：在以上多租户隔离能力基础上，`parse_jobs` 已补齐复合索引（`tenant_id + doc_id + created_at`、`state + created_at`），用于优化多租户最新任务查询与 worker claim 队列扫描。
+- 说明：新增 `GET /v1/parse/metrics` 轻量观测接口，支持按租户查看失败率、活跃任务数与耗时分位（p50/p90/p99），用于运行态快速健康检查。
+- 说明：新增 `GET /v1/parse/dashboard` 聚合接口，单请求返回租户级 usage、metrics 与 recent jobs，减少前端并发请求。
+- 说明：`metrics/dashboard` 新增 `since_hours` 时间窗口参数，可按最近 N 小时任务计算失败率与耗时分位，便于实时运维观测。
+- 说明：`PostgresJobStore` 与 `PgVectorIndex` 均已接入 `psycopg_pool` 连接池优先策略（无池依赖时自动回退单连接模式），降低高并发下建连开销；`GET /v1/parse/quotas/usage` 同步支持 `since_hours` 时间窗口，补齐观测接口口径一致性。
+- 说明：inline 执行模式已增加 inflight 背压阈值（`runtime.max_inflight_jobs`，超限返回 429），并将 embedding 阶段改为分批重试 + 局部降级，避免单批失败导致整文 embedding 全量失效。
+- 说明：新增配额硬限能力（`runtime.quota_enforce` / `quota_window_hours` / `quota_default_limit_units` / `quota_limits`），提交与重跑在超限时返回 `429 quota_exceeded`，用于平台级资源保护。
+- [x] 提供企业产品兼容的同步 batch 解析入口
+- 说明：新增 `POST /parse/batch`（parser-service 兼容根路径）与 `POST /v1/parse/batch`（版本化入口），统一接收 `file_base64 + file_name` 并同步返回 `success / total_pages / pages[] / parser_used / error`，用于对接现有 Node 产品的 parser-service 客户端；页级投影会复用 ParseCore block 元数据输出 `page_number / page_type / text / tables_markdown / confidence`，其中 `toc_entry/lep_entry` 自动归类为 `toc`，便于以最小改动嵌入现有产品。
+- [x] 提供 parser-service 兼容的 multipart 上传解析入口
+- 说明：新增 `POST /parse` 与 `POST /v1/parse`，支持 multipart `file` 上传并返回 `file_name / mime_type / total_pages / pages / metadata`；其中 `metadata.parser` 与 PDF 场景下的 `metadata.ocr_enabled` 与企业产品现有 `ParseResult` 契约保持对齐。为支撑该入口，`api` 依赖已显式补入 `python-multipart`。本轮进一步把 `enable_ocr` 接成 request 级开关：显式 `true` 可为该请求打开 PDF OCR 回退，显式 `false` 可覆盖配置默认值关闭 OCR 回退。
+- [x] 提供 parser-service 兼容的健康检查入口
+- 说明：`GET /health` 已升级为 `status / version / services` 结构，其中 `services` 会结合当前注册 parser 与实际 OCR provider 可用性返回 `pdfplumber / python_docx / paddleocr` 能力矩阵；兼容字段名保留 `paddleocr`，在 ParseCore 内部实际映射到 OCR provider 能力探测，便于宿主产品在切换 ParseCore 前复用既有健康检查与能力探测逻辑。本轮同时补齐 `providers.ocr` 抽象，并内置 `rapidocr` 与 `remote-http` 两种 provider，可在保留 `image-ocr` parser 注册的前提下按环境显式启停或切换 OCR provider。另已把 PDF OCR 失败路径显式化：坏页触发 OCR 但 provider 失败时，会在 block metadata 与 `layout_signals` 中保留 `ocr_attempt_reason / ocr_error_reason / ocr_failed_pages` 等信号，便于双跑和回归时直接诊断远程 OCR 问题。
+- [x] 补齐宿主系统对接所需的 trace 与统一错误契约
+- 说明：ASGI 关键接口已统一回传 `x-trace-id`，错误体收口为 `error / code / message / trace_id / detail?`；同时 `quota_exceeded` 与 `too_many_inflight_jobs` 等提交期观测事件会记录 `trace_id`，便于把宿主请求、ParseCore API 错误和 observability 事件串成一条排障链路。当前 observability 还额外纳入了 OCR 摘要事件：PDF 坏页触发 OCR 后，会按文档汇总 `ocr_attempted / ocr_fallback / ocr_failed` 进入 `/v1/parse/events`，并把对应页数暴露到 `/v1/parse/prometheus`。
 - [x] 补评测集、基准集和质量报表
 - [x] 增加 chunk-only 重算入口，避免为 embedding/索引重建另起管线
 - [x] ASGI 显式派生重算路由：`rechunk` / `re-embed`（不再依赖隐式 `options.mode`）

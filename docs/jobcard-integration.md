@@ -26,6 +26,14 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 - API 只负责创建 job 和查询结果
 - 大文件和 OCR 任务单独扩容
 
+## OCR 接线建议
+
+- 若 jobcard 部署环境允许直接安装本地 OCR 依赖，可保留 `providers.ocr.provider = "rapidocr"`，由 ParseCore 在本地完成图片 OCR 和 PDF 坏页回退。
+- 若 jobcard 已有统一 OCR 网关，建议把 ParseCore 切到 `providers.ocr.provider = "remote-http"`，这样 `image-ocr` parser 和 PDF 坏页回退会共用同一个宿主 OCR 通道，而不需要在 ParseCore 容器里重复维护 OCR 模型。
+- `remote-http` 的最小配置是 `base_url`；若宿主网关要求鉴权，可再加 `api_key_env`。`options.endpoint_path` 与 `options.headers` 用于传输层，其余 `options` 会透传给宿主 OCR 网关。
+- ParseCore 对宿主 OCR 网关的请求体是 `image_base64 / mime_type / file_name? / options?`；响应体至少需要返回 `result` 列表，列表项包含 `bbox / text / confidence`。
+- 健康检查里的兼容字段名仍然是 `services.paddleocr`，但在 ParseCore 内部它代表“当前 OCR provider 可用”，不再限定为某一个具体 OCR 引擎。
+
 ## 不建议的做法
 
 - 一开始就把 ParseCore 做成独立中台并强推 jobcard 改造

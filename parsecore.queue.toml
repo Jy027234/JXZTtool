@@ -5,7 +5,12 @@ mode = "embedded-sdk"
 [runtime]
 execution_mode = "queue-worker"
 max_workers = 2
+# API submit side only; 0 = auto(max_workers * 4)
+max_inflight_jobs = 0
 poll_interval_ms = 500
+quota_enforce = false
+quota_window_hours = 24
+quota_default_limit_units = 0
 
 [storage]
 database_url = "sqlite:///./var/parsecore.db"
@@ -20,6 +25,18 @@ strategy = "lazy"
 
 [product]
 adapter = "embedded"
+
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+# To reuse a host OCR gateway instead of local RapidOCR, switch to:
+# provider = "remote-http"
+# base_url = "https://ocr.example.com"
+# api_key_env = "PARSECORE_OCR_API_KEY"
+# timeout_seconds = 10.0
+# max_retries = 2
+# options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" } }
+# options.det_use_dilation = true
 
 [[parsers]]
 name = "docx-native"

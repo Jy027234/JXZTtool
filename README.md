@@ -135,10 +135,53 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 显式 API 路由：
 
+- `GET /health`：parser-service 兼容健康检查，返回 `status / version / services`，其中 `services` 当前包含 `pdfplumber / python_docx / paddleocr`
+- `POST /parse`：parser-service 兼容上传入口，使用 multipart `file` 字段上传文档，返回 `file_name / mime_type / total_pages / pages / metadata`
+- `POST /parse/batch`：parser-service 兼容根路径，可直接对接现有企业产品客户端
+- `POST /v1/parse`：与 `/parse` 等价的版本化上传入口，支持 `enable_ocr`、`tenant_id`、`quota_key`、`quota_units`
+- `POST /v1/parse/batch`：与 `/parse/batch` 等价的版本化同步入口，接收 `file_base64`、`file_name`，同步返回 `success / total_pages / pages[] / parser_used / error`
 - `POST /v1/parse/documents/{doc_id}/reparse`：重新执行完整解析
 - `POST /v1/parse/documents/{doc_id}/rechunk`：复用已存 blocks，重算 chunk / embedding / index
 - `POST /v1/parse/documents/{doc_id}/re-embed`：复用已存 blocks + chunks，仅重算 embedding / index
 - `GET /v1/parse/documents/{doc_id}/search?q=...&role=warning&role=title`：基于已存 chunks 的轻量检索，支持 `semantic_role` 过滤并对 title/warning/note 等角色做内建权重
+- `GET /v1/parse/jobs?tenant_id=...&quota_key=...`：按租户与配额键过滤任务列表
+- `GET /v1/parse/quotas/usage?tenant_id=...&since_hours=...`：查看租户/配额维度的作业计数与 quota_units 聚合（支持时间窗口）
+- `GET /v1/parse/metrics?tenant_id=...&sample_size=200`：查看租户维度轻量运行指标（失败率、活跃任务数、耗时 p50/p90/p99）
+- `GET /v1/parse/events?event_type=ocr_failed&tenant_id=...`：查看最近观测事件；除 quota / inflight / embedding 外，现已包含 OCR 摘要事件 `ocr_attempted / ocr_fallback / ocr_failed`
+- `GET /v1/parse/prometheus`：Prometheus 文本指标出口；除 quota / inflight / embedding 外，现已包含 `parse_ocr_attempt_total / parse_ocr_fallback_total / parse_ocr_failed_total`
+- `GET /v1/parse/dashboard?tenant_id=...&sample_size=200&recent_limit=5`：单请求聚合租户 usage + metrics + recent_jobs
+- `since_hours`：可选时间窗口（小时），用于 `quotas/usage`、`metrics`、`dashboard` 仅统计最近 N 小时任务
+- `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
+- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方
+- `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
+- `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退
+- `services`：健康检查中的能力矩阵会结合当前注册 parser 与实际 OCR runtime 可用性返回；兼容字段名仍为 `paddleocr`，但在 ParseCore 中代表 RapidOCR 驱动的 OCR 能力可用性
+- `x-trace-id`：所有 HTTP 响应都会回传该请求头；若调用方未传入，ParseCore 会自动生成，便于宿主系统串联日志与事件
+- 错误包：除 batch 兼容字段外，其余错误响应统一包含 `error / code / message / trace_id`，需要附加上下文时再补 `detail`
+
+API 依赖说明：
+
+- `api` 可选依赖现已包含 `python-multipart`，用于支持 `/parse` 与 `/v1/parse` 的 multipart 文件上传
+- `parsers` 可选依赖现已包含 `rapidocr_onnxruntime`，用于支撑 `image-ocr` parser 与 PDF 坏页 OCR 回退
+
+背压与并发说明：
+
+- `runtime.max_workers`：后台并行执行 worker 数（inline 模式）
+- `runtime.max_inflight_jobs`：允许的 in-flight 任务上限（0 表示自动按 `max_workers * 4`）
+- embedding 阶段采用分批调用；单批失败会自动重试并只对失败批次降级，不影响其它批次继续写入 embedding
+
+配额硬限说明：
+
+- `runtime.quota_enforce = true` 时，提交任务会按租户与 `quota_key` 做 `quota_units` 硬限校验
+- 支持 `runtime.quota_window_hours` 时间窗（默认 24h）与 `runtime.quota_default_limit_units` 默认阈值
+- 支持 `runtime.quota_limits` 覆盖规则，优先级：`tenant:quota_key` > `tenant:*` > `*:quota_key` > `*:*` > 默认阈值
+- 超限返回 `429 quota_exceeded`，响应包含 `used_units/requested_units/limit_units/window_hours`
+
+租户隔离说明：
+
+- 文档读取/搜索/重跑接口支持 `tenant_id` 查询参数，并按租户过滤文档所属的最新作业。
+- 若未传 `tenant_id`，默认按 `default` 租户处理；非 `default` 租户文档必须显式传参，否则返回 `document_not_found`。
+- 底层 `blocks`/`chunks` 存储已按 `tenant_id + doc_id` 物理分区，避免同 `doc_id` 跨租户覆盖与读取串扰。
 
 搜索响应包含：
 
@@ -168,6 +211,41 @@ api_key_env = "PARSECORE_EMBEDDING_API_KEY"
 batch_size = 16
 ```
 
+控制 OCR provider：
+
+本地 RapidOCR：
+
+```toml
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+# options.det_use_dilation = true
+```
+
+远程 OCR 网关：
+
+```toml
+[providers.ocr]
+enabled = true
+provider = "remote-http"
+base_url = "https://ocr.example.com"
+api_key_env = "PARSECORE_OCR_API_KEY"
+timeout_seconds = 10.0
+max_retries = 2
+options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" }, det_use_dilation = true }
+```
+
+说明：
+
+- `providers.ocr.enabled = false` 时，`image-ocr` parser 仍可保留在配置中，但 `/health.services.paddleocr` 会返回 `false`，PDF 坏页 OCR 回退也会被显式关闭
+- 当前内置 provider 为 `rapidocr` 和 `remote-http`；兼容健康检查字段名仍保留 `paddleocr`，是为了对齐企业产品既有探活契约
+- `remote-http` 会把上传图片和 PDF 坏页回退图像统一序列化成 base64 JSON，请求 `POST {base_url}{endpoint_path}`，未显式配置时 `endpoint_path` 默认是 `/ocr`
+- `options.endpoint_path` 与 `options.headers` 由 ParseCore 作为传输层配置消费，其余 `options.*` 会原样放进请求体里的 `options` 字段，便于透传宿主 OCR 网关自己的开关
+- `remote-http` 预期响应体里包含 `result` 或 `results` 列表，列表项可为 `{ bbox, text, confidence }` 结构；可选 `elapsed` 字段会被透传为 OCR 调用耗时
+- 当 PDF 坏页触发 OCR 但 provider 失败时，相关 block metadata 现在会显式带出 `ocr_attempted = true`、`ocr_attempt_reason` 与 `ocr_error_reason`，不再和“根本没触发 OCR”混在一起
+- `tools/regression_baseline.py` 的 `layout_signals` 现已额外输出 `ocr_attempted_pages` / `ocr_failed_pages`，可直接观察远程 OCR 网关是否在真实样本上发生失败或退化
+- `event_aggregator` 现会按文档汇总 OCR 摘要事件，并把页数记入 Prometheus 计数；因此 `/v1/parse/events` 更适合看具体 `attempt_reasons / error_reasons`，而 `/v1/parse/prometheus` 更适合看租户维度的 OCR 失败页总量
+
 真实 embedding 端到端 smoke test：
 
 ```powershell
@@ -183,7 +261,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/_
 
 ## 下一步优先级
 
-1. 把 PDF 文本解析和图片 OCR 从占位实现推进到生产可用版本。
+1. 把 `remote-http` OCR provider 的鉴权、headers 约定和宿主网关部署模板收口成可复用接入清单。
 2. 把 SQLite 基线存储升级为 Postgres + pgvector。
 3. 用当前 queue-worker 模式直接接入 jobcard 的文档与管理文库路由，开始双跑验证。
-4. 在 jobcard 双跑稳定后，再把存储切到 Postgres 并补真实 OCR。
+4. 在 jobcard 双跑稳定后，再把存储切到 Postgres，并把 OCR provider 切换成生产侧统一能力。

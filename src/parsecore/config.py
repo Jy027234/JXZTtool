@@ -23,6 +23,11 @@ class RuntimeSettings:
     execution_mode: str
     max_workers: int
     poll_interval_ms: int
+    max_inflight_jobs: int = 0
+    quota_enforce: bool = False
+    quota_window_hours: float = 24.0
+    quota_default_limit_units: int = 0
+    quota_limits: Mapping[str, int] = field(default_factory=lambda: _EMPTY_MAPPING)
     max_attempts: int = 3
     log_path: str = "var/logs/job_events.jsonl"
 
@@ -60,9 +65,21 @@ class EmbeddingProviderSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class OcrProviderSettings:
+    enabled: bool
+    provider: str
+    base_url: str = ""
+    api_key_env: str = ""
+    timeout_seconds: float = 30.0
+    max_retries: int = 2
+    options: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_MAPPING)
+
+
+@dataclass(slots=True, frozen=True)
 class ProviderSettings:
     llm: LlmProviderSettings
     embedding: EmbeddingProviderSettings
+    ocr: OcrProviderSettings
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,6 +115,18 @@ def _freeze_mapping(value: Any) -> Mapping[str, Any]:
     return MappingProxyType(frozen)
 
 
+def _freeze_int_mapping(value: Any) -> Mapping[str, int]:
+    if not isinstance(value, dict):
+        return MappingProxyType({})
+    normalized: dict[str, int] = {}
+    for key, item in value.items():
+        try:
+            normalized[str(key)] = int(item)
+        except (TypeError, ValueError):
+            continue
+    return MappingProxyType(normalized)
+
+
 def load_settings(path: str | Path) -> ParseCoreSettings:
     config_path = Path(path)
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -111,6 +140,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
     providers_raw = data.get("providers", {}) or {}
     llm_raw = providers_raw.get("llm", {}) or {}
     embedding_raw = providers_raw.get("embedding", {}) or {}
+    ocr_raw = providers_raw.get("ocr", {}) or {}
     parser_settings = tuple(
         ParserSettings(
             name=str(item["name"]),
@@ -143,6 +173,15 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         batch_size=int(embedding_raw.get("batch_size", 16)),
         options=_freeze_mapping(embedding_raw.get("options")),
     )
+    ocr_settings = OcrProviderSettings(
+        enabled=bool(ocr_raw.get("enabled", True)),
+        provider=str(ocr_raw.get("provider", "rapidocr")),
+        base_url=str(ocr_raw.get("base_url", "")),
+        api_key_env=str(ocr_raw.get("api_key_env", "")),
+        timeout_seconds=float(ocr_raw.get("timeout_seconds", 30.0)),
+        max_retries=int(ocr_raw.get("max_retries", 2)),
+        options=_freeze_mapping(ocr_raw.get("options")),
+    )
 
     return ParseCoreSettings(
         project_name=str(project.get("name", "parsecore")),
@@ -157,9 +196,18 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             execution_mode=str(runtime.get("execution_mode", "inline")),
             max_workers=int(runtime.get("max_workers", 2)),
             poll_interval_ms=int(runtime.get("poll_interval_ms", 1000)),
+            max_inflight_jobs=int(runtime.get("max_inflight_jobs", 0)),
+            quota_enforce=bool(runtime.get("quota_enforce", False)),
+            quota_window_hours=float(runtime.get("quota_window_hours", 24.0)),
+            quota_default_limit_units=int(runtime.get("quota_default_limit_units", 0)),
+            quota_limits=_freeze_int_mapping(runtime.get("quota_limits")),
             max_attempts=int(runtime.get("max_attempts", 3)),
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
         ),
         parsers=parser_settings,
-        providers=ProviderSettings(llm=llm_settings, embedding=embedding_settings),
+        providers=ProviderSettings(
+            llm=llm_settings,
+            embedding=embedding_settings,
+            ocr=ocr_settings,
+        ),
     )

@@ -39,6 +39,15 @@ base_url = "https://example.invalid/v1"
 api_key_env = "PARSECORE_EMBEDDING_API_KEY"
 batch_size = 8
 
+[providers.ocr]
+enabled = true
+provider = "remote-http"
+base_url = "https://example.invalid"
+api_key_env = "PARSECORE_OCR_API_KEY"
+timeout_seconds = 9.5
+max_retries = 4
+options = { endpoint_path = "/ocr/v1", det_use_dilation = true }
+
 [[parsers]]
 name = "pdf-text"
 media_types = ["application/pdf"]
@@ -71,6 +80,16 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertTrue(settings.providers.embedding.enabled)
         self.assertEqual(settings.providers.embedding.batch_size, 8)
         self.assertEqual(settings.providers.embedding.model, "text-embedding-3-small")
+        self.assertTrue(settings.providers.ocr.enabled)
+        self.assertEqual(settings.providers.ocr.provider, "remote-http")
+        self.assertEqual(settings.providers.ocr.base_url, "https://example.invalid")
+        self.assertEqual(settings.providers.ocr.api_key_env, "PARSECORE_OCR_API_KEY")
+        self.assertEqual(settings.providers.ocr.timeout_seconds, 9.5)
+        self.assertEqual(settings.providers.ocr.max_retries, 4)
+        self.assertEqual(
+            dict(settings.providers.ocr.options),
+            {"endpoint_path": "/ocr/v1", "det_use_dilation": True},
+        )
 
 
 if __name__ == "__main__":
