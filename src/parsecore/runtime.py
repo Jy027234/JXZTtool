@@ -11,6 +11,7 @@ from .config import ParseCoreSettings
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
 from .events import JobEventLogger
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest
+from .pipelines import PipelineRegistry
 
 
 _RERUN_CHUNKS_ONLY_MODE = "rerun_chunks_only"
@@ -221,6 +222,7 @@ class ParseRuntime:
         product_adapter: ProductAdapter,
         job_store: JobStore,
         event_logger: JobEventLogger | None = None,
+        pipeline_registry: PipelineRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.parsers = tuple(parsers)
@@ -232,9 +234,10 @@ class ParseRuntime:
         self.job_store = job_store
         self.event_logger = event_logger or JobEventLogger(settings.runtime.log_path)
         self.event_aggregator = EventAggregator(max_ringbuffer_size=1000)
+        self.pipeline_registry = pipeline_registry
 
     def describe(self) -> dict[str, object]:
-        return {
+        description: dict[str, object] = {
             "project": self.settings.project_name,
             "mode": self.settings.mode,
             "database_url": self.settings.database_url,
@@ -258,6 +261,11 @@ class ParseRuntime:
             "product_adapter": self.settings.product_adapter,
             "parsers": [parser.name for parser in self.parsers],
         }
+        if self.pipeline_registry is not None:
+            registry_description = self.pipeline_registry.describe()
+            description["pipelines"] = registry_description["pipelines"]
+            description["pipeline_cache"] = registry_description["cache"]
+        return description
 
     def submit(self, request: ParseRequest) -> ParseOutcome:
         job = self.start(request)
@@ -761,6 +769,8 @@ class ParseRuntime:
 
     def _load_blocks_for_request(self, request: ParseRequest):
         if self._is_rerun_chunks_only(request) or self._is_rerun_embeddings_only(request):
+            purpose = "reembed" if self._is_rerun_embeddings_only(request) else "rechunk"
+            self._resolve_pipeline(request, purpose=purpose)
             blocks = tuple(
                 self.job_store.get_blocks(
                     doc_id=request.doc_id,
@@ -778,8 +788,8 @@ class ParseRuntime:
             )
             return blocks
 
-        parser = self._resolve_parser(request)
-        return tuple(parser.parse(request))
+        pipeline = self._resolve_pipeline(request, purpose="parse")
+        return tuple(pipeline.parse_blocks(request=request))
 
     def _load_chunks_for_request(self, request: ParseRequest, *, blocks: Sequence[Any]):
         if self._is_rerun_embeddings_only(request):
@@ -799,7 +809,9 @@ class ParseRuntime:
                 chunks=len(chunks),
             )
             return chunks
-        return self.chunk_builder.build(doc_id=request.doc_id, blocks=blocks)
+        purpose = "rechunk" if self._is_rerun_chunks_only(request) else "parse"
+        pipeline = self._resolve_pipeline(request, purpose=purpose)
+        return pipeline.build_chunks(request=request, blocks=blocks)
 
     @staticmethod
     def _is_rerun_chunks_only(request: ParseRequest) -> bool:
@@ -817,6 +829,16 @@ class ParseRuntime:
             if parser.supports(media_type=request.media_type, suffix=suffix):
                 return parser
         raise LookupError(f"No parser registered for media_type={request.media_type!r}, suffix={suffix!r}")
+
+    def _resolve_pipeline(self, request: ParseRequest, *, purpose: str = "parse"):
+        if self.pipeline_registry is not None:
+            return self.pipeline_registry.resolve(request, purpose=purpose)
+        parser = self._resolve_parser(request)
+        if purpose not in {"parse", "rechunk", "reembed"}:
+            raise LookupError(f"Unsupported pipeline purpose={purpose!r}")
+        raise LookupError(
+            f"No pipeline registry available for parser={parser.name!r}; rebuild runtime with pipeline registry support"
+        )
 
     def _record_ocr_observability(
         self,

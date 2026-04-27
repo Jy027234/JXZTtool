@@ -9,6 +9,7 @@
 - `docs/jobcard-integration.md`：jobcard 接线策略与宿主嵌入背景
 - `docs/jobcard-cutover-readiness.md`：切流 readiness 结论与阻塞项
 - `docs/jobcard-replacement-checklist.md`：宿主替换、灰度与回滚清单
+- `docs/jobcard-removal-assessment.md`：停止接入 jobcard 后的影响评估与拆除顺序
 - `../jobcard-dual-run/README.md`：更细的历史双跑记录、runbook 和辅助脚本
 
 ## 当前使用原则

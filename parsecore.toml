@@ -92,6 +92,7 @@ extensions = [".pdf"]
 # A3 双通道：开启后用 pdfplumber 抽取表格 + 去表格区域文本，pypdf 仍走原管线
 [parsers.options.post_process]
 dual_channel = true
+layout_reading_order = true
 dual_table_min_rows = 2
 dual_table_min_cols = 2
 ocr_bad_pages = true

@@ -63,6 +63,33 @@ extensions = [".pdf"]
 """.strip()
 
 
+PDF_TABLE_STAGE_CONFIG = """
+[project]
+name = "test-parsecore"
+mode = "embedded-sdk"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+options = { enrichment = { table_structure = { enabled = true, header_rows = 1, output_format = "markdown" } } }
+""".strip()
+
+
 EMBEDDING_SAMPLE_CONFIG = """
 [project]
 name = "test-parsecore"
@@ -135,6 +162,150 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertEqual(description["project"], "test-parsecore")
         self.assertEqual(description["parsers"], ["docx-native"])
+        self.assertIn("pipelines", description)
+        self.assertIn("pipeline_cache", description)
+        self.assertEqual(description["pipeline_cache"]["size"], 1)
+
+    def test_pipeline_registry_describes_format_backend_stage_matrix(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            description = runtime.describe()
+
+        pipelines = description["pipelines"]
+        self.assertEqual(len(pipelines), 1)
+        pipeline = pipelines[0]
+        self.assertEqual(pipeline["name"], "pdf-text/default")
+        self.assertEqual(pipeline["format"], "pdf")
+        self.assertEqual(pipeline["backend"], "native-text")
+        self.assertIn("normalized-items", pipeline["stages"])
+        self.assertIn("table-structure", pipeline["runtime_stages"])
+        self.assertIn("layout-reading-order", pipeline["parser_backed_stages"])
+        self.assertIn("table-detection", pipeline["parser_backed_stages"])
+        self.assertIn("ocr-fallback", pipeline["parser_backed_stages"])
+        self.assertEqual(pipeline["chunker"], "artifact-chunker")
+
+    def test_pipeline_registry_warmup_and_artifact_chunking_are_active(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("artifact.docx", ["Engine Manual", "Inspection procedure"])
+            runtime = build_runtime(workspace.config_path)
+            self.assertIsNotNone(runtime.pipeline_registry)
+            request = ParseRequest(
+                doc_id="doc-artifact",
+                file_path=str(document_path),
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = pipeline.parse_blocks(request=request)
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+            chunks = pipeline.build_chunks(request=request, blocks=blocks)
+            description = runtime.describe()
+
+        self.assertGreaterEqual(description["pipeline_cache"]["hits"], 1)
+        self.assertEqual(artifact.metadata["summary"]["item_count"], len(blocks))
+        self.assertEqual(artifact.items[0].kind, SemanticRole.TITLE.value)
+        self.assertEqual(artifact.metadata["pipeline_name"], "docx-native/default")
+        self.assertEqual(chunks[0].semantic_role, SemanticRole.TITLE.value)
+        self.assertEqual(chunks[1].semantic_role, SemanticRole.PARAGRAPH.value)
+
+    def test_table_structure_stage_enriches_table_items_and_chunks_when_enabled(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-table-stage",
+                file_path=str(workspace.root / "table.pdf"),
+                media_type="application/pdf",
+                options={
+                    "enrichment": {
+                        "table_structure": {
+                            "enabled": True,
+                            "header_rows": 1,
+                            "output_format": "markdown",
+                        }
+                    }
+                },
+            )
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = (
+                Block(
+                    block_id="blk-title",
+                    doc_id="doc-table-stage",
+                    type=BlockType.TITLE,
+                    content="Parts List",
+                    metadata={"page": 1, "parser": "pdf-text", "semantic_role": SemanticRole.TITLE.value},
+                ),
+                Block(
+                    block_id="blk-table",
+                    doc_id="doc-table-stage",
+                    type=BlockType.TABLE,
+                    content="Part\tQty\nBolt\t2",
+                    metadata={
+                        "page": 1,
+                        "parser": "pdf-text",
+                        "semantic_role": SemanticRole.TABLE.value,
+                        "cells": [["Part", "Qty"], ["Bolt", "2"]],
+                        "rows": 2,
+                        "cols": 2,
+                    },
+                ),
+            )
+
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+            chunks = pipeline.build_chunks(request=request, blocks=blocks)
+
+        self.assertIn("table-structure", artifact.metadata["active_runtime_stages"])
+        self.assertEqual(artifact.metadata["table_structure"]["enriched_items"], 1)
+        self.assertEqual(artifact.items[1].metadata["table_markdown"], "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+        self.assertEqual(chunks[1].semantic_role, SemanticRole.TABLE.value)
+        self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+
+    def test_table_structure_stage_can_be_disabled_per_request(self) -> None:
+        with TemporaryWorkspace(PDF_TABLE_STAGE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-table-stage-off",
+                file_path=str(workspace.root / "table.pdf"),
+                media_type="application/pdf",
+                options={
+                    "enrichment": {
+                        "table_structure": {
+                            "enabled": False,
+                        }
+                    }
+                },
+            )
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = (
+                Block(
+                    block_id="blk-title",
+                    doc_id="doc-table-stage-off",
+                    type=BlockType.TITLE,
+                    content="Parts List",
+                    metadata={"page": 1, "parser": "pdf-text", "semantic_role": SemanticRole.TITLE.value},
+                ),
+                Block(
+                    block_id="blk-table",
+                    doc_id="doc-table-stage-off",
+                    type=BlockType.TABLE,
+                    content="Part\tQty\nBolt\t2",
+                    metadata={
+                        "page": 1,
+                        "parser": "pdf-text",
+                        "semantic_role": SemanticRole.TABLE.value,
+                        "cells": [["Part", "Qty"], ["Bolt", "2"]],
+                        "rows": 2,
+                        "cols": 2,
+                    },
+                ),
+            )
+
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+            chunks = pipeline.build_chunks(request=request, blocks=blocks)
+
+        self.assertIn("table-structure", artifact.metadata["skipped_runtime_stages"])
+        self.assertNotIn("table_structure", artifact.metadata)
+        self.assertNotIn("table_markdown", artifact.items[1].metadata)
+        self.assertEqual(chunks[1].text, "Part\tQty\nBolt\t2")
 
     def test_submit_finishes_with_done_state(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

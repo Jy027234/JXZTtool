@@ -47,8 +47,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 ### 可靠性
 
 - 快速自检已通过。
-- 全量自检已通过，状态为 `ok`。
-- 单测结果：`139 passed, 5 skipped`。
+- 本轮等价验证已通过：全量 `unittest discover -s tests` 通过，`baseline.json` 与 `baseline.table-structure.primary.json` 的真实 `check` 均通过，并已将 layout/table 两类专项继续收口到同一回归工具路径。
+- 单测结果：`151 passed, 5 skipped`。
 - 单测耗时约 `7.8s`。
 - 默认 runtime describe 正常，当前形态为 `index_mode = hybrid`、`execution_mode = inline`。
 
@@ -57,23 +57,27 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 已确认以下基线样本在预算内通过：
 
 1. `primary-default`
-2. `primary-strip-hf`
-3. `sample-25-51-06`
-4. `sample-flight-ops-manual-r2`
+2. `primary-table-structure`
+3. `primary-strip-hf`
+4. `sample-25-51-06`
+5. `sample-flight-ops-manual-r2`
 
 `sample-27-81-17` 依照 `suite.json` 默认策略以 `slow` 标签跳过，不计入默认门禁失败。
 
+该样本当前同时承担复杂版面阅读顺序专项样本职责：`tools/regression_baseline.py` 已为其补上 `layout_quality` 指标与 drift 门槛，但仍保持 `slow` 标签，避免把布局专项长样本混入日常默认门禁时长。
+
 2026-04-27 最近一次全量自检结果：
 
-1. `regression_suite: ok=5 skipped=1`
+1. `regression_suite` 已新增 `primary-table-structure` 表格专项门禁
 2. 默认 suite 已包含 `sample-cmm-32-48-21-ocr`
-3. 全量自检总耗时约 `13.8` 分钟
+3. `sample-27-81-17` 现作为 slow layout 专项样本保留在同一 suite 路径中，默认跳过但继续沿用 baseline/suite 口径
+4. 本轮 `check-suite` 在 `sample-cmm-32-48-21-ocr` 之前的所有默认样本均在预算内通过；该 OCR 长尾样本仍需按专项性能窗口观察
 
 ### 性能风险
 
 - 当前最明显的长尾风险集中在 `sample-cmm-32-48-21-ocr`。
-- 该 OCR 样本已纳入默认回归套件，并在 `900s` 默认超时口径下完成。
-- 这说明常规样本和 OCR 重样本都已具备门禁能力，但长尾压缩本身仍应视为上线后专项优化，而不是当前主线可靠性缺陷。
+- 该 OCR 样本已纳入默认回归套件，但本轮 600s 观察窗口内尚未收口，仍应按 OCR 重样本性能专项持续跟踪。
+- 这说明常规样本和新的表格专项样本都已具备门禁能力，但 OCR 长尾压缩本身仍应视为专项优化，而不是这轮表格门禁工作的回归失败。
 
 ## 当前建议
 

@@ -1,6 +1,21 @@
 # 实施计划
 
-## 当前状态
+## 导航
+
+- 第 1 节「当前状态」是 Phase 0–4 的落地清单与详细历史说明，仅作为存档与可追溯证据，不再作为日常阅读入口。
+- 第 2 节「Phase 0 ~ Phase 4」是已收口的历史路线图，保留章节方便回看，新工作不再在这些章节里追加。
+- 第 3 节「下一阶段规划（2026-04-27）」是当前唯一的活动路线，新任务、新决策、新验收口径都写到这里，并对照 [docs/architecture.md](architecture.md)、[docs/ocr-gateway-contract.md](ocr-gateway-contract.md)、[docs/self-check-gate.md](self-check-gate.md) 维护。
+
+总体收口判断：
+
+- ParseCore 的「嵌入式内核 + 异步 worker + 多租户 + OCR 兜底 + LLM 增强 + pgvector + 同步/异步 API」骨架已基本完整，Phase 0–4 不再是瓶颈。
+- 当前的真实瓶颈集中在三个方向：
+  1. 工程组织还偏散：format/backend/pipeline/options 没有显式注册表，enrichment 没有独立 stage 抽象，chunking 没有作为一等抽象暴露出来。
+  2. 解析质量长尾仍在：表格结构、复杂版面阅读顺序、扫描件 OCR 重样本超长尾，靠规则与几何启发式继续挤已边际递减。
+  3. 检索/产品化还薄：还是单层 embedding + 单索引，没有「主索引 + 高精度索引 + 结构索引」分层，也没有夜间批处理与多版本重建机制。
+- 下一阶段以「先稳工程结构，再有节制地引入专用模型，最后做检索与批处理升级」为优先级，避免直接跳到全文 VLM 路线。
+
+## 1. 当前状态
 
 ### 已完成
 
@@ -54,7 +69,7 @@
 - [x] jobcard 双跑资料与辅助脚本归档
 - [x] 默认自检门禁脚本与结论文档
 
-### 未完成
+### 已收口但仍需跟踪
 
 - [x] 生产级 PDF 文本解析
 - 收口说明：解析栈已落齐 (1) pypdf 段落切分 + 多列页面文本重排，(2) 双通道 pdfplumber 表格识别，(3) 结构项 / 内联结构项 / TOC 条目切分，(4) 表格续行合并 / HIGHLIGHTS 变更日志合并，(5) 重复页眉页脚剥离 + 极短块合并，(6) CID 乱码 / 空白页自动转图走 RapidOCR 兜底，(7) 可选 LLM 边界精修 hook（仅对低置信段落生效），(8) 所有后处理项均可通过 `[[parsers]] options.post_process` 开关。`var/regression/suite.json` 6 个样本（含 OCR 兜底 + 多版本飞行手册 + 真实 CMM/27-81-17）作为门禁基线，`tools/regression_baseline.py check-suite` 默认 5 OK + 1 slow-tagged SKIP，`--include-tag slow` 可纳入慢样本；69 项单测覆盖含 PDF 各后处理子模块。残差结构差异（jobcard 双跑 raw/展示口径 Block 对位仍有页级块数差）已不再以“向 legacy 收敛”为目标——legacy 在 TOC/表格页常压成单块，向其收敛会降质，所以保留当前更细颗粒度的切分作为生产口径。
@@ -64,6 +79,10 @@
 - [x] 队列化 worker
 - [~] jobcard 宿主兼容接入（历史双跑已归档）
 - 说明：解析入口已接到 ParseCore，相关历史双跑记录、runbook 与辅助脚本已统一归档到 `archive/jobcard-dual-run/`；当前默认门禁切回 ParseCore 自检，不再继续扩大双跑样本池。既有历史联调结果仍保留为兼容性证据：ParseCore 的 PDF 文本提取已提升为按段落切分，并在 ParseCore 与 jobcard 两侧统一到 `pypdf`；对真实 PDF 的 raw 相似度、展示口径相似度、字段级/页面级/Block/Chunk 级差异摘要、索引命中差异摘要和 Block 对位摘要都已完成过一轮归档验证。宿主原生上传与 store-backed 样本也已经证明 `documents` 与 `mgmt_documents` 两条路径可通，但当前继续推进时应优先解决宿主上传资产保全问题，并以 `unittest`、`tools/regression_baseline.py check-suite`、运行态健康检查和最小灰度作为默认质量门禁。
+
+## 2. Phase 0 ~ Phase 4（历史路线，已收口）
+
+下列章节是 ParseCore 从骨架到平台化准备阶段的实际执行轨迹，不再作为活动路线维护；任何继续推进都改写到第 3 节。
 
 ## Phase 0: 定稿骨架
 
@@ -157,3 +176,155 @@
 - [x] ASGI 显式派生重算路由：`rechunk` / `re-embed`（不再依赖隐式 `options.mode`）
 - [x] 混合检索入口：`search` API 默认“向量优先 + 关键词回退”，并支持 `semantic_role` 过滤与角色权重排序
 - [x] embedding live smoke 工具：`tools/_embedding_smoke.py`，有 key 时执行真实 provider，无 key 时显式 skip
+
+## 3. 下一阶段规划（2026-04-27）
+
+本节是当前唯一活动路线。核心原则如下：
+
+- 保持 ParseCore 的主链为 deterministic-first：常规 PDF/DOCX/图片解析继续走稳定后端，不把全文 VLM 当默认主解析器。
+- 优先补工程组织，再补专用模型：先把 format/backend/pipeline/options、enrichment stage、chunking、索引层组织好，再引入局部专用模型。
+- 专用模型只解决高价值长尾：优先表格结构、复杂版面阅读顺序、OCR 重样本；不做“为了先进而先进”的整链路模型化。
+- 检索层从单索引升级为多索引：主索引保吞吐和成本，高精度索引保高价值文档，结构索引用于 SOP/工卡/合规比对。
+- 批处理与重建必须成为内建能力：允许夜间重算 chunk、embedding、索引与质量报表，而不是把重建当临时脚本。
+
+当前优先级排序：
+
+1. Phase 5 已完成并收口，后续不再回到“先补工程组织”的准备态。
+2. Phase 6 现在是唯一活动阶段，优先挑一个高价值长尾切片进入受控实验。
+3. Phase 7 仍然排在 Phase 6 之后，避免在专用能力尚未定型前过早铺开多索引与批处理复杂度。
+
+### 3.1 当前明确不做
+
+- 不把 ParseCore 改造成全文多模态 VLM 优先架构。
+- 不在当前阶段引入过重的全量统一 token/doctags 体系。
+- 不为了追平 legacy 双跑数值继续堆 compare-only 窄规则。
+- 不先做复杂规则引擎，再考虑索引与批处理；规则只服务确定性的结构修补和业务约束。
+
+### Phase 5：解析工程重构与能力收口（已完成）
+
+目标：把现在“能跑”的能力整理成“可扩、可组合、可缓存、可服务化”的稳定结构。这一阶段不追求大幅提高模型精度，主要解决工程组织问题。
+
+#### 任务清单
+
+- [x] 建立显式的 format -> backend -> pipeline -> options 注册表
+- [x] 把 OCR、表格、图片说明、公式、边界精修收口为 enrichment stage
+- [x] 抽象规范解析产物层，位于 Block/Chunk 之上、业务投影之下
+- [x] 把 chunking 提升为独立一等抽象，直接消费规范解析产物
+- [x] 增加 pipeline warmup / cache 复用机制，按 pipeline class + options hash 复用重型资源
+- [x] 为 parser、pipeline、stage 增加统一 capability 声明与策略校验
+- [x] 把同步 batch、异步 job、rechunk、re-embed 统一到同一组 pipeline 入口，避免分叉逻辑
+
+#### 落地说明（2026-04-27）
+
+- 新增 `src/parsecore/pipelines.py`，把 format/backend/pipeline/options 注册、stage 声明、规范解析产物、artifact-backed chunking、pipeline cache 收到同一处。
+- `build_runtime` 现已在启动时根据 `settings.parsers` 显式构建 pipeline registry，并在 bootstrap 阶段完成 warmup；`runtime.describe()` 也开始回传 `pipelines` 与 `pipeline_cache` 视图。
+- `ParseRuntime` 不再把 parser 选择、derived task、chunking 视为彼此独立的散件：常规 parse、`/parse/batch`、`rechunk`、`re-embed` 现统一经由 pipeline registry 解析和能力校验。
+- 规范解析产物层当前最小落地为 `ParsedDocumentArtifact + DocumentArtifactItem`，承接 Block 之上的 typed item、metadata、provenance 和 summary，为 Phase 6/7 的结构索引与批处理打底。
+- chunking 现通过 `ArtifactBackedChunker` 消费规范解析产物，而不是直接让 runtime 裸调 `ChunkBuilder`；因此后续新增 typed item 或 stage 时不必再改 runtime 主流程。
+- stage 目前分 runtime stage 与 parser-backed stage 两类：runtime stage 已落 provenance / summary，parser-backed stage 已显式声明 pdf 表格、OCR fallback、boundary refinement 与 image OCR 等现有能力，先解决“能力可声明、可验证、可缓存”，再逐步把 parser 内部逻辑外移。
+- 本轮回归：`tests.test_runtime`、`tests.test_asgi`、`tests.test_bootstrap_routing` 与全量 `unittest discover -s tests` 均通过；当前结果为 `141 passed, 5 skipped`。
+
+#### 设计要求
+
+- 新抽象必须兼容现有 ParseRequest / ParseJob / Block / Chunk / ParseOutcome，不破坏外部 API。
+- 规范解析产物层只补 typed item、provenance、layout signals、enrichment result，不替代现有 Block/Chunk 存储。
+- stage 必须支持显式开关、失败降级和 trace/event 观测，保持当前的安全退化语义。
+
+#### 验收标准
+
+- [x] 新增一种 parser backend 或 enrichment stage 时，不需要修改 runtime 主流程分支。
+- [x] 同一文档的 `parse`、`batch`、`rechunk`、`re-embed` 共享统一 pipeline 定义。
+- [x] worker 热启动与重复任务的初始化开销可通过缓存观测到显著下降。
+- [x] 现有自检、回归基线、OCR 网关契约测试全部保持通过。
+
+### Phase 6：局部专用模型与长尾质量治理
+
+目标：只在规则/几何启发式边际收益开始递减的局部问题上引入专用模型，优先解决真正影响下游价值的长尾结构错误。
+
+#### 专用模型引入门槛
+
+以下条件至少满足 3 条，才允许进入默认路线候选：
+
+- 某类结构错误占严重质量问题的 30% 以上。
+- 规则与几何策略连续两轮优化后，关键指标提升低于 10%。
+- 问题已明确影响检索、抽取、QA 或人工校验成本。
+- 能作为独立 stage 或可选 pipeline 接入，而不是破坏主链契约。
+
+#### 优先级
+
+- [~] P1 表格结构专用能力：跨页表、无框表、复杂单元格结构
+- [~] P1 复杂版面阅读顺序/布局能力：多栏、混排、图文穿插、目录/清单型页面
+- [ ] P2 OCR 长尾专项：围绕 recognition 段而不是继续挤渲染分辨率参数
+- [ ] P2 公式/符号能力：仅在技术手册、学术或维修文档样本占比明显上升时引入
+- [ ] P3 页级/区域级 VLM fallback：仅对疑难页、高价值页、扫描件或结构失真页启用
+
+#### 落地说明（2026-04-27，第一批）
+
+- 已把表格结构能力从单纯的 parser-backed 声明升级成真正的 runtime enrichment stage：`table-structure` 现作为可选 stage 挂在 pipeline 上，和 `table-detection` 分离。
+- `table-structure` 支持独立开关 `enrichment.table_structure.enabled`，并可调 `header_rows`、`output_format`；默认关闭，用于受控实验而不是直接进入主链。
+- stage 当前直接消费规范解析产物中的 table item 与 `cells` 元数据，把表格渲染为稳定 markdown/tsv，并将结果写回 item metadata 与下游 chunk 文本，便于后续检索和结构索引复用。
+- 失败语义按 degrade 处理：stage 异常不会阻断主解析链，runtime 只在 artifact metadata 中记录 `failed_runtime_stages`。
+- 已补 focused 回归覆盖：pipeline 描述、stage 启停、markdown 渲染、request 级禁用覆盖注册配置，确保这是“可独立开关、可单测、可回退”的真实能力，而不是仅在文档中声明。
+- 已落一组真实表格专项 baseline：`var/regression/baseline.table-structure.primary.json` 基于主样本 `36d65cd6b61346e28e97dbaf829646de.pdf`，当前记录到 `table_ready=1.0000`、`table_cells=44`，并已接入默认 `suite.json` 作为 `primary-table-structure` 门禁项。
+- 已将复杂版面阅读顺序从 `dual_channel` 的隐式副作用拆成独立 parser-backed stage：`layout-reading-order` 现在有单独配置 `post_process.layout_reading_order`，也支持 request 级覆盖 `post_process.layout_reading_order` / `enrichment.layout_reading_order.enabled`。
+- parser 现在会把 `layout_reading_order_applied` 与 `layout_reading_order_strategy` 写入 block metadata；`tools/regression_baseline.py` 也新增 `layout_quality` 指标与 drift 门槛，沿用现有 `baseline.27-81-17.json` + `suite.json` 路径作为 slow layout 样本，而不是另起一套脚手架。
+- 本轮验证结果：`tests.test_pdf_parser_options`、`tests.test_regression_baseline`、`tests.test_runtime` 与全量 `unittest discover -s tests` 均通过；当前结果为 `151 passed, 5 skipped`。真实 baseline `check` 已验证 `baseline.json` 与 `baseline.table-structure.primary.json` 均在预算内通过；`sample-27-81-17` 继续作为 slow layout 样本保留在同一 suite 路径中，`sample-cmm-32-48-21-ocr` 仍保留为既有 OCR 长尾样本，未在本轮观察窗口内收口。
+
+#### 具体策略
+
+- 表格、布局、OCR、公式都先作为可选 stage 接入，不进入默认主链。
+- 默认策略继续是 backend text + deterministic parse；命中条件后再把局部页或局部区域升级到专用能力。
+- OCR 性能治理优先走模型/后端实验、页级策略和批处理调度，不继续围绕 `ocr_render_resolution`、`rec_batch_num` 这类已验证低收益参数反复试错。
+- 任何专用模型上线前，都要补最小样本集、质量门槛与失败降级语义。
+
+#### 验收标准
+
+- [x] 至少 1 个局部专用能力进入受控实验，并有独立配置开关。
+- 长尾样本集有明确前后对比，不只看整体平均分。
+- 新能力失败时文档仍能落回 deterministic 路径，不阻断主解析作业。
+- `tools/self_check.py`、相关 regression baseline 与新增专项样本集可以稳定复现结果。
+
+### Phase 7：多索引、批处理与产品化增强
+
+目标：把“解析结果能看”升级成“解析结果能被持续运营、重建、检索和对比”，支撑知识库、工卡匹配、合规比对等场景。
+
+#### 任务清单
+
+- [ ] 建立多索引分层：主索引、高精度索引、结构索引
+- [ ] 定义 chunk/version/index version 关系，支持多版本重建与灰度切换
+- [ ] 增加夜间批处理入口：重算 chunk、重做 embedding、增量刷新索引与质量报表
+- [ ] 把 `semantic_role`、结构标签、业务标签纳入索引 schema 与搜索排序
+- [ ] 为 SOP/工卡/合规比对补结构索引与任务级检索接口
+- [ ] 增加索引构建与索引切换观测：覆盖率、成本、耗时、回滚状态
+- [ ] 预留 small/large embedding 双层策略，但默认只强制 small 层上线
+
+#### 索引策略
+
+- 主索引：低成本、高吞吐，覆盖全部常规 chunk，作为默认检索入口。
+- 高精度索引：只覆盖高价值文档、关键章节或人工确认过的重要块，不做全量默认。
+- 结构索引：面向步骤、表格、工卡项、合规条款等 typed item，优先服务比对与定位，而不是通用 RAG。
+
+#### 验收标准
+
+- 文档解析后可在同一条产品链路里区分“文本检索命中”和“结构检索命中”。
+- 索引重建不要求重跑全文解析，至少可复用规范解析产物或 Block/Chunk 层结果。
+- 支持按租户、索引版本、时间窗口观察覆盖率、失败率、重建时长和查询命中质量。
+- 对知识库/RAG 侧，能明确区分实时路径与夜间批处理路径。
+
+### 3.2 建议执行顺序
+
+1. 先用 Phase 5 新增的 registry/artifact/chunking 骨架承接一个真实高价值长尾切片，避免继续只做框架整理。
+2. 当前建议 Phase 6 第一优先是表格结构，其次是复杂版面阅读顺序；OCR 长尾继续按专项优化，不与表格/布局实验混在一起。
+3. 只有当至少一个局部专用能力收口后，再进入 Phase 7 的多索引与批处理，把 typed item 与版本化索引真正用起来。
+
+### 3.3 下一批落地建议
+
+若按一到两个迭代推进，建议第一批只做以下事项：
+
+- [x] 选 1 组表格长尾样本，建立专项回归与是否引入表格专用能力的决策门槛
+- [x] 把表格能力从当前 parser-backed stage 提升为真正可独立开关、可单测、可回退的 enrichment stage
+- [~] 为复杂版面阅读顺序准备独立样本集和指标，不与表格专项共用同一评测口径
+- [ ] 把规范解析产物里的 typed item 与 `semantic_role` 显式接进后续结构索引设计，避免 Phase 7 再回头改数据形状
+- [ ] 补 pipeline 级可观测字段，至少能看到每次命中的 pipeline name、options hash、cache hit/miss 与 active stages
+
+这一批做完后，再决定是否进入表格专用模型实验，而不是现在直接跳到整页 VLM 或全文模型方案。

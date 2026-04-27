@@ -195,6 +195,9 @@ class PdfTextParser(ParserAdapter):
         self._dual_channel_enabled = bool(
             post_process.get("dual_channel", False)
         )
+        self._layout_reading_order_enabled = bool(
+            post_process.get("layout_reading_order", self._dual_channel_enabled)
+        )
         self._dual_table_min_rows = int(
             post_process.get("dual_table_min_rows", 2)
         )
@@ -304,13 +307,21 @@ class PdfTextParser(ParserAdapter):
     def parse(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
         request_enable_ocr = _resolve_request_enable_ocr(request)
+        request_layout_reading_order = _resolve_request_layout_reading_order(request)
         effective_ocr_bad_pages_enabled = (
             self._ocr_bad_pages_enabled
             if request_enable_ocr is None
             else request_enable_ocr
         )
+        effective_layout_reading_order_enabled = (
+            self._layout_reading_order_enabled
+            if request_layout_reading_order is None
+            else request_layout_reading_order
+        )
         effective_dual_channel_enabled = (
-            self._dual_channel_enabled or effective_ocr_bad_pages_enabled
+            self._dual_channel_enabled
+            or effective_ocr_bad_pages_enabled
+            or effective_layout_reading_order_enabled
         )
 
         if self._boundary_refiner is not None:
@@ -327,6 +338,7 @@ class PdfTextParser(ParserAdapter):
                 request.file_path,
                 min_rows=self._dual_table_min_rows,
                 min_cols=self._dual_table_min_cols,
+                layout_reading_order_enabled=effective_layout_reading_order_enabled,
                 ocr_page_text_fn=ocr_page_text_fn,
             )
             # Replace per-page text with the table-stripped pdfplumber text so
@@ -639,6 +651,32 @@ def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
     value = request.options.get("enable_ocr")
     if isinstance(value, bool):
         return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(value)
+
+
+def _resolve_request_layout_reading_order(request: ParseRequest) -> bool | None:
+    post_process = request.options.get("post_process")
+    if isinstance(post_process, Mapping) and "layout_reading_order" in post_process:
+        return _coerce_optional_bool(post_process.get("layout_reading_order"))
+
+    enrichment = request.options.get("enrichment")
+    if isinstance(enrichment, Mapping):
+        layout_reading_order = enrichment.get("layout_reading_order")
+        if isinstance(layout_reading_order, Mapping) and "enabled" in layout_reading_order:
+            return _coerce_optional_bool(layout_reading_order.get("enabled"))
+    return None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
     normalized = str(value).strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
         return True
@@ -1143,6 +1181,8 @@ class _PageLayout:
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
     column_count_hint: int = 1
+    layout_reading_order_applied: bool = False
+    layout_reading_order_strategy: str | None = None
     layout_elapsed_s: float = 0.0
     ocr_attempt_reason: str | None = None
     ocr_fallback_reason: str | None = None
@@ -1194,6 +1234,7 @@ def _extract_pdfplumber_layout(
     *,
     min_rows: int,
     min_cols: int,
+    layout_reading_order_enabled: bool,
     ocr_page_text_fn: Callable[
         [Any, Sequence[tuple[float, float, float, float]], int, str | None],
         tuple[str | None, str | None, str | None, _OcrStageTimings],
@@ -1241,17 +1282,21 @@ def _extract_pdfplumber_layout(
 
             column_count_hint = _estimate_column_count(page)
             text_without_tables: str | None
+            layout_reading_order_applied = False
+            layout_reading_order_strategy: str | None = None
             ocr_attempt_reason: str | None = None
             ocr_fallback_reason: str | None = None
             ocr_error_reason: str | None = None
             ocr_timings = _OcrStageTimings()
             try:
-                if _should_rebuild_multi_column_text(page, column_count_hint=column_count_hint):
+                if layout_reading_order_enabled and _should_rebuild_multi_column_text(page, column_count_hint=column_count_hint):
                     text_without_tables = _extract_text_by_columns(
                         page,
                         table_bboxes,
                         column_count=column_count_hint,
                     )
+                    layout_reading_order_applied = True
+                    layout_reading_order_strategy = "column-reflow"
                 elif table_bboxes:
                     text_without_tables = _extract_text_excluding_bboxes(page, table_bboxes)
                 else:
@@ -1279,6 +1324,8 @@ def _extract_pdfplumber_layout(
                     text_without_tables=text_without_tables,
                     tables=tables,
                     column_count_hint=column_count_hint,
+                    layout_reading_order_applied=layout_reading_order_applied,
+                    layout_reading_order_strategy=layout_reading_order_strategy,
                     layout_elapsed_s=layout_elapsed_s,
                     ocr_attempt_reason=ocr_attempt_reason,
                     ocr_fallback_reason=ocr_fallback_reason,
@@ -1307,6 +1354,9 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
     metadata["page_height"] = page_layout.height
     metadata["layout_source"] = "pdfplumber"
     metadata["column_count_hint"] = page_layout.column_count_hint
+    metadata["layout_reading_order_applied"] = page_layout.layout_reading_order_applied
+    if page_layout.layout_reading_order_strategy is not None:
+        metadata["layout_reading_order_strategy"] = page_layout.layout_reading_order_strategy
     metadata["layout_elapsed_s"] = page_layout.layout_elapsed_s
     if page_layout.ocr_attempt_reason is not None:
         metadata["ocr_attempted"] = True

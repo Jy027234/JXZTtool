@@ -25,13 +25,22 @@ class _FakePdfReader:
         self.pages = [_FakePdfPage("broken text")]
 
 
-def _fake_page_layout(*, text_without_tables: str, ocr_fallback_reason: str | None) -> SimpleNamespace:
+def _fake_page_layout(
+    *,
+    text_without_tables: str,
+    ocr_fallback_reason: str | None,
+    column_count_hint: int = 1,
+    layout_reading_order_applied: bool = False,
+    layout_reading_order_strategy: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         text_without_tables=text_without_tables,
         tables=[],
         width=100.0,
         height=100.0,
-        column_count_hint=1,
+        column_count_hint=column_count_hint,
+        layout_reading_order_applied=layout_reading_order_applied,
+        layout_reading_order_strategy=layout_reading_order_strategy,
         layout_elapsed_s=0.0,
         ocr_attempt_reason=ocr_fallback_reason,
         ocr_fallback_reason=ocr_fallback_reason,
@@ -158,6 +167,71 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertEqual(blocks[1].content, "Recovered OCR text")
         self.assertTrue(blocks[1].metadata["ocr_fallback_used"])
 
+    def test_layout_reading_order_flag_is_forwarded_to_layout_extractor(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "layout_reading_order": False}},
+        )
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["layout_reading_order_enabled"] = kwargs.get("layout_reading_order_enabled")
+            return [_fake_page_layout(text_without_tables="Native text path", ocr_fallback_reason=None)]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-layout-off",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"post_process": {"layout_reading_order": True}},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                parser.parse(request)
+
+        self.assertTrue(captured["layout_reading_order_enabled"])
+
+    def test_layout_reading_order_metadata_is_exposed_on_blocks(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "layout_reading_order": True}},
+        )
+
+        def fake_extract_pdfplumber_layout(*_args, **_kwargs):
+            return [
+                _fake_page_layout(
+                    text_without_tables="Column one\n\nColumn two",
+                    ocr_fallback_reason=None,
+                    column_count_hint=2,
+                    layout_reading_order_applied=True,
+                    layout_reading_order_strategy="column-reflow",
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-layout-meta",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertTrue(blocks[1].metadata["layout_reading_order_applied"])
+        self.assertEqual(blocks[1].metadata["layout_reading_order_strategy"], "column-reflow")
+        self.assertEqual(blocks[1].metadata["column_count_hint"], 2)
+
     def test_request_enable_ocr_false_disables_ocr_callback_even_if_config_default_on(self) -> None:
         parser = PdfTextParser(
             media_types=["application/pdf"],
@@ -210,6 +284,8 @@ class PdfTextParserOptionsTests(unittest.TestCase):
                     width=100.0,
                     height=100.0,
                     column_count_hint=1,
+                    layout_reading_order_applied=False,
+                    layout_reading_order_strategy=None,
                     layout_elapsed_s=0.0,
                     ocr_attempt_reason=attempt_reason,
                     ocr_fallback_reason=attempt_reason if recovered_text else None,

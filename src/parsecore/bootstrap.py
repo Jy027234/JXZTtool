@@ -7,6 +7,7 @@ from .embeddings import EmbeddingConfigurationError, build_embedding_provider
 from .jobcard import JobcardProductAdapter
 from .llm import LlmBoundaryRefiner, LlmConfigurationError, build_llm_client
 from .parsers import build_parser
+from .pipelines import build_pipeline_registry
 from .runtime import ParseRuntime
 from .stores import PgVectorIndex, PostgresJobStore, SQLiteJobStore
 from .stubs import EchoTranslator, EmbeddedProductAdapter, InMemoryJobStore, NullEmbeddingProvider, NullIndex, ParagraphChunkBuilder
@@ -63,6 +64,13 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
         )
         for item in settings.parsers
     ]
+    chunk_builder = ParagraphChunkBuilder()
+    pipeline_registry = build_pipeline_registry(
+        parser_settings=settings.parsers,
+        parsers=parsers,
+        chunk_builder=chunk_builder,
+    )
+    pipeline_registry.warmup()
     job_store = _build_job_store(settings.database_url)
     index = _build_index(settings.database_url, settings.index_mode)
     if settings.product_adapter == "jobcard":
@@ -79,10 +87,11 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
     return ParseRuntime(
         settings=settings,
         parsers=parsers,
-        chunk_builder=ParagraphChunkBuilder(),
+        chunk_builder=chunk_builder,
         embedding_provider=embedding_provider,
         index=index,
         translator=EchoTranslator(),
         product_adapter=product_adapter,
         job_store=job_store,
+        pipeline_registry=pipeline_registry,
     )

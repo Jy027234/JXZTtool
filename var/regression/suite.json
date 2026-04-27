@@ -5,6 +5,10 @@
       "baseline": "baseline.json"
     },
     {
+      "name": "primary-table-structure",
+      "baseline": "baseline.table-structure.primary.json"
+    },
+    {
       "name": "primary-strip-hf",
       "baseline": "baseline.strip_hf.json"
     },
@@ -15,7 +19,7 @@
     {
       "name": "sample-27-81-17",
       "baseline": "baseline.27-81-17.json",
-      "tags": ["slow"]
+      "tags": ["slow", "layout"]
     },
     {
       "name": "sample-flight-ops-manual-r2",
