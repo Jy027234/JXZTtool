@@ -590,11 +590,52 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
         except ValueError:
             return _error_response(request, code="invalid_limit", message="Invalid limit", status_code=400)
         roles = request.query_params.getlist("role")
+        index_layer = str(request.query_params.get("index_layer") or "primary").strip().lower()
+        if index_layer not in {"primary", "high_precision"}:
+            return _error_response(request, code="invalid_index_layer", message="Invalid index_layer", status_code=400)
         hits, retrieval_mode = runtime_obj.search_document_with_mode(
             doc_id=doc_id,
             query=query,
             limit=limit,
             semantic_roles=roles,
+            tenant_id=tenant_id,
+            index_layer=index_layer,
+        )
+        return JSONResponse(
+            {
+                "doc_id": doc_id,
+                "query": query,
+                "limit": limit,
+                "roles": roles,
+                "index_layer": index_layer,
+                "retrieval_mode": retrieval_mode,
+                "items": _to_payload(hits),
+            }
+        )
+
+    async def search_document_structure(request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        doc_id = request.path_params["doc_id"]
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=doc_id, tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        query = str(request.query_params.get("q") or "").strip()
+        if not query:
+            return _error_response(request, code="query_required", message="Query parameter q is required", status_code=400)
+        limit_raw = request.query_params.get("limit", "10")
+        try:
+            limit = max(1, int(limit_raw))
+        except ValueError:
+            return _error_response(request, code="invalid_limit", message="Invalid limit", status_code=400)
+        roles = request.query_params.getlist("role")
+        tags = request.query_params.getlist("tag")
+        hits, retrieval_mode = runtime_obj.search_document_structure_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=limit,
+            semantic_roles=roles,
+            structure_tags=tags,
             tenant_id=tenant_id,
         )
         return JSONResponse(
@@ -603,10 +644,56 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
                 "query": query,
                 "limit": limit,
                 "roles": roles,
+                "tags": tags,
                 "retrieval_mode": retrieval_mode,
                 "items": _to_payload(hits),
             }
         )
+
+    async def search_document_tasks(request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        doc_id = request.path_params["doc_id"]
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=doc_id, tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        query = str(request.query_params.get("q") or "").strip()
+        if not query:
+            return _error_response(request, code="query_required", message="Query parameter q is required", status_code=400)
+        limit_raw = request.query_params.get("limit", "10")
+        try:
+            limit = max(1, int(limit_raw))
+        except ValueError:
+            return _error_response(request, code="invalid_limit", message="Invalid limit", status_code=400)
+        hits, retrieval_mode = runtime_obj.search_document_tasks_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
+        return JSONResponse(
+            {
+                "doc_id": doc_id,
+                "query": query,
+                "limit": limit,
+                "retrieval_mode": retrieval_mode,
+                "items": _to_payload(hits),
+            }
+        )
+
+    async def index_metrics(request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = request.query_params.get("tenant_id")
+        since_hours_raw = request.query_params.get("since_hours")
+        since_hours: float | None = None
+        if since_hours_raw is not None:
+            try:
+                since_hours = float(since_hours_raw)
+            except ValueError:
+                return _error_response(request, code="invalid_since_hours", message="Invalid since_hours", status_code=400)
+            if since_hours <= 0:
+                return _error_response(request, code="invalid_since_hours", message="Invalid since_hours", status_code=400)
+        return JSONResponse(_to_payload(runtime_obj.index_metrics(tenant_id=tenant_id, since_hours=since_hours)))
 
     async def reparse_document(request: Request) -> JSONResponse:
         try:
@@ -718,12 +805,15 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
             Route("/v1/parse/jobs", list_jobs, methods=["GET"]),
             Route("/v1/parse/quotas/usage", quota_usage, methods=["GET"]),
             Route("/v1/parse/metrics", runtime_metrics, methods=["GET"]),
+            Route("/v1/parse/indexes/metrics", index_metrics, methods=["GET"]),
             Route("/v1/parse/prometheus", prometheus_metrics, methods=["GET"]),
             Route("/v1/parse/events", get_events, methods=["GET"]),
             Route("/v1/parse/dashboard", tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}", get_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/search", search_document, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/structure-search", search_document_structure, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/tasks/search", search_document_tasks, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/reparse", reparse_document, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}/rechunk", rechunk_document, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}/re-embed", reembed_document, methods=["POST"]),

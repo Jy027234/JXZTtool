@@ -48,7 +48,17 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 
 - 快速自检已通过。
 - 本轮等价验证已通过：全量 `unittest discover -s tests` 通过，`baseline.json` 与 `baseline.table-structure.primary.json` 的真实 `check` 均通过，并已将 layout/table 两类专项继续收口到同一回归工具路径。
-- 单测结果：`151 passed, 5 skipped`。
+- 单测结果：`167 passed, 5 skipped`。
+- 布局专项新增混排页顺序校验：正文与表格块不再按“先表后文”固定顺序输出，已改为按页面垂直锚点交错输出并由 `tests.test_pdf_parser_options` 覆盖。
+- 布局专项新增图注邻接校验：当 `Figure/Fig./Illustration` 标签被单独切段时，parser 会将其与下一段 caption 说明自动合并，已由 `tests.test_pdf_parser_figure_caption` 覆盖。
+- 结构索引准备项已收口：artifact typed item 已显式携带 `semantic_role` 与 `structure_tags`，并把 `semantic_role` 写入 provenance；同时 pipeline 级可观测信息已补齐 `pipeline_name/options_hash/cache_hit/cache_miss/active_stages` 并由 `tests.test_runtime` 覆盖。
+- Phase 7 已启动第一批：runtime/document API 现会返回 `index_manifest`，且 index adapter 已开始同时接收主索引 chunk 与结构索引 typed item 的写入骨架。
+- Phase 7 本轮新增：结构检索、任务级检索、索引层聚合指标与 `parsecore batch-reindex` 批处理入口均已落地；embedding tier 也已显式写入 manifest，默认仍仅启用 `small`。
+- Phase 7 继续推进：`high_precision` 层已从预留态转为可执行层（启用 `small+large` tier 时写入 manifest，并支持 `search` 接口 `index_layer=high_precision` 过滤检索）。
+- Phase 7 本轮再推进：`high_precision` 检索已优先走 index adapter 的独立层读取，不再仅依赖 runtime 内存筛选；manifest 会携带 `chunk_ids` 供索引层精确持久化与回放。
+- Phase 7 观测补齐：`/v1/parse/indexes/metrics` 已新增 `high_precision` 汇总指标（documents/document_coverage/items/item_ratio_vs_primary），便于持续评估高精度层覆盖与成本。
+- Phase 7 效果观测补齐：`/v1/parse/indexes/metrics` 现同时返回按索引层聚合的 `search_effectiveness` 与 `high_precision.query_*` 指标，可直接观察高精度层查询命中率与平均命中量。
+- Phase 7 可观测增强：检索效果指标已改为持久化聚合（JobStore），不再只依赖进程内状态；runtime 重启后 `search_effectiveness` 与 `high_precision.query_*` 仍可延续读取。
 - 单测耗时约 `7.8s`。
 - 默认 runtime describe 正常，当前形态为 `index_mode = hybrid`、`execution_mode = inline`。
 
@@ -64,7 +74,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 
 `sample-27-81-17` 依照 `suite.json` 默认策略以 `slow` 标签跳过，不计入默认门禁失败。
 
-该样本当前同时承担复杂版面阅读顺序专项样本职责：`tools/regression_baseline.py` 已为其补上 `layout_quality` 指标与 drift 门槛，但仍保持 `slow` 标签，避免把布局专项长样本混入日常默认门禁时长。
+该样本当前同时承担复杂版面阅读顺序专项样本职责：`tools/regression_baseline.py` 已为其补上 `layout_quality` 指标与 drift 门槛，且 `baseline.27-81-17.json` 已重存为原生携带 `layout_quality` 的 slow baseline；最近一次单独 `check` 结果为 `multi_col=2 / layout_ro_pages=2 / OK`。它仍保持 `slow` 标签，避免把布局专项长样本混入日常默认门禁时长。
 
 2026-04-27 最近一次全量自检结果：
 

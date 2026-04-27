@@ -4,9 +4,9 @@ from contextlib import contextmanager
 import json
 import sqlite3
 import threading
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import unquote
 from uuid import uuid4
 
@@ -376,6 +376,17 @@ class SQLiteJobStore(JobStore):
 
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
                 ON chunks (tenant_id, doc_id, position ASC);
+
+                CREATE TABLE IF NOT EXISTS search_layer_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    layer TEXT NOT NULL,
+                    hit_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_search_layer_metrics_tenant_layer_created
+                ON search_layer_metrics (tenant_id, layer, created_at DESC);
                 """
             )
             # Lightweight migrations for B1 columns. SQLite cannot use
@@ -407,6 +418,67 @@ class SQLiteJobStore(JobStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_parse_jobs_state_created ON parse_jobs (state, created_at ASC)"
             )
+
+    def record_layer_search_hit(
+        self,
+        *,
+        tenant_id: str | None,
+        layer: str,
+        hit_count: int,
+    ) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        normalized_layer = str(layer or "primary").strip().lower() or "primary"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO search_layer_metrics (tenant_id, layer, hit_count, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (normalized_tenant, normalized_layer, max(0, int(hit_count)), _utc_now()),
+            )
+
+    def aggregate_layer_search_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        since_hours: float | None = None,
+    ) -> Mapping[str, Mapping[str, int]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        normalized_tenant = (tenant_id or "").strip()
+        if normalized_tenant:
+            clauses.append("tenant_id = ?")
+            params.append(normalized_tenant)
+        if since_hours is not None and float(since_hours) > 0:
+            threshold = (datetime.now(UTC) - timedelta(hours=float(since_hours))).isoformat()
+            clauses.append("created_at >= ?")
+            params.append(threshold)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    layer,
+                    COUNT(*) AS queries,
+                    SUM(CASE WHEN hit_count > 0 THEN 1 ELSE 0 END) AS hit_queries,
+                    SUM(hit_count) AS total_hits,
+                    MAX(hit_count) AS max_hits
+                FROM search_layer_metrics
+                {where_sql}
+                GROUP BY layer
+                """,
+                tuple(params),
+            ).fetchall()
+        metrics: dict[str, dict[str, int]] = {}
+        for row in rows:
+            layer = str(row[0] or "primary")
+            metrics[layer] = {
+                "queries": int(row[1] or 0),
+                "hit_queries": int(row[2] or 0),
+                "total_hits": int(row[3] or 0),
+                "max_hits": int(row[4] or 0),
+            }
+        return metrics
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -551,6 +623,16 @@ class PostgresJobStore(JobStore):
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
                     ON chunks (doc_id, position ASC);
+
+                CREATE TABLE IF NOT EXISTS search_layer_metrics (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    layer TEXT NOT NULL,
+                    hit_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_search_layer_metrics_tenant_layer_created
+                    ON search_layer_metrics (tenant_id, layer, created_at DESC);
                 """
             )
             cur.execute(
@@ -567,6 +649,68 @@ class PostgresJobStore(JobStore):
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_parse_jobs_state_created ON parse_jobs (state, created_at ASC)"
             )
+
+    def record_layer_search_hit(
+        self,
+        *,
+        tenant_id: str | None,
+        layer: str,
+        hit_count: int,
+    ) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        normalized_layer = str(layer or "primary").strip().lower() or "primary"
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO search_layer_metrics (tenant_id, layer, hit_count, created_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (normalized_tenant, normalized_layer, max(0, int(hit_count)), _utc_now()),
+            )
+
+    def aggregate_layer_search_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        since_hours: float | None = None,
+    ) -> Mapping[str, Mapping[str, int]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        normalized_tenant = (tenant_id or "").strip()
+        if normalized_tenant:
+            clauses.append("tenant_id = %s")
+            params.append(normalized_tenant)
+        if since_hours is not None and float(since_hours) > 0:
+            threshold = (datetime.now(UTC) - timedelta(hours=float(since_hours))).isoformat()
+            clauses.append("created_at >= %s")
+            params.append(threshold)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    layer,
+                    COUNT(*) AS queries,
+                    SUM(CASE WHEN hit_count > 0 THEN 1 ELSE 0 END) AS hit_queries,
+                    SUM(hit_count) AS total_hits,
+                    MAX(hit_count) AS max_hits
+                FROM search_layer_metrics
+                {where_sql}
+                GROUP BY layer
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+        metrics: dict[str, dict[str, int]] = {}
+        for row in rows:
+            layer = str(row[0] or "primary")
+            metrics[layer] = {
+                "queries": int(row[1] or 0),
+                "hit_queries": int(row[2] or 0),
+                "total_hits": int(row[3] or 0),
+                "max_hits": int(row[4] or 0),
+            }
+        return metrics
 
     # -- write paths ------------------------------------------------------
 
@@ -965,15 +1109,65 @@ class PgVectorIndex(IndexAdapter):
                     );
                     CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_doc
                         ON chunk_embeddings (tenant_id, doc_id);
+
+                    CREATE TABLE IF NOT EXISTS high_precision_chunk_embeddings (
+                        entry_id TEXT PRIMARY KEY,
+                        chunk_id TEXT NOT NULL,
+                        doc_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL DEFAULT 'default',
+                        block_ids_json TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        language TEXT NOT NULL,
+                        semantic_role TEXT NOT NULL,
+                        embedding vector({self.dim}),
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hp_chunk_embeddings_doc
+                        ON high_precision_chunk_embeddings (tenant_id, doc_id);
+
+                    CREATE TABLE IF NOT EXISTS structure_index_entries (
+                        entry_id TEXT PRIMARY KEY,
+                        doc_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL DEFAULT 'default',
+                        item_id TEXT NOT NULL,
+                        semantic_role TEXT NOT NULL,
+                        page_number INTEGER,
+                        tags_json TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_structure_index_doc
+                        ON structure_index_entries (tenant_id, doc_id, semantic_role);
+
+                    CREATE TABLE IF NOT EXISTS index_manifests (
+                        doc_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL DEFAULT 'default',
+                        manifest_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (tenant_id, doc_id)
+                    );
                     """
                 )
                 cur.execute("ALTER TABLE chunk_embeddings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cur.execute("ALTER TABLE high_precision_chunk_embeddings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cur.execute("ALTER TABLE structure_index_entries ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cur.execute("ALTER TABLE index_manifests ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
 
-    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
+    def upsert(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        tenant_id: str | None = None,
+        document: object | None = None,
+        index_manifest: Mapping[str, Any] | None = None,
+    ) -> None:
         from pgvector.psycopg import register_vector
 
         normalized_tenant = _normalize_tenant_id(tenant_id)
         rows: list[tuple[str, str, str, list[float], str]] = []
+        high_precision_rows: list[tuple[str, str, str, str, str, str, str, str, list[float] | None, str]] = []
+        structure_rows: list[tuple[str, str, str, str, str, int | None, str, str, str]] = []
         now = _utc_now()
         for chunk in chunks:
             if chunk.embedding is None:
@@ -985,6 +1179,72 @@ class PgVectorIndex(IndexAdapter):
                     f"mismatch with index dim={self.dim}"
                 )
             rows.append((chunk.chunk_id, doc_id, normalized_tenant, vec, now))
+
+        high_precision_ids: set[str] = set()
+        if isinstance(index_manifest, Mapping):
+            for layer in tuple(index_manifest.get("layers", ())):
+                if not isinstance(layer, Mapping):
+                    continue
+                if str(layer.get("name") or "") != "high_precision":
+                    continue
+                for chunk_id in tuple(layer.get("chunk_ids", ())):
+                    normalized = str(chunk_id).strip()
+                    if normalized:
+                        high_precision_ids.add(normalized)
+
+        if high_precision_ids:
+            for chunk in chunks:
+                if chunk.chunk_id not in high_precision_ids:
+                    continue
+                if chunk.embedding is not None:
+                    chunk_embedding = list(float(value) for value in chunk.embedding)
+                    if len(chunk_embedding) != self.dim:
+                        raise ValueError(
+                            f"chunk {chunk.chunk_id} embedding dim={len(chunk_embedding)} "
+                            f"mismatch with index dim={self.dim}"
+                        )
+                else:
+                    chunk_embedding = None
+                high_precision_rows.append(
+                    (
+                        f"{normalized_tenant}:{doc_id}:{chunk.chunk_id}",
+                        chunk.chunk_id,
+                        doc_id,
+                        normalized_tenant,
+                        json.dumps(tuple(chunk.block_ids), ensure_ascii=False),
+                        str(chunk.text or ""),
+                        str(chunk.language or "unknown"),
+                        str(chunk.semantic_role or "paragraph"),
+                        chunk_embedding,
+                        now,
+                    )
+                )
+
+        if document is not None:
+            for item in tuple(getattr(document, "items", ()) or ()):
+                item_id = str(getattr(item, "item_id", "")).strip()
+                if not item_id:
+                    continue
+                semantic_role = str(getattr(item, "semantic_role", "") or "paragraph")
+                tags = list(getattr(item, "metadata", {}).get("structure_tags") or [])
+                page_number_raw = getattr(item, "page_number", None)
+                try:
+                    page_number = int(page_number_raw) if page_number_raw is not None else None
+                except (TypeError, ValueError):
+                    page_number = None
+                structure_rows.append(
+                    (
+                        f"{normalized_tenant}:{doc_id}:{item_id}",
+                        doc_id,
+                        normalized_tenant,
+                        item_id,
+                        semantic_role,
+                        page_number,
+                        json.dumps(tags, ensure_ascii=False),
+                        str(getattr(item, "text", "") or ""),
+                        now,
+                    )
+                )
 
         with self._connect() as conn:
             register_vector(conn)
@@ -1001,6 +1261,109 @@ class PgVectorIndex(IndexAdapter):
                         """,
                         rows,
                     )
+                cur.execute(
+                    "DELETE FROM high_precision_chunk_embeddings WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
+                )
+                if high_precision_rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO high_precision_chunk_embeddings (
+                            entry_id, chunk_id, doc_id, tenant_id,
+                            block_ids_json, text, language, semantic_role,
+                            embedding, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        high_precision_rows,
+                    )
+                cur.execute(
+                    "DELETE FROM structure_index_entries WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
+                )
+                if structure_rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO structure_index_entries (
+                            entry_id, doc_id, tenant_id, item_id, semantic_role,
+                            page_number, tags_json, text, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        structure_rows,
+                    )
+                if index_manifest is not None:
+                    cur.execute(
+                        "DELETE FROM index_manifests WHERE doc_id = %s AND tenant_id = %s",
+                        (doc_id, normalized_tenant),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO index_manifests (doc_id, tenant_id, manifest_json, updated_at)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (doc_id, normalized_tenant, json.dumps(dict(index_manifest), ensure_ascii=False), now),
+                    )
+
+    def describe_document(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                row = cur.execute(
+                    "SELECT manifest_json FROM index_manifests WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
+                ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    def get_layer_chunks(
+        self,
+        *,
+        doc_id: str,
+        layer: str,
+        tenant_id: str | None = None,
+    ) -> tuple[Chunk, ...] | None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        normalized_layer = str(layer or "primary").strip().lower()
+        if normalized_layer != "high_precision":
+            return None
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                rows = tuple(
+                    cur.execute(
+                        """
+                        SELECT chunk_id, block_ids_json, text, language, semantic_role, embedding
+                        FROM high_precision_chunk_embeddings
+                        WHERE doc_id = %s AND tenant_id = %s
+                        ORDER BY updated_at DESC, chunk_id ASC
+                        """,
+                        (doc_id, normalized_tenant),
+                    ).fetchall()
+                )
+        chunks: list[Chunk] = []
+        for row in rows:
+            raw_embedding = row[5]
+            embedding: tuple[float, ...] | None
+            if raw_embedding is None:
+                embedding = None
+            else:
+                embedding = tuple(float(value) for value in raw_embedding)
+            chunks.append(
+                Chunk(
+                    chunk_id=str(row[0]),
+                    doc_id=doc_id,
+                    block_ids=tuple(json.loads(row[1]) if row[1] else ()),
+                    text=str(row[2] or ""),
+                    language=str(row[3] or "unknown"),
+                    semantic_role=str(row[4] or "paragraph"),
+                    embedding=embedding,
+                )
+            )
+        return tuple(chunks)
 
     @contextmanager
     def _connect(self) -> Iterator[Any]:

@@ -113,15 +113,68 @@ class FakeEmbeddingProvider(EmbeddingProvider):
 class NullIndex(IndexAdapter):
     def __init__(self) -> None:
         self.upserts: list[dict[str, object]] = []
+        self.documents: dict[tuple[str, str], dict[str, object]] = {}
+        self.layer_chunks: dict[tuple[str, str, str], tuple[Chunk, ...]] = {}
 
-    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
-        self.upserts.append(
-            {
-                "doc_id": doc_id,
-                "tenant_id": tenant_id or "default",
-                "chunks": len(chunks),
-            }
-        )
+    def upsert(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        tenant_id: str | None = None,
+        document: object | None = None,
+        index_manifest: dict[str, object] | None = None,
+    ) -> None:
+        normalized_tenant = tenant_id or "default"
+        structure_items = tuple(getattr(document, "items", ()) or ()) if document is not None else ()
+        payload = {
+            "doc_id": doc_id,
+            "tenant_id": normalized_tenant,
+            "chunks": len(chunks),
+            "structure_items": len(structure_items),
+            "index_manifest": dict(index_manifest or {}),
+        }
+        self.upserts.append(payload)
+        self.documents[(normalized_tenant, doc_id)] = dict(index_manifest or {})
+        self.layer_chunks[(normalized_tenant, doc_id, "primary")] = tuple(chunks)
+
+        high_precision_ids: set[str] = set()
+        if isinstance(index_manifest, dict):
+            for layer in tuple(index_manifest.get("layers", ())):
+                if not isinstance(layer, dict):
+                    continue
+                if str(layer.get("name") or "") != "high_precision":
+                    continue
+                for chunk_id in tuple(layer.get("chunk_ids") or ()):
+                    normalized = str(chunk_id).strip()
+                    if normalized:
+                        high_precision_ids.add(normalized)
+        if high_precision_ids:
+            selected = tuple(chunk for chunk in chunks if chunk.chunk_id in high_precision_ids)
+        else:
+            selected = ()
+        self.layer_chunks[(normalized_tenant, doc_id, "high_precision")] = selected
+
+    def describe_document(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, object] | None:
+        return self.documents.get(((tenant_id or "default"), doc_id))
+
+    def get_layer_chunks(
+        self,
+        *,
+        doc_id: str,
+        layer: str,
+        tenant_id: str | None = None,
+    ) -> tuple[Chunk, ...] | None:
+        normalized_tenant = tenant_id or "default"
+        normalized_layer = str(layer or "primary").strip().lower()
+        if normalized_layer not in {"primary", "high_precision"}:
+            return None
+        return self.layer_chunks.get((normalized_tenant, doc_id, normalized_layer), ())
 
 
 class EchoTranslator(TranslationAdapter):
@@ -163,6 +216,7 @@ class InMemoryJobStore(JobStore):
         self.jobs: dict[str, ParseJob] = {}
         self.blocks_by_doc: dict[tuple[str, str], tuple[Block, ...]] = {}
         self.chunks_by_doc: dict[tuple[str, str], tuple[Chunk, ...]] = {}
+        self.search_layer_metrics: list[dict[str, object]] = []
 
     def create(self, request: ParseRequest) -> ParseJob:
         now = _utc_now()
@@ -248,6 +302,59 @@ class InMemoryJobStore(JobStore):
         job.dead_lettered_at = _utc_now()
         job.updated_at = job.dead_lettered_at
         return job
+
+    def record_layer_search_hit(
+        self,
+        *,
+        tenant_id: str | None,
+        layer: str,
+        hit_count: int,
+    ) -> None:
+        self.search_layer_metrics.append(
+            {
+                "tenant_id": str(tenant_id or "default"),
+                "layer": str(layer or "primary").strip().lower() or "primary",
+                "hit_count": max(0, int(hit_count)),
+                "created_at": _utc_now(),
+            }
+        )
+
+    def aggregate_layer_search_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        since_hours: float | None = None,
+    ) -> dict[str, dict[str, int]]:
+        tenant_filter = (tenant_id or "").strip()
+        threshold_dt = None
+        if since_hours is not None and float(since_hours) > 0:
+            threshold_dt = datetime.now(UTC).timestamp() - float(since_hours) * 3600.0
+        metrics: dict[str, dict[str, int]] = {}
+        for event in self.search_layer_metrics:
+            event_tenant = str(event.get("tenant_id") or "default")
+            if tenant_filter and event_tenant != tenant_filter:
+                continue
+            if threshold_dt is not None:
+                created_at_raw = str(event.get("created_at") or "")
+                try:
+                    created_at_dt = datetime.fromisoformat(created_at_raw)
+                except ValueError:
+                    continue
+                if created_at_dt.tzinfo is None:
+                    created_at_ts = created_at_dt.replace(tzinfo=UTC).timestamp()
+                else:
+                    created_at_ts = created_at_dt.timestamp()
+                if created_at_ts < threshold_dt:
+                    continue
+            layer = str(event.get("layer") or "primary")
+            bucket = metrics.setdefault(layer, {"queries": 0, "hit_queries": 0, "total_hits": 0, "max_hits": 0})
+            hits = max(0, int(event.get("hit_count") or 0))
+            bucket["queries"] += 1
+            bucket["total_hits"] += hits
+            if hits > 0:
+                bucket["hit_queries"] += 1
+            bucket["max_hits"] = max(bucket["max_hits"], hits)
+        return metrics
 
     def snapshot(self) -> dict[str, object]:
         return {

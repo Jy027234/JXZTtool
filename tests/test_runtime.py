@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
+import json
 import unittest
 from unittest.mock import patch
 
 from parsecore.bootstrap import build_runtime
+from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
 from parsecore.runtime import QuotaExceededError
 from parsecore.stubs import FakeEmbeddingProvider
@@ -162,6 +165,7 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertEqual(description["project"], "test-parsecore")
         self.assertEqual(description["parsers"], ["docx-native"])
+        self.assertEqual(description["index_layers"], ["primary", "structure", "high_precision"])
         self.assertIn("pipelines", description)
         self.assertIn("pipeline_cache", description)
         self.assertEqual(description["pipeline_cache"]["size"], 1)
@@ -204,7 +208,13 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(description["pipeline_cache"]["hits"], 1)
         self.assertEqual(artifact.metadata["summary"]["item_count"], len(blocks))
         self.assertEqual(artifact.items[0].kind, SemanticRole.TITLE.value)
+        self.assertEqual(artifact.items[0].semantic_role, SemanticRole.TITLE.value)
+        self.assertIn("role:title", artifact.items[0].metadata["structure_tags"])
         self.assertEqual(artifact.metadata["pipeline_name"], "docx-native/default")
+        self.assertEqual(artifact.metadata["pipeline_observability"]["pipeline_name"], "docx-native/default")
+        self.assertTrue(artifact.metadata["pipeline_observability"]["options_hash"])
+        self.assertIsInstance(artifact.metadata["pipeline_observability"]["cache_hit"], bool)
+        self.assertIn("active_runtime_stages", artifact.metadata["pipeline_observability"])
         self.assertEqual(chunks[0].semantic_role, SemanticRole.TITLE.value)
         self.assertEqual(chunks[1].semantic_role, SemanticRole.PARAGRAPH.value)
 
@@ -256,8 +266,35 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertIn("table-structure", artifact.metadata["active_runtime_stages"])
         self.assertEqual(artifact.metadata["table_structure"]["enriched_items"], 1)
         self.assertEqual(artifact.items[1].metadata["table_markdown"], "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+        self.assertIn("role:table", artifact.items[1].metadata["structure_tags"])
+        self.assertEqual(artifact.items[1].provenance["semantic_role"], SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].semantic_role, SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+
+    def test_pipeline_observability_reports_cache_hit_after_repeated_resolution(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-observe",
+                file_path=str(workspace.create_docx("observe.docx", ["A", "B"])),
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                options={"enrichment": {"layout_reading_order": {"enabled": True}}},
+            )
+
+            first_pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            first_blocks = first_pipeline.parse_blocks(request=request)
+            first_artifact = first_pipeline.build_document(request=request, blocks=first_blocks)
+
+            second_pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            second_blocks = second_pipeline.parse_blocks(request=request)
+            second_artifact = second_pipeline.build_document(request=request, blocks=second_blocks)
+
+        self.assertFalse(first_artifact.metadata["pipeline_observability"]["cache_hit"])
+        self.assertTrue(second_artifact.metadata["pipeline_observability"]["cache_hit"])
+        self.assertEqual(
+            first_artifact.metadata["pipeline_observability"]["options_hash"],
+            second_artifact.metadata["pipeline_observability"]["options_hash"],
+        )
 
     def test_table_structure_stage_can_be_disabled_per_request(self) -> None:
         with TemporaryWorkspace(PDF_TABLE_STAGE_CONFIG) as workspace:
@@ -426,6 +463,26 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(document["job"].job_id, outcome.job.job_id)
         self.assertEqual(len(document["blocks"]), len(outcome.blocks))
         self.assertEqual(len(document["chunks"]), len(outcome.chunks))
+        self.assertIsNotNone(document["index_manifest"])
+        self.assertEqual(document["index_manifest"]["layers"][0]["name"], "primary")
+        self.assertEqual(document["index_manifest"]["layers"][1]["name"], "structure")
+
+    def test_submit_populates_null_index_with_structure_layer_manifest(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("phase7.docx", ["Title", "Procedure note"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-phase7-index",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+
+        upsert = runtime.index.upserts[-1]
+        self.assertEqual(upsert["doc_id"], "doc-phase7-index")
+        self.assertGreaterEqual(upsert["structure_items"], 2)
+        self.assertEqual(upsert["index_manifest"]["layers"][1]["name"], "structure")
 
     def test_retry_latest_reuses_last_request(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -856,6 +913,288 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(hits[-1].semantic_role, SemanticRole.TOC_ENTRY.value)
         self.assertEqual(len(warning_only), 1)
         self.assertEqual(warning_only[0].semantic_role, SemanticRole.WARNING.value)
+
+    def test_search_document_structure_filters_by_role_and_tag(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("structure.docx", ["base"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-structure",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            runtime.job_store.save_blocks(
+                doc_id="doc-structure",
+                blocks=[
+                    Block(
+                        block_id="blk-step",
+                        doc_id="doc-structure",
+                        type=BlockType.PARAGRAPH,
+                        content="1. Remove access panel and disconnect power.",
+                        metadata={"page": 1, "parser": "docx-native", "semantic_role": "paragraph", "page_type": "body"},
+                    ),
+                    Block(
+                        block_id="blk-warning",
+                        doc_id="doc-structure",
+                        type=BlockType.PARAGRAPH,
+                        content="WARNING: Hydraulic pressure remains in the line.",
+                        metadata={"page": 1, "parser": "docx-native", "semantic_role": "warning", "page_type": "body"},
+                    ),
+                ],
+            )
+
+            hits = runtime.search_document_structure(
+                doc_id="doc-structure",
+                query="hydraulic pressure",
+                semantic_roles=["warning"],
+                structure_tags=["page:body"],
+            )
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].semantic_role, "warning")
+        self.assertIn("page:body", hits[0].structure_tags)
+
+    def test_search_document_tasks_returns_task_like_entries(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("tasks.docx", ["base"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-tasks",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            runtime.job_store.save_blocks(
+                doc_id="doc-tasks",
+                blocks=[
+                    Block(
+                        block_id="blk-step",
+                        doc_id="doc-tasks",
+                        type=BlockType.PARAGRAPH,
+                        content="Step 3 Remove the inspection cover.",
+                        metadata={"page": 1, "parser": "docx-native", "semantic_role": "paragraph", "page_type": "body"},
+                    ),
+                    Block(
+                        block_id="blk-body",
+                        doc_id="doc-tasks",
+                        type=BlockType.PARAGRAPH,
+                        content="General description text.",
+                        metadata={"page": 1, "parser": "docx-native", "semantic_role": "paragraph", "page_type": "body"},
+                    ),
+                ],
+            )
+
+            hits, mode = runtime.search_document_tasks_with_mode(
+                doc_id="doc-tasks",
+                query="inspection cover",
+            )
+
+        self.assertEqual(mode, "structure-keyword")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("Step 3", hits[0].text)
+
+    def test_index_metrics_reports_layer_coverage(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("metrics.docx", ["Title", "Step 1 Do work"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-index-metrics",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            metrics = runtime.index_metrics()
+
+        self.assertGreaterEqual(metrics["documents"], 1)
+        self.assertIn("primary", metrics["layer_counts"])
+        self.assertIn("structure", metrics["layer_counts"])
+
+    def test_index_metrics_reports_high_precision_summary(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx(
+                "metrics-high-precision.docx",
+                ["Title", "hydraulic pressure warning checklist " * 8],
+            )
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-index-metrics-high-precision",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"index": {"embedding_tiers": ["small", "large"]}},
+                )
+            )
+            runtime.search_document_with_mode(
+                doc_id="doc-index-metrics-high-precision",
+                query="hydraulic pressure warning checklist",
+                index_layer="high_precision",
+            )
+            metrics = runtime.index_metrics()
+
+        self.assertIn("high_precision", metrics)
+        summary = metrics["high_precision"]
+        self.assertGreaterEqual(summary["documents"], 1)
+        self.assertGreater(summary["items"], 0)
+        self.assertGreater(summary["document_coverage"], 0.0)
+        self.assertGreater(summary["item_ratio_vs_primary"], 0.0)
+        self.assertGreater(summary["query_count"], 0)
+        self.assertGreater(summary["query_hit_rate"], 0.0)
+        self.assertIn("high_precision", metrics["search_effectiveness"])
+
+    def test_index_metrics_search_effectiveness_survives_runtime_rebuild(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx(
+                "metrics-rebuild.docx",
+                ["Title", "hydraulic pressure warning checklist " * 8],
+            )
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-index-metrics-rebuild",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"index": {"embedding_tiers": ["small", "large"]}},
+                )
+            )
+            runtime.search_document_with_mode(
+                doc_id="doc-index-metrics-rebuild",
+                query="hydraulic pressure warning checklist",
+                index_layer="high_precision",
+            )
+
+            rebuilt = build_runtime(workspace.config_path)
+            metrics = rebuilt.index_metrics()
+
+        self.assertIn("high_precision", metrics["search_effectiveness"])
+        self.assertGreater(metrics["high_precision"]["query_count"], 0)
+
+    def test_batch_reindex_rebuilds_chunks_for_latest_documents(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("batch.docx", ["Title", "Body"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-batch-reindex",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+
+            report = runtime.batch_reindex(doc_ids=["doc-batch-reindex"])
+
+        self.assertEqual(report["documents"], 1)
+        self.assertTrue(report["processed"])
+        self.assertEqual(report["processed"][0]["mode"], "rerun_chunks_only")
+
+    def test_cli_batch_reindex_emits_json_report(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("cli-batch.docx", ["Title", "Body"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-cli-batch",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            buffer = io.StringIO()
+            with patch("parsecore.cli.build_runtime", return_value=runtime), patch("sys.stdout", buffer):
+                exit_code = cli_main([
+                    "batch-reindex",
+                    "--config",
+                    str(workspace.config_path),
+                    "--doc-id",
+                    "doc-cli-batch",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["documents"], 1)
+        self.assertEqual(payload["processed"][0]["doc_id"], "doc-cli-batch")
+
+    def test_index_manifest_includes_high_precision_layer_when_large_tier_enabled(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("high-precision.docx", ["Title", "Step 1"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-high-precision",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"index": {"embedding_tiers": ["small", "large"]}},
+                )
+            )
+            snapshot = runtime.get_document(doc_id="doc-high-precision")
+
+        manifest = snapshot["index_manifest"]
+        layer_names = {str(layer.get("name")) for layer in manifest.get("layers", [])}
+        self.assertIn("high_precision", layer_names)
+        high_precision_layer = next(layer for layer in manifest.get("layers", []) if layer.get("name") == "high_precision")
+        self.assertEqual(high_precision_layer.get("embedding_tier"), "large")
+
+    def test_search_document_with_high_precision_layer_filters_results(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("search-layer.docx", ["Title"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-search-layer",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"index": {"embedding_tiers": ["small", "large"]}},
+                )
+            )
+            runtime.job_store.save_chunks(
+                doc_id="doc-search-layer",
+                chunks=[
+                    Chunk(
+                        chunk_id="chk-short",
+                        doc_id="doc-search-layer",
+                        block_ids=("blk-1",),
+                        text="short",
+                        semantic_role=SemanticRole.PARAGRAPH.value,
+                        embedding=(1.0, 0.0),
+                    ),
+                    Chunk(
+                        chunk_id="chk-long",
+                        doc_id="doc-search-layer",
+                        block_ids=("blk-2",),
+                        text="hydraulic pressure warning checklist " * 6,
+                        semantic_role=SemanticRole.PARAGRAPH.value,
+                        embedding=(1.0, 0.0),
+                    ),
+                ],
+            )
+            runtime.index.upsert(
+                doc_id="doc-search-layer",
+                chunks=runtime.job_store.get_chunks(doc_id="doc-search-layer"),
+                index_manifest={
+                    "doc_id": "doc-search-layer",
+                    "tenant_id": "default",
+                    "index_version": "manual-test",
+                    "layers": [
+                        {"name": "primary", "kind": "chunk", "item_count": 2},
+                        {
+                            "name": "high_precision",
+                            "kind": "chunk",
+                            "item_count": 1,
+                            "chunk_ids": ["chk-long"],
+                        },
+                    ],
+                },
+            )
+            hits, _mode = runtime.search_document_with_mode(
+                doc_id="doc-search-layer",
+                query="hydraulic warning checklist",
+                index_layer="high_precision",
+            )
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].chunk_id, "chk-long")
 
     def test_search_document_uses_vector_priority_with_keyword_fallback(self) -> None:
         class QueryEmbeddingProvider:

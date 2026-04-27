@@ -38,6 +38,13 @@ def _build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--once", action="store_true")
     worker.add_argument("--max-jobs", type=int)
 
+    batch_reindex = sub.add_parser("batch-reindex", help="Rebuild chunk/index outputs for a batch of documents")
+    batch_reindex.add_argument("--config", default="parsecore.toml")
+    batch_reindex.add_argument("--tenant-id")
+    batch_reindex.add_argument("--doc-id", action="append", dest="doc_ids")
+    batch_reindex.add_argument("--since-hours", type=float)
+    batch_reindex.add_argument("--include-embeddings", action="store_true")
+
     return parser
 
 
@@ -62,6 +69,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         processed = run_worker(args.config, once=args.once, max_jobs=args.max_jobs)
         print(json.dumps({"processed": processed}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "batch-reindex":
+        payload = runtime.batch_reindex(
+            tenant_id=args.tenant_id,
+            doc_ids=args.doc_ids,
+            since_hours=args.since_hours,
+            include_embeddings=bool(args.include_embeddings),
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     options: dict[str, str] = {}

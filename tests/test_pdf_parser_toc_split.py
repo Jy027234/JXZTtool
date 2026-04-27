@@ -31,7 +31,10 @@ class SplitTocEntriesTests(unittest.TestCase):
         self.assertGreaterEqual(len(segments), 6)
         # Each segment should end with a terminator (dots + page/status)
         for seg in segments:
-            self.assertRegex(seg, r"(?:\.\s*){2,}\s*(?:\d+|Not applicable|N/A|TBD)\b")
+            self.assertRegex(
+                seg,
+                r"(?:\.\s*){2,}\s*(?:\d+|(?:[A-Z]-?\d+|[A-Z]?\d+)(?:[-./][A-Z0-9]+)*|[IVXLCDM]{1,7}|Not applicable|N/A|TBD)\b",
+            )
 
     def test_handles_spaced_dot_leaders(self) -> None:
         text = (
@@ -85,6 +88,30 @@ class SplitTocEntriesTests(unittest.TestCase):
         self.assertIn("DISASSEMBLY", segments[0])
         self.assertIn("CLEANING", segments[1])
         self.assertIn("INSPECTION", segments[2])
+
+    def test_recognises_prefixed_page_markers(self) -> None:
+        text = (
+            "GENERAL ..................................... A-1\n"
+            "CHECK LIST .................................. A-2\n"
+            "TOOLS ....................................... B-10\n"
+        )
+        segments = _split_toc_entries([text])
+        self.assertEqual(len(segments), 3)
+        self.assertIn("A-1", segments[0])
+        self.assertIn("A-2", segments[1])
+        self.assertIn("B-10", segments[2])
+
+    def test_recognises_roman_page_markers(self) -> None:
+        text = (
+            "FOREWORD .................................... IV\n"
+            "INTRODUCTION ................................ V\n"
+            "ABBREVIATIONS ............................... VI\n"
+        )
+        segments = _split_toc_entries([text])
+        self.assertEqual(len(segments), 3)
+        self.assertIn("IV", segments[0])
+        self.assertIn("V", segments[1])
+        self.assertIn("VI", segments[2])
 
 
 if __name__ == "__main__":

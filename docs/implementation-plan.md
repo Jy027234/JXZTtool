@@ -267,8 +267,14 @@
 - 已补 focused 回归覆盖：pipeline 描述、stage 启停、markdown 渲染、request 级禁用覆盖注册配置，确保这是“可独立开关、可单测、可回退”的真实能力，而不是仅在文档中声明。
 - 已落一组真实表格专项 baseline：`var/regression/baseline.table-structure.primary.json` 基于主样本 `36d65cd6b61346e28e97dbaf829646de.pdf`，当前记录到 `table_ready=1.0000`、`table_cells=44`，并已接入默认 `suite.json` 作为 `primary-table-structure` 门禁项。
 - 已将复杂版面阅读顺序从 `dual_channel` 的隐式副作用拆成独立 parser-backed stage：`layout-reading-order` 现在有单独配置 `post_process.layout_reading_order`，也支持 request 级覆盖 `post_process.layout_reading_order` / `enrichment.layout_reading_order.enabled`。
-- parser 现在会把 `layout_reading_order_applied` 与 `layout_reading_order_strategy` 写入 block metadata；`tools/regression_baseline.py` 也新增 `layout_quality` 指标与 drift 门槛，沿用现有 `baseline.27-81-17.json` + `suite.json` 路径作为 slow layout 样本，而不是另起一套脚手架。
-- 本轮验证结果：`tests.test_pdf_parser_options`、`tests.test_regression_baseline`、`tests.test_runtime` 与全量 `unittest discover -s tests` 均通过；当前结果为 `151 passed, 5 skipped`。真实 baseline `check` 已验证 `baseline.json` 与 `baseline.table-structure.primary.json` 均在预算内通过；`sample-27-81-17` 继续作为 slow layout 样本保留在同一 suite 路径中，`sample-cmm-32-48-21-ocr` 仍保留为既有 OCR 长尾样本，未在本轮观察窗口内收口。
+- parser 现在会把 `layout_reading_order_applied` 与 `layout_reading_order_strategy` 写入 block metadata；`tools/regression_baseline.py` 也新增 `layout_quality` 指标与 drift 门槛，并已将 `baseline.27-81-17.json` 重存为原生携带 `layout_quality` 的 slow layout baseline，继续沿用 `suite.json` 路径而不是另起一套脚手架。
+- slow layout 样本已完成真实验证：最新 `baseline.27-81-17.json` 的生成结果为 `multi_col=2 / layout_ro_pages=2`，此前单独 `check` 也已 `OK`，说明布局阅读顺序 stage 在既有多栏样本上已命中并稳定落在预算内；长耗时问题仍主要来自 OCR，而不是布局阶段本身。
+- 目录/清单页细化已补：`_split_toc_entries` 现支持 `A-1/B-10`、`2-3`、`IV/VI` 等非纯数字页码终结符，降低 TOC/LEP 页在页码样式变化时的漏切分概率。
+- 正文-表格混排页顺序已细化：PDF parser 现在按 `table.bbox.top` 与段落数量估算锚点，将表格块与段落块交错输出，替代此前“每页先出全部 table 再出 paragraph”的固定顺序，降低 mixed page 的阅读顺序偏差。
+- 图文穿插页细化已补：新增 `merge_figure_captions`（默认开启）后处理，仅在 `Figure/Fig./Illustration` 标签独立成段时与下一段说明合并，避免图注被切碎后并入错误上下文。
+- 规范解析产物已显式补齐 `item.semantic_role` 与 `structure_tags`，并把 `semantic_role` 写入 provenance；`item.kind` 继续保留为兼容字段，后续结构索引可直接消费 `semantic_role + structure_tags` 而不需回推 block metadata。
+- pipeline 可观测字段已补：每次 artifact 都会记录 `pipeline_name`、`options_hash`、`cache_key`、`cache_hit/miss`、cache 计数快照与 `active/skipped/failed_runtime_stages`，并补了缓存命中行为回归测试。
+- 本轮验证结果：`tests.test_pdf_parser_figure_caption`、`tests.test_pdf_parser_toc_split`、`tests.test_pdf_parser_options`、`tests.test_regression_baseline`、`tests.test_runtime` 与全量 `unittest discover -s tests` 均通过；当前结果为 `159 passed, 5 skipped`。真实 baseline `check` 已验证 `baseline.json` 与 `baseline.table-structure.primary.json` 均在预算内通过；`sample-27-81-17` 继续作为 slow layout 样本保留在同一 suite 路径中，`sample-cmm-32-48-21-ocr` 仍保留为既有 OCR 长尾样本，未在本轮观察窗口内收口。
 
 #### 具体策略
 
@@ -290,18 +296,36 @@
 
 #### 任务清单
 
-- [ ] 建立多索引分层：主索引、高精度索引、结构索引
-- [ ] 定义 chunk/version/index version 关系，支持多版本重建与灰度切换
-- [ ] 增加夜间批处理入口：重算 chunk、重做 embedding、增量刷新索引与质量报表
-- [ ] 把 `semantic_role`、结构标签、业务标签纳入索引 schema 与搜索排序
-- [ ] 为 SOP/工卡/合规比对补结构索引与任务级检索接口
-- [ ] 增加索引构建与索引切换观测：覆盖率、成本、耗时、回滚状态
-- [ ] 预留 small/large embedding 双层策略，但默认只强制 small 层上线
+- [x] 建立多索引分层：主索引、高精度索引、结构索引
+- [x] 定义 chunk/version/index version 关系，支持多版本重建与灰度切换
+- [x] 增加夜间批处理入口：重算 chunk、重做 embedding、增量刷新索引与质量报表
+- [x] 把 `semantic_role`、结构标签、业务标签纳入索引 schema 与搜索排序
+- [x] 为 SOP/工卡/合规比对补结构索引与任务级检索接口
+- [x] 增加索引构建与索引切换观测：覆盖率、成本、耗时、回滚状态
+- [x] 预留 small/large embedding 双层策略，但默认只强制 small 层上线
+
+#### 落地说明（2026-04-27，第一批）
+
+- Phase 7 已正式启动，当前先落“主索引 + 结构索引”的最小骨架，而不是一次性铺开完整多索引运营链路。
+- runtime 在每次 parse/rechunk/re-embed 后都会产出 `index_manifest`，明确记录 `pipeline_name`、`options_hash`、`index_version` 与各层索引清单；当前默认至少包含 `primary`（chunk）与 `structure`（typed-item）两层。
+- `primary` 层继续承接现有 chunk upsert；`structure` 层则开始消费规范解析产物中的 typed item，当前会把 `item_id / semantic_role / structure_tags / page_number / text` 送入 index adapter，为 Phase 7 后续结构检索打底。
+- `NullIndex` 与 `PgVectorIndex` 都已兼容新的 manifest / structure 写入契约：前者用于本地开发与测试保留索引快照，后者已新增 `structure_index_entries` 与 `index_manifests` 存储骨架。
+- 文档快照接口也已开始返回 `index_manifest`，因此同一条产品链路里已经可以看到“当前文档有哪些索引层、版本是什么、结构层覆盖了多少条 typed item”。
+- 结构检索与任务检索入口已上线：API 现支持 `structure-search` 与 `tasks/search`，可直接基于 `semantic_role + structure_tags` 检索 typed item，而不必退回全文 chunk 检索。
+- 索引构建观测已补：runtime 新增 `index_metrics`，可聚合租户维度的 layer 覆盖、item 数量、semantic role 覆盖与 index version 分布；文档接口继续返回单文档 `index_manifest`。
+- 夜间批处理入口已补：CLI 新增 `parsecore batch-reindex`，支持按租户、文档和时间窗口批量重跑 chunk/index，并可选附带 embedding 重建。
+- embedding 双层策略已预留：manifest 现显式记录 `embedding_tiers`，默认 `small`，同时接受 `index.embedding_tiers = ["small", "large"]` 的上层配置输入；当前仍只强制 `small` 层上线，不默认启用高精度层。
+- 高精度层现已具备可执行入口：当请求 options 启用 `index.embedding_tiers = ["small", "large"]` 时，manifest 会产出 `high_precision` 层并统计候选 chunk；检索接口支持 `index_layer=high_precision` 做层级过滤，便于在不影响默认主链的前提下对关键内容做更窄范围召回。
+- 高精度层已进一步从“运行时筛选”升级为“独立持久化索引路径”：index adapter 新增 layer chunk 读取能力，`high_precision` 候选 chunk id 会写入 manifest 并由索引层独立存储，检索 `index_layer=high_precision` 时优先走索引层读取，避免只依赖内存态/请求态筛选。
+- 索引观测已补 high_precision 细粒度指标：`index_metrics` 除 layer count/item 之外，新增 `high_precision.documents/document_coverage/items/item_ratio_vs_primary`，可直接衡量高精度层覆盖规模与相对成本。
+- 检索效果观测已接入：`index_metrics` 新增 `search_effectiveness`（按 `primary/high_precision` 统计 `queries/hit_rate/avg_hits/max_hits/zero_hit_queries`），并在 `high_precision` 汇总里补 `query_count/query_hit_rate/query_avg_hits`，形成覆盖-成本-效果闭环。
+- 检索效果观测现已具备重启延续性：查询效果事件会写入 JobStore（SQLite/Postgres 均支持），`index_metrics` 优先从持久层聚合读取，不再只依赖进程内缓存，runtime 重建后指标可持续回放。
+- 本轮验证结果：`tests.test_runtime`、`tests.test_asgi`、`tests.test_bootstrap_routing` 与全量 `unittest discover -s tests` 均通过；当前结果为 `167 passed, 5 skipped`。
 
 #### 索引策略
 
 - 主索引：低成本、高吞吐，覆盖全部常规 chunk，作为默认检索入口。
-- 高精度索引：只覆盖高价值文档、关键章节或人工确认过的重要块，不做全量默认。
+- 高精度索引：当前仅保留 tier/manifest 预留位，不做全量默认；待真实业务命中集明确后，再决定 large tier 的启用策略与覆盖范围。
 - 结构索引：面向步骤、表格、工卡项、合规条款等 typed item，优先服务比对与定位，而不是通用 RAG。
 
 #### 验收标准
@@ -323,8 +347,8 @@
 
 - [x] 选 1 组表格长尾样本，建立专项回归与是否引入表格专用能力的决策门槛
 - [x] 把表格能力从当前 parser-backed stage 提升为真正可独立开关、可单测、可回退的 enrichment stage
-- [~] 为复杂版面阅读顺序准备独立样本集和指标，不与表格专项共用同一评测口径
-- [ ] 把规范解析产物里的 typed item 与 `semantic_role` 显式接进后续结构索引设计，避免 Phase 7 再回头改数据形状
-- [ ] 补 pipeline 级可观测字段，至少能看到每次命中的 pipeline name、options hash、cache hit/miss 与 active stages
+- [x] 为复杂版面阅读顺序准备独立样本集和指标，不与表格专项共用同一评测口径
+- [x] 把规范解析产物里的 typed item 与 `semantic_role` 显式接进后续结构索引设计，避免 Phase 7 再回头改数据形状
+- [x] 补 pipeline 级可观测字段，至少能看到每次命中的 pipeline name、options hash、cache hit/miss 与 active stages
 
 这一批做完后，再决定是否进入表格专用模型实验，而不是现在直接跳到整页 VLM 或全文模型方案。

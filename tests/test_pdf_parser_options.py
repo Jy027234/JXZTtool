@@ -25,17 +25,29 @@ class _FakePdfReader:
         self.pages = [_FakePdfPage("broken text")]
 
 
+class _FakeTable:
+    def __init__(self, *, bbox: tuple[float, float, float, float], cells: list[list[str]]) -> None:
+        self.bbox = bbox
+        self.cells = cells
+        self.row_count = len(cells)
+        self.col_count = max((len(row) for row in cells), default=0)
+
+    def render_text(self) -> str:
+        return "\n".join("\t".join(cell for cell in row) for row in self.cells)
+
+
 def _fake_page_layout(
     *,
     text_without_tables: str,
     ocr_fallback_reason: str | None,
+    tables: list[object] | None = None,
     column_count_hint: int = 1,
     layout_reading_order_applied: bool = False,
     layout_reading_order_strategy: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         text_without_tables=text_without_tables,
-        tables=[],
+        tables=tables or [],
         width=100.0,
         height=100.0,
         column_count_hint=column_count_hint,
@@ -231,6 +243,51 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertTrue(blocks[1].metadata["layout_reading_order_applied"])
         self.assertEqual(blocks[1].metadata["layout_reading_order_strategy"], "column-reflow")
         self.assertEqual(blocks[1].metadata["column_count_hint"], 2)
+
+    def test_tables_are_interleaved_with_paragraphs_by_vertical_anchor(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "layout_reading_order": True}},
+        )
+
+        def fake_extract_pdfplumber_layout(*_args, **_kwargs):
+            return [
+                _fake_page_layout(
+                    text_without_tables="Intro paragraph\n\nClosing paragraph",
+                    ocr_fallback_reason=None,
+                    tables=[
+                        _FakeTable(
+                            bbox=(8.0, 45.0, 92.0, 68.0),
+                            cells=[["Part", "Qty"], ["Bolt", "2"]],
+                        )
+                    ],
+                    column_count_hint=1,
+                    layout_reading_order_applied=True,
+                    layout_reading_order_strategy="column-reflow",
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-mixed-order",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertEqual(blocks[1].type.value, "paragraph")
+        self.assertEqual(blocks[1].content, "Intro paragraph")
+        self.assertEqual(blocks[2].type.value, "table")
+        self.assertEqual(blocks[2].metadata["table_index"], 1)
+        self.assertEqual(blocks[3].type.value, "paragraph")
+        self.assertEqual(blocks[3].content, "Closing paragraph")
 
     def test_request_enable_ocr_false_disables_ocr_callback_even_if_config_default_on(self) -> None:
         parser = PdfTextParser(

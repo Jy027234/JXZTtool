@@ -103,3 +103,15 @@ class ChunkSearchHit:
     text: str
     semantic_role: str
     score: float
+
+
+@dataclass(slots=True, frozen=True)
+class StructureSearchHit:
+    item_id: str
+    doc_id: str
+    block_ids: tuple[str, ...]
+    text: str
+    semantic_role: str
+    structure_tags: tuple[str, ...] = ()
+    page_number: int | None = None
+    score: float = 0.0

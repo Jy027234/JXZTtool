@@ -5,19 +5,20 @@ import time
 from datetime import datetime, timedelta, timezone
 from math import sqrt
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .config import ParseCoreSettings
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
 from .events import JobEventLogger
-from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest
-from .pipelines import PipelineRegistry
+from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
+from .pipelines import ParsedDocumentArtifact, PipelineRegistry
 
 
 _RERUN_CHUNKS_ONLY_MODE = "rerun_chunks_only"
 _RERUN_EMBEDDINGS_ONLY_MODE = "rerun_embeddings_only"
 _SEARCH_VECTOR_WEIGHT = 0.7
 _SEARCH_KEYWORD_WEIGHT = 0.3
+_SEARCH_METRICS_HISTORY_LIMIT = 5000
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
     "title": 1.35,
@@ -30,6 +31,10 @@ _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
     "toc_entry": 0.7,
     "lep_entry": 0.55,
 }
+_TASK_LIKE_PATTERN = re.compile(
+    r"^(?:\d+(?:\.\d+)*[.)]|\([a-z]\)|step\s+\d+|task\s+\d+)",
+    re.IGNORECASE,
+)
 
 
 class QuotaExceededError(RuntimeError):
@@ -235,6 +240,7 @@ class ParseRuntime:
         self.event_logger = event_logger or JobEventLogger(settings.runtime.log_path)
         self.event_aggregator = EventAggregator(max_ringbuffer_size=1000)
         self.pipeline_registry = pipeline_registry
+        self._search_layer_query_hits: dict[tuple[str, str], list[int]] = {}
 
     def describe(self) -> dict[str, object]:
         description: dict[str, object] = {
@@ -260,6 +266,8 @@ class ParseRuntime:
             },
             "product_adapter": self.settings.product_adapter,
             "parsers": [parser.name for parser in self.parsers],
+            "index_layers": ["primary", "structure", "high_precision"],
+            "embedding_tiers": ["small", "large"],
         }
         if self.pipeline_registry is not None:
             registry_description = self.pipeline_registry.describe()
@@ -329,7 +337,8 @@ class ParseRuntime:
                 state=ParseJobState.STRUCTURING.value,
             )
 
-            chunks = tuple(self._load_chunks_for_request(request, blocks=blocks))
+            document = self._load_document_for_request(request, blocks=blocks)
+            chunks = tuple(self._load_chunks_for_request(request, blocks=blocks, document=document))
             self.job_store.update_state(job_id=job.job_id, state=ParseJobState.EMBEDDING)
             self.event_logger.log(
                 "state_changed",
@@ -339,6 +348,12 @@ class ParseRuntime:
             )
             chunks = tuple(self._embed_chunks(doc_id=request.doc_id, chunks=chunks))
 
+            index_manifest = self._build_index_manifest(
+                request=request,
+                job_id=job.job_id,
+                document=document,
+                chunks=chunks,
+            )
             self.job_store.save_chunks(
                 doc_id=request.doc_id,
                 chunks=chunks,
@@ -348,6 +363,8 @@ class ParseRuntime:
                 doc_id=request.doc_id,
                 chunks=chunks,
                 tenant_id=request.tenant_id,
+                document=document,
+                index_manifest=index_manifest,
             )
             final_job = self.job_store.update_state(job_id=job.job_id, state=ParseJobState.DONE)
             outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
@@ -413,17 +430,92 @@ class ParseRuntime:
 
     def get_document(self, *, doc_id: str, tenant_id: str | None = None) -> dict[str, Any]:
         latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        normalized_tenant = str(tenant_id or getattr(latest_job, "tenant_id", "default") or "default")
         if latest_job is None:
             blocks: tuple[Any, ...] = ()
             chunks: tuple[Any, ...] = ()
         else:
             blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
             chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
+        describe_document = getattr(self.index, "describe_document", None)
+        index_manifest = None
+        if callable(describe_document):
+            index_manifest = describe_document(doc_id=doc_id, tenant_id=normalized_tenant)
+        if index_manifest is None and latest_job is not None:
+            index_manifest = self._derive_index_manifest_from_snapshot(
+                job=latest_job,
+                blocks=blocks,
+                chunks=chunks,
+            )
         return {
             "doc_id": doc_id,
             "job": latest_job,
             "blocks": blocks,
             "chunks": chunks,
+            "index_manifest": index_manifest,
+        }
+
+    def _derive_index_manifest_from_snapshot(
+        self,
+        *,
+        job: Any,
+        blocks: Sequence[Any],
+        chunks: Sequence[Chunk],
+    ) -> dict[str, Any]:
+        semantic_roles = sorted(
+            {
+                str((getattr(block, "metadata", {}) or {}).get("semantic_role") or "paragraph")
+                for block in blocks
+            }
+        )
+        chunk_roles = sorted({str(chunk.semantic_role or "paragraph") for chunk in chunks})
+        options_hash = ""
+        pipeline_name = ""
+        if self.pipeline_registry is not None:
+            try:
+                pipeline = self.pipeline_registry.resolve(self._request_from_job(job), purpose="parse")
+                pipeline_name = str(getattr(pipeline, "name", "") or "")
+            except Exception:
+                pipeline_name = ""
+        embedding_tiers = _resolve_embedding_tiers(getattr(job, "options", {}) or {})
+        high_precision_chunks = _select_high_precision_chunks(chunks)
+        layers: list[dict[str, Any]] = [
+            {
+                "name": "primary",
+                "kind": "chunk",
+                "version": job.job_id,
+                "item_count": len(chunks),
+                "semantic_roles": chunk_roles,
+                "embedding_tier": embedding_tiers[0],
+            },
+            {
+                "name": "structure",
+                "kind": "typed-item",
+                "version": job.job_id,
+                "item_count": len(blocks),
+                "semantic_roles": semantic_roles,
+            },
+        ]
+        if "large" in embedding_tiers:
+            layers.append(
+                {
+                    "name": "high_precision",
+                    "kind": "chunk",
+                    "version": job.job_id,
+                    "item_count": len(high_precision_chunks),
+                    "semantic_roles": sorted({str(chunk.semantic_role or "paragraph") for chunk in high_precision_chunks}),
+                    "embedding_tier": "large",
+                    "chunk_ids": [chunk.chunk_id for chunk in high_precision_chunks],
+                }
+            )
+        return {
+            "doc_id": job.doc_id,
+            "tenant_id": job.tenant_id,
+            "pipeline_name": pipeline_name,
+            "options_hash": options_hash,
+            "index_version": job.job_id,
+            "embedding_tiers": embedding_tiers,
+            "layers": layers,
         }
 
     def search_document(
@@ -452,11 +544,17 @@ class ParseRuntime:
         limit: int = 10,
         semantic_roles: Sequence[str] | None = None,
         tenant_id: str | None = None,
+        index_layer: str = "primary",
     ) -> tuple[tuple[ChunkSearchHit, ...], str]:
         latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         if latest_job is None:
             return (), "keyword-fallback"
-        chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
+        requested_layer = _normalize_chunk_index_layer(index_layer)
+        chunks = self._load_chunks_for_index_layer(
+            doc_id=doc_id,
+            tenant_id=latest_job.tenant_id,
+            layer=requested_layer,
+        )
         if not chunks:
             return (), "keyword-fallback"
 
@@ -494,7 +592,155 @@ class ParseRuntime:
             )
 
         ranked = sorted(scored, key=lambda item: (-item.score, item.chunk_id))
-        return tuple(ranked[: max(1, int(limit))]), retrieval_mode
+        result = tuple(ranked[: max(1, int(limit))])
+        self._record_search_effectiveness(
+            tenant_id=latest_job.tenant_id,
+            layer=requested_layer,
+            hit_count=len(result),
+        )
+        return result, retrieval_mode
+
+    def _record_search_effectiveness(self, *, tenant_id: str | None, layer: str, hit_count: int) -> None:
+        normalized_tenant = str(tenant_id or "default").strip() or "default"
+        normalized_layer = _normalize_chunk_index_layer(layer)
+        key = (normalized_tenant, normalized_layer)
+        history = self._search_layer_query_hits.setdefault(key, [])
+        history.append(max(0, int(hit_count)))
+        overflow = len(history) - _SEARCH_METRICS_HISTORY_LIMIT
+        if overflow > 0:
+            del history[:overflow]
+        record_layer_search_hit = getattr(self.job_store, "record_layer_search_hit", None)
+        if callable(record_layer_search_hit):
+            record_layer_search_hit(
+                tenant_id=normalized_tenant,
+                layer=normalized_layer,
+                hit_count=max(0, int(hit_count)),
+            )
+
+    def _load_chunks_for_index_layer(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        layer: str,
+    ) -> tuple[Chunk, ...]:
+        chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=tenant_id))
+        normalized_layer = _normalize_chunk_index_layer(layer)
+        if normalized_layer == "primary":
+            return chunks
+
+        get_layer_chunks = getattr(self.index, "get_layer_chunks", None)
+        if callable(get_layer_chunks):
+            indexed_chunks = get_layer_chunks(doc_id=doc_id, layer=normalized_layer, tenant_id=tenant_id)
+            if indexed_chunks is not None:
+                return tuple(indexed_chunks)
+
+        return _select_high_precision_chunks(chunks)
+
+    def search_document_structure(
+        self,
+        *,
+        doc_id: str,
+        query: str,
+        limit: int = 10,
+        semantic_roles: Sequence[str] | None = None,
+        structure_tags: Sequence[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> tuple[StructureSearchHit, ...]:
+        hits, _mode = self.search_document_structure_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=limit,
+            semantic_roles=semantic_roles,
+            structure_tags=structure_tags,
+            tenant_id=tenant_id,
+        )
+        return hits
+
+    def search_document_structure_with_mode(
+        self,
+        *,
+        doc_id: str,
+        query: str,
+        limit: int = 10,
+        semantic_roles: Sequence[str] | None = None,
+        structure_tags: Sequence[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> tuple[tuple[StructureSearchHit, ...], str]:
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        if latest_job is None:
+            return (), "structure-keyword"
+        blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
+        if not blocks:
+            return (), "structure-keyword"
+        entries = self._structure_entries_from_blocks(doc_id=doc_id, blocks=blocks)
+        allowed_roles = {
+            str(role).strip().lower() for role in (semantic_roles or ()) if str(role).strip()
+        }
+        allowed_tags = {
+            str(tag).strip().lower() for tag in (structure_tags or ()) if str(tag).strip()
+        }
+        scored: list[StructureSearchHit] = []
+        for entry in entries:
+            role = str(entry["semantic_role"] or "paragraph").strip().lower()
+            tags = tuple(str(tag).strip().lower() for tag in entry["structure_tags"])
+            if allowed_roles and role not in allowed_roles:
+                continue
+            if allowed_tags and not any(tag in allowed_tags for tag in tags):
+                continue
+            score = _score_structure_entry(query=query, text=str(entry["text"]), semantic_role=role, tags=tags)
+            if score <= 0.0:
+                continue
+            scored.append(
+                StructureSearchHit(
+                    item_id=str(entry["item_id"]),
+                    doc_id=doc_id,
+                    block_ids=(str(entry["block_id"]),),
+                    text=str(entry["text"]),
+                    semantic_role=role,
+                    structure_tags=tuple(tags),
+                    page_number=entry["page_number"],
+                    score=round(score, 4),
+                )
+            )
+        ranked = sorted(scored, key=lambda item: (-item.score, item.item_id))
+        return tuple(ranked[: max(1, int(limit))]), "structure-keyword"
+
+    def search_document_tasks(
+        self,
+        *,
+        doc_id: str,
+        query: str,
+        limit: int = 10,
+        tenant_id: str | None = None,
+    ) -> tuple[StructureSearchHit, ...]:
+        hits, _mode = self.search_document_tasks_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
+        return hits
+
+    def search_document_tasks_with_mode(
+        self,
+        *,
+        doc_id: str,
+        query: str,
+        limit: int = 10,
+        tenant_id: str | None = None,
+    ) -> tuple[tuple[StructureSearchHit, ...], str]:
+        hits, mode = self.search_document_structure_with_mode(
+            doc_id=doc_id,
+            query=query,
+            limit=max(limit * 3, 10),
+            semantic_roles=("paragraph", "warning", "caution", "note"),
+            tenant_id=tenant_id,
+        )
+        task_hits = tuple(
+            hit for hit in hits if _is_task_like_entry(hit.text, hit.semantic_role, hit.structure_tags)
+        )
+        return task_hits[: max(1, int(limit))], mode
 
     def _try_embed_search_query(self, *, query: str) -> tuple[float, ...] | None:
         if not query.strip():
@@ -598,6 +844,173 @@ class ParseRuntime:
             "total_jobs": len(jobs),
             "total_quota_units": sum(int(item["total_quota_units"]) for item in items),
             "items": items,
+        }
+
+    def index_metrics(self, *, tenant_id: str | None = None, since_hours: float | None = None) -> dict[str, Any]:
+        jobs = self.list_jobs(tenant_id=tenant_id, since_hours=since_hours)
+        normalized_tenant_filter = (tenant_id or "").strip() or None
+        manifests: list[dict[str, Any]] = []
+        seen_docs: set[tuple[str, str]] = set()
+        for job in jobs:
+            key = (job.tenant_id or "default", job.doc_id)
+            if key in seen_docs:
+                continue
+            seen_docs.add(key)
+            snapshot = self.get_document(doc_id=job.doc_id, tenant_id=job.tenant_id)
+            manifest = snapshot.get("index_manifest")
+            if isinstance(manifest, dict):
+                manifests.append(manifest)
+        layer_counts: dict[str, int] = {}
+        layer_items: dict[str, int] = {}
+        semantic_roles: dict[str, int] = {}
+        versions: dict[str, int] = {}
+        for manifest in manifests:
+            versions[str(manifest.get("index_version") or "")] = versions.get(str(manifest.get("index_version") or ""), 0) + 1
+            for layer in manifest.get("layers", []):
+                name = str(layer.get("name") or "unknown")
+                layer_counts[name] = layer_counts.get(name, 0) + 1
+                layer_items[name] = layer_items.get(name, 0) + int(layer.get("item_count") or 0)
+                for role in layer.get("semantic_roles", []):
+                    role_name = str(role or "paragraph")
+                    semantic_roles[role_name] = semantic_roles.get(role_name, 0) + 1
+
+        document_total = len(manifests)
+        high_precision_docs = int(layer_counts.get("high_precision", 0))
+        high_precision_items = int(layer_items.get("high_precision", 0))
+        primary_items = int(layer_items.get("primary", 0))
+        document_coverage = 0.0
+        if document_total > 0:
+            document_coverage = round(high_precision_docs / document_total, 4)
+        item_ratio_vs_primary = 0.0
+        if primary_items > 0:
+            item_ratio_vs_primary = round(high_precision_items / primary_items, 4)
+
+        search_effectiveness = self._build_search_effectiveness_snapshot(
+            tenant_id=normalized_tenant_filter,
+            since_hours=since_hours,
+        )
+
+        high_precision_search = search_effectiveness.get("high_precision", {})
+        return {
+            "tenant_id": (tenant_id or "").strip() or None,
+            "since_hours": float(since_hours) if since_hours is not None else None,
+            "documents": document_total,
+            "layer_counts": layer_counts,
+            "layer_items": layer_items,
+            "semantic_role_coverage": semantic_roles,
+            "index_versions": {key: value for key, value in versions.items() if key},
+            "search_effectiveness": search_effectiveness,
+            "high_precision": {
+                "documents": high_precision_docs,
+                "document_coverage": document_coverage,
+                "items": high_precision_items,
+                "item_ratio_vs_primary": item_ratio_vs_primary,
+                "query_count": int(high_precision_search.get("queries") or 0),
+                "query_hit_rate": float(high_precision_search.get("hit_rate") or 0.0),
+                "query_avg_hits": float(high_precision_search.get("avg_hits") or 0.0),
+            },
+        }
+
+    def _build_search_effectiveness_snapshot(
+        self,
+        *,
+        tenant_id: str | None,
+        since_hours: float | None,
+    ) -> dict[str, dict[str, Any]]:
+        aggregate_layer_search_metrics = getattr(self.job_store, "aggregate_layer_search_metrics", None)
+        raw_metrics: Mapping[str, Mapping[str, int]] | None = None
+        if callable(aggregate_layer_search_metrics):
+            raw_metrics = aggregate_layer_search_metrics(tenant_id=tenant_id, since_hours=since_hours)
+        if raw_metrics is None:
+            raw_metrics = self._aggregate_search_effectiveness_from_memory(tenant_id=tenant_id)
+
+        snapshot: dict[str, dict[str, Any]] = {}
+        for layer, bucket in raw_metrics.items():
+            queries = max(0, int(bucket.get("queries") or 0))
+            if queries <= 0:
+                continue
+            hit_queries = max(0, int(bucket.get("hit_queries") or 0))
+            total_hits = max(0, int(bucket.get("total_hits") or 0))
+            max_hits = max(0, int(bucket.get("max_hits") or 0))
+            snapshot[str(layer)] = {
+                "queries": queries,
+                "hit_queries": hit_queries,
+                "zero_hit_queries": max(0, queries - hit_queries),
+                "hit_rate": round(hit_queries / queries, 4),
+                "avg_hits": round(total_hits / queries, 4),
+                "max_hits": max_hits,
+            }
+        return snapshot
+
+    def _aggregate_search_effectiveness_from_memory(
+        self,
+        *,
+        tenant_id: str | None,
+    ) -> dict[str, dict[str, int]]:
+        tenant_filter = (tenant_id or "").strip()
+        metrics: dict[str, dict[str, int]] = {}
+        for (search_tenant_id, layer), history in self._search_layer_query_hits.items():
+            if tenant_filter and search_tenant_id != tenant_filter:
+                continue
+            if not history:
+                continue
+            bucket = metrics.setdefault(layer, {"queries": 0, "hit_queries": 0, "total_hits": 0, "max_hits": 0})
+            bucket["queries"] += len(history)
+            bucket["hit_queries"] += sum(1 for count in history if count > 0)
+            bucket["total_hits"] += sum(history)
+            bucket["max_hits"] = max(bucket["max_hits"], max(history))
+        return metrics
+
+    def batch_reindex(
+        self,
+        *,
+        tenant_id: str | None = None,
+        doc_ids: Sequence[str] | None = None,
+        since_hours: float | None = None,
+        include_embeddings: bool = False,
+    ) -> dict[str, Any]:
+        candidates = self.list_jobs(tenant_id=tenant_id, since_hours=since_hours)
+        requested_docs = {str(doc_id).strip() for doc_id in (doc_ids or ()) if str(doc_id).strip()}
+        latest_by_doc: dict[tuple[str, str], Any] = {}
+        for job in candidates:
+            key = (job.tenant_id or "default", job.doc_id)
+            if key not in latest_by_doc:
+                latest_by_doc[key] = job
+        processed: list[dict[str, Any]] = []
+        for job in latest_by_doc.values():
+            if requested_docs and job.doc_id not in requested_docs:
+                continue
+            request = self._request_from_job(job)
+            request.options["mode"] = _RERUN_CHUNKS_ONLY_MODE
+            outcome = self.submit(request)
+            processed.append(
+                {
+                    "doc_id": job.doc_id,
+                    "tenant_id": job.tenant_id,
+                    "job_id": outcome.job.job_id,
+                    "mode": _RERUN_CHUNKS_ONLY_MODE,
+                    "chunks": len(outcome.chunks),
+                }
+            )
+            if include_embeddings:
+                embed_request = self._request_from_job(outcome.job)
+                embed_request.options["mode"] = _RERUN_EMBEDDINGS_ONLY_MODE
+                embedded = self.submit(embed_request)
+                processed.append(
+                    {
+                        "doc_id": job.doc_id,
+                        "tenant_id": job.tenant_id,
+                        "job_id": embedded.job.job_id,
+                        "mode": _RERUN_EMBEDDINGS_ONLY_MODE,
+                        "chunks": len(embedded.chunks),
+                    }
+                )
+        return {
+            "tenant_id": (tenant_id or "").strip() or None,
+            "since_hours": float(since_hours) if since_hours is not None else None,
+            "include_embeddings": bool(include_embeddings),
+            "processed": processed,
+            "documents": len({(item["tenant_id"], item["doc_id"]) for item in processed}),
         }
 
     def _check_quota_limit(self, request: ParseRequest) -> None:
@@ -791,7 +1204,27 @@ class ParseRuntime:
         pipeline = self._resolve_pipeline(request, purpose="parse")
         return tuple(pipeline.parse_blocks(request=request))
 
-    def _load_chunks_for_request(self, request: ParseRequest, *, blocks: Sequence[Any]):
+    def _load_document_for_request(
+        self,
+        request: ParseRequest,
+        *,
+        blocks: Sequence[Any],
+    ) -> ParsedDocumentArtifact | None:
+        if self.pipeline_registry is None:
+            return None
+        purpose = "reembed" if self._is_rerun_embeddings_only(request) else (
+            "rechunk" if self._is_rerun_chunks_only(request) else "parse"
+        )
+        pipeline = self._resolve_pipeline(request, purpose=purpose)
+        return pipeline.build_document(request=request, blocks=blocks)
+
+    def _load_chunks_for_request(
+        self,
+        request: ParseRequest,
+        *,
+        blocks: Sequence[Any],
+        document: ParsedDocumentArtifact | None = None,
+    ):
         if self._is_rerun_embeddings_only(request):
             chunks = tuple(
                 self.job_store.get_chunks(
@@ -809,9 +1242,99 @@ class ParseRuntime:
                 chunks=len(chunks),
             )
             return chunks
+        if document is not None:
+            pipeline = self._resolve_pipeline(
+                request,
+                purpose="rechunk" if self._is_rerun_chunks_only(request) else "parse",
+            )
+            return tuple(pipeline.chunker.build(document=document))
         purpose = "rechunk" if self._is_rerun_chunks_only(request) else "parse"
         pipeline = self._resolve_pipeline(request, purpose=purpose)
         return pipeline.build_chunks(request=request, blocks=blocks)
+
+    def _build_index_manifest(
+        self,
+        *,
+        request: ParseRequest,
+        job_id: str,
+        document: ParsedDocumentArtifact | None,
+        chunks: Sequence[Chunk],
+    ) -> dict[str, Any]:
+        pipeline_name = str(getattr(document, "pipeline_name", "") or "")
+        options_hash = str(getattr(document, "options_hash", "") or "")
+        structure_roles = sorted(
+            {
+                str(getattr(item, "semantic_role", "") or "paragraph")
+                for item in tuple(getattr(document, "items", ()) or ())
+            }
+        )
+        chunk_roles = sorted({str(chunk.semantic_role or "paragraph") for chunk in chunks})
+        index_version = options_hash or job_id
+        embedding_tiers = _resolve_embedding_tiers(request.options)
+        high_precision_chunks = _select_high_precision_chunks(chunks)
+        layers: list[dict[str, Any]] = [
+            {
+                "name": "primary",
+                "kind": "chunk",
+                "version": index_version,
+                "item_count": len(chunks),
+                "semantic_roles": chunk_roles,
+                "embedding_tier": embedding_tiers[0],
+            },
+            {
+                "name": "structure",
+                "kind": "typed-item",
+                "version": index_version,
+                "item_count": len(tuple(getattr(document, "items", ()) or ())),
+                "semantic_roles": structure_roles,
+            },
+        ]
+        if "large" in embedding_tiers:
+            layers.append(
+                {
+                    "name": "high_precision",
+                    "kind": "chunk",
+                    "version": index_version,
+                    "item_count": len(high_precision_chunks),
+                    "semantic_roles": sorted({str(chunk.semantic_role or "paragraph") for chunk in high_precision_chunks}),
+                    "embedding_tier": "large",
+                    "chunk_ids": [chunk.chunk_id for chunk in high_precision_chunks],
+                }
+            )
+        return {
+            "doc_id": request.doc_id,
+            "tenant_id": request.tenant_id,
+            "pipeline_name": pipeline_name,
+            "options_hash": options_hash,
+            "index_version": index_version,
+            "embedding_tiers": embedding_tiers,
+            "layers": layers,
+        }
+
+    @staticmethod
+    def _structure_entries_from_blocks(*, doc_id: str, blocks: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+        entries: list[dict[str, Any]] = []
+        for index, block in enumerate(blocks, start=1):
+            metadata = getattr(block, "metadata", {}) or {}
+            semantic_role = str(metadata.get("semantic_role") or "paragraph").strip().lower()
+            tags = _structure_tags_from_block_metadata(metadata=metadata, semantic_role=semantic_role)
+            page_raw = metadata.get("page")
+            try:
+                page_number = int(page_raw) if page_raw is not None else None
+            except (TypeError, ValueError):
+                page_number = None
+            entries.append(
+                {
+                    "item_id": f"itm-{index}",
+                    "doc_id": doc_id,
+                    "block_id": getattr(block, "block_id", f"blk-{index}"),
+                    "text": getattr(block, "content", ""),
+                    "semantic_role": semantic_role,
+                    "structure_tags": tags,
+                    "page_number": page_number,
+                }
+            )
+        return tuple(entries)
 
     @staticmethod
     def _is_rerun_chunks_only(request: ParseRequest) -> bool:
@@ -1201,6 +1724,95 @@ def _resolve_retrieval_mode(
         if len(chunk.embedding) == len(query_embedding):
             return "hybrid"
     return "keyword-fallback"
+
+
+
+def _structure_tags_from_block_metadata(*, metadata: dict[str, Any], semantic_role: str) -> tuple[str, ...]:
+    tags = [f"role:{semantic_role}"]
+    page_type = str(metadata.get("page_type") or "").strip().lower()
+    if page_type:
+        tags.append(f"page:{page_type}")
+    parser_name = str(metadata.get("parser") or "").strip().lower()
+    if parser_name:
+        tags.append(f"parser:{parser_name}")
+    kind = str(metadata.get("kind") or "").strip().lower()
+    if kind:
+        tags.append(f"kind:{kind}")
+    return tuple(dict.fromkeys(tags))
+
+
+def _score_structure_entry(
+    *,
+    query: str,
+    text: str,
+    semantic_role: str,
+    tags: Sequence[str],
+) -> float:
+    keyword_score = _keyword_match_score(query=query, text=text)
+    if keyword_score <= 0.0:
+        return 0.0
+    role_weight = _SEMANTIC_ROLE_WEIGHTS.get(semantic_role, 1.0)
+    tag_bonus = 0.02 * len(tuple(tags))
+    return keyword_score * role_weight + tag_bonus
+
+
+def _keyword_match_score(*, query: str, text: str) -> float:
+    query_tokens = _tokenize(query)
+    text_tokens = _tokenize(text)
+    if not query_tokens or not text_tokens:
+        return 0.0
+    overlap = sum(1 for token in query_tokens if token in text_tokens)
+    if overlap <= 0:
+        return 0.0
+    return overlap / max(len(query_tokens), 1)
+
+
+def _tokenize(text: str) -> tuple[str, ...]:
+    return tuple(token.lower() for token in _TOKEN_PATTERN.findall(str(text or "")))
+
+
+def _is_task_like_entry(text: str, semantic_role: str, tags: Sequence[str]) -> bool:
+    normalized_role = str(semantic_role or "paragraph").strip().lower()
+    if normalized_role in {"warning", "caution", "note"}:
+        return True
+    if any(str(tag).strip().lower().startswith("page:toc") for tag in tags):
+        return False
+    return _TASK_LIKE_PATTERN.search(str(text or "").strip()) is not None
+
+
+def _resolve_embedding_tiers(options: dict[str, Any]) -> list[str]:
+    index_options = options.get("index") if isinstance(options, dict) else None
+    raw_tiers = None
+    if isinstance(index_options, dict):
+        raw_tiers = index_options.get("embedding_tiers")
+    if raw_tiers is None:
+        return ["small"]
+    if isinstance(raw_tiers, (list, tuple)):
+        tiers = [str(item).strip().lower() for item in raw_tiers if str(item).strip()]
+    else:
+        tiers = [str(raw_tiers).strip().lower()]
+    normalized = [tier for tier in tiers if tier in {"small", "large"}]
+    return normalized or ["small"]
+
+
+def _normalize_chunk_index_layer(value: str | None) -> str:
+    normalized = str(value or "primary").strip().lower()
+    if normalized in {"primary", "high_precision"}:
+        return normalized
+    return "primary"
+
+
+def _select_high_precision_chunks(chunks: Sequence[Chunk]) -> tuple[Chunk, ...]:
+    selected: list[Chunk] = []
+    for chunk in chunks:
+        role = str(chunk.semantic_role or "paragraph").strip().lower()
+        text = str(chunk.text or "").strip()
+        if role in {"title", "warning", "caution", "note", "table"}:
+            selected.append(chunk)
+            continue
+        if len(text) >= 120:
+            selected.append(chunk)
+    return tuple(selected)
 
 
 def _cosine_similarity(vec_a: Sequence[float], vec_b: Sequence[float]) -> float:

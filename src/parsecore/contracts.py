@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 from .models import Block, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest
 
@@ -26,7 +26,30 @@ class EmbeddingProvider(Protocol):
 
 @runtime_checkable
 class IndexAdapter(Protocol):
-    def upsert(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None: ...
+    def upsert(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        tenant_id: str | None = None,
+        document: Any | None = None,
+        index_manifest: Mapping[str, Any] | None = None,
+    ) -> None: ...
+
+    def describe_document(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Mapping[str, Any] | None: ...
+
+    def get_layer_chunks(
+        self,
+        *,
+        doc_id: str,
+        layer: str,
+        tenant_id: str | None = None,
+    ) -> Sequence[Chunk] | None: ...
 
 
 @runtime_checkable
@@ -70,3 +93,18 @@ class JobStore(Protocol):
     def get_blocks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Block]: ...
 
     def get_chunks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Chunk]: ...
+
+    def record_layer_search_hit(
+        self,
+        *,
+        tenant_id: str | None,
+        layer: str,
+        hit_count: int,
+    ) -> None: ...
+
+    def aggregate_layer_search_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        since_hours: float | None = None,
+    ) -> Mapping[str, Mapping[str, int]]: ...

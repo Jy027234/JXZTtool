@@ -187,6 +187,9 @@ class PdfTextParser(ParserAdapter):
         self._merge_table_enabled = bool(
             post_process.get("merge_table_continuations", True)
         )
+        self._merge_figure_caption_enabled = bool(
+            post_process.get("merge_figure_captions", True)
+        )
         self._merge_highlights_enabled = bool(
             post_process.get("merge_highlights_entries", True)
         )
@@ -397,6 +400,8 @@ class PdfTextParser(ParserAdapter):
                 paragraphs = _split_toc_entries(
                     paragraphs, min_entries_trigger=self._toc_min_entries
                 )
+            if self._merge_figure_caption_enabled:
+                paragraphs = _merge_figure_caption_paragraphs(paragraphs)
             if self._merge_short_enabled:
                 paragraphs = _merge_short_blocks(
                     paragraphs, min_length=self._short_block_min_length
@@ -423,8 +428,14 @@ class PdfTextParser(ParserAdapter):
                 full_text="\n\n".join(paragraphs),
                 has_title=(page_number == 1),
             )
-            if page_layout is not None:
-                for table_index, table in enumerate(page_layout.tables, start=1):
+            sequence = _build_page_content_sequence(paragraphs, page_layout=page_layout)
+            if not sequence:
+                continue
+            for kind, item_index in sequence:
+                if kind == "table":
+                    if page_layout is None:
+                        continue
+                    table = page_layout.tables[item_index]
                     blocks.append(
                         Block(
                             block_id=f"{request.doc_id}-t-{position}",
@@ -442,21 +453,22 @@ class PdfTextParser(ParserAdapter):
                                 "cols": table.col_count,
                                 "bbox": table.bbox,
                                 "cells": table.cells,
-                                "table_index": table_index,
+                                "table_index": item_index + 1,
                             },
                         )
                     )
                     _attach_page_layout_metadata(blocks[-1].metadata, page_layout)
                     position += 1
-            if not paragraphs:
-                continue
-            for page_position, (paragraph, semantic_role) in enumerate(zip(paragraphs, paragraph_roles), start=1):
+                    continue
+
+                paragraph = paragraphs[item_index]
+                semantic_role = paragraph_roles[item_index]
                 metadata: dict[str, Any] = {
                     "page": page_number,
                     "page_type": page_type,
                     "parser": self.name,
                     "position": position,
-                    "page_position": page_position,
+                    "page_position": item_index + 1,
                     "semantic_role": semantic_role,
                 }
                 if page_layout is not None:
@@ -494,6 +506,57 @@ def _split_pdf_page_text(text: str) -> list[str]:
     return paragraphs
 
 
+def _build_page_content_sequence(
+    paragraphs: Sequence[str],
+    *,
+    page_layout: _PageLayout | None,
+) -> list[tuple[str, int]]:
+    paragraph_count = len(paragraphs)
+    if page_layout is None or not page_layout.tables:
+        return [("paragraph", index) for index in range(paragraph_count)]
+    if paragraph_count == 0:
+        return [("table", index) for index in range(len(page_layout.tables))]
+
+    height = float(page_layout.height or 0.0)
+    anchored_tables: list[tuple[int, float, int]] = []
+    for table_index, table in enumerate(page_layout.tables):
+        top = float(table.bbox[1]) if len(table.bbox) >= 2 else 0.0
+        anchor = _estimate_table_anchor_index(
+            top=top,
+            page_height=height,
+            paragraph_count=paragraph_count,
+        )
+        anchored_tables.append((anchor, top, table_index))
+    anchored_tables.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    sequence: list[tuple[str, int]] = []
+    table_cursor = 0
+    for paragraph_index in range(paragraph_count + 1):
+        while table_cursor < len(anchored_tables) and anchored_tables[table_cursor][0] == paragraph_index:
+            sequence.append(("table", anchored_tables[table_cursor][2]))
+            table_cursor += 1
+        if paragraph_index < paragraph_count:
+            sequence.append(("paragraph", paragraph_index))
+    return sequence
+
+
+def _estimate_table_anchor_index(
+    *,
+    top: float,
+    page_height: float,
+    paragraph_count: int,
+) -> int:
+    if paragraph_count <= 0:
+        return 0
+    if page_height <= 0.0:
+        return paragraph_count
+    clamped_top = min(max(top, 0.0), page_height)
+    return min(
+        paragraph_count,
+        max(0, int(round((clamped_top / page_height) * paragraph_count))),
+    )
+
+
 _LEP_ENTRY_PATTERN = re.compile(r"(?:LIST OF EFFECTIVE PAGES|\bPage\s+[A-Z0-9.\-/]+)", re.IGNORECASE)
 
 
@@ -519,7 +582,7 @@ _INLINE_STRUCTURAL_MARKER_PATTERN = re.compile(
 # Used to split a single paragraph/line into multiple TOC entries even when
 # entries share one line separated only by spaces.
 _TOC_ENTRY_TERMINATOR = re.compile(
-    r"(?:\.\s*){2,}\s*(?:\d+|Not\s+applicable|N/A|TBD)\b",
+    r"(?:\.\s*){2,}\s*(?:\d+|(?:[A-Z]-?\d+|[A-Z]?\d+)(?:[-./][A-Z0-9]+)*|[IVXLCDM]{1,7}|Not\s+applicable|N/A|TBD)\b",
     re.IGNORECASE,
 )
 
@@ -529,6 +592,11 @@ _TABLE_COLUMN_HEADER_PATTERN = re.compile(
 )
 
 _TABLE_NOTE_PATTERN = re.compile(r"^\s*NOTE\s*[:：]", re.IGNORECASE)
+
+_FIGURE_CAPTION_LABEL_PATTERN = re.compile(
+    r"^\s*(?:FIG(?:URE)?\.?|ILLUSTRATION|IMAGE|PHOTO)\s*(?:NO\.?|NUMBER|#)?\s*[A-Za-z]?\d+(?:[.-]\d+)*(?:\s*[A-Za-z])?\s*[:.)\]-]?\s*$",
+    re.IGNORECASE,
+)
 
 _LOWERCASE_WORD_PATTERN = re.compile(r"\b[a-z]{3,}\b")
 
@@ -560,9 +628,10 @@ def _split_toc_entries(
       separated only by whitespace (common when pdfplumber packs a TOC page
       into one giant string).
 
-    Non-numeric terminators ``Not applicable`` / ``N/A`` / ``TBD`` are also
-    recognised because parts inventories and maintenance tables often list
-    "not applicable" rather than a page number.
+    Non-numeric terminators ``Not applicable`` / ``N/A`` / ``TBD`` and
+    non-decimal page markers (for example ``A-1`` / ``2-3`` / ``IV``) are
+    also recognised because parts inventories and maintenance tables often
+    use prefixed section pages.
     """
     if not paragraphs:
         return []
@@ -863,6 +932,46 @@ def _merge_short_blocks(
             merged[-1] = merged[-1] + "\n" + paragraph
         else:
             merged.append(paragraph)
+    return merged
+
+
+def _merge_figure_caption_paragraphs(paragraphs: list[str]) -> list[str]:
+    """Keep figure labels adjacent to their caption body.
+
+    Some PDF extraction paths emit a figure label (for example ``Figure 3-1.``)
+    as a standalone paragraph and move the caption text to the next paragraph.
+    Merge only this narrow pattern to avoid perturbing regular narrative flow.
+    """
+
+    if len(paragraphs) <= 1:
+        return list(paragraphs)
+
+    merged: list[str] = []
+    index = 0
+    while index < len(paragraphs):
+        current = paragraphs[index]
+        current_stripped = current.strip()
+        if (
+            index + 1 < len(paragraphs)
+            and _FIGURE_CAPTION_LABEL_PATTERN.match(current_stripped)
+        ):
+            following = paragraphs[index + 1]
+            following_stripped = following.strip()
+            following_first_line = following_stripped.splitlines()[0] if following_stripped else ""
+            if (
+                following_stripped
+                and not _FIGURE_CAPTION_LABEL_PATTERN.match(following_stripped)
+                and not _looks_heading_like(" ".join(following_stripped.split()))
+                and not _TOC_ENTRY_TERMINATOR.search(following_stripped)
+                and not _TABLE_COLUMN_HEADER_PATTERN.match(following_first_line)
+                and not _TABLE_NOTE_PATTERN.match(following_first_line)
+                and not any(pattern.match(following_first_line) for pattern in _STRUCTURAL_ITEM_PATTERNS)
+            ):
+                merged.append(current.rstrip() + "\n" + following.lstrip())
+                index += 2
+                continue
+        merged.append(current)
+        index += 1
     return merged
 
 

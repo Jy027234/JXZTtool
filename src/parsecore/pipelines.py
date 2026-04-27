@@ -42,6 +42,7 @@ class DocumentArtifactItem:
     item_id: str
     block_ids: tuple[str, ...]
     kind: str
+    semantic_role: str
     text: str
     page_number: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -99,15 +100,15 @@ class PipelineCache:
     hits: int = 0
     misses: int = 0
 
-    def get_or_create(self, *, key: str, factory: callable) -> "DocumentPipeline":
+    def get_or_create(self, *, key: str, factory: callable) -> tuple["DocumentPipeline", bool]:
         pipeline = self._pipelines.get(key)
         if pipeline is not None:
             self.hits += 1
-            return pipeline
+            return pipeline, True
         self.misses += 1
         pipeline = factory()
         self._pipelines[key] = pipeline
-        return pipeline
+        return pipeline, False
 
     def describe(self) -> dict[str, int]:
         return {
@@ -168,7 +169,7 @@ class DocumentSummaryStage:
         role_counts: dict[str, int] = {}
         page_numbers: set[int] = set()
         for item in document.items:
-            role_counts[item.kind] = role_counts.get(item.kind, 0) + 1
+            role_counts[item.semantic_role] = role_counts.get(item.semantic_role, 0) + 1
             if item.page_number is not None:
                 page_numbers.add(item.page_number)
         metadata["summary"] = {
@@ -285,7 +286,7 @@ class ArtifactBackedChunker:
             if len(chunk.block_ids) == 1:
                 item = item_by_block_id.get(chunk.block_ids[0])
                 if item is not None:
-                    semantic_role = str(item.metadata.get("semantic_role") or semantic_role)
+                    semantic_role = str(item.semantic_role or item.metadata.get("semantic_role") or semantic_role)
                     rendered_text = item.metadata.get("rendered_text")
                     text = str(rendered_text or item.text or text)
             enriched.append(replace(chunk, semantic_role=semantic_role, text=text))
@@ -304,6 +305,7 @@ class DocumentPipeline:
         self.parser = registration.parser
         self.chunker = chunker
         self.runtime_stages = tuple(runtime_stages)
+        self._resolution_context: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -312,6 +314,9 @@ class DocumentPipeline:
     @property
     def capabilities(self) -> PipelineCapabilities:
         return self.registration.capabilities
+
+    def set_resolution_context(self, context: Mapping[str, Any]) -> None:
+        self._resolution_context = dict(context)
 
     def validate(self, *, request: ParseRequest, purpose: str = "parse") -> None:
         normalized_purpose = str(purpose or "parse").strip().lower()
@@ -345,6 +350,17 @@ class DocumentPipeline:
             items=items,
             metadata={
                 "normalized_items": len(items),
+                "pipeline_observability": {
+                    "pipeline_name": self.registration.pipeline_name,
+                    "options_hash": _options_hash(_effective_options(self.registration.options, request.options)),
+                    "cache_key": str(self._resolution_context.get("cache_key") or ""),
+                    "cache_hit": bool(self._resolution_context.get("cache_hit", False)),
+                    "cache": {
+                        "hits": int(self._resolution_context.get("cache_hits", 0) or 0),
+                        "misses": int(self._resolution_context.get("cache_misses", 0) or 0),
+                        "size": int(self._resolution_context.get("cache_size", 0) or 0),
+                    },
+                },
             },
         )
         active_runtime_stages: list[str] = []
@@ -365,6 +381,12 @@ class DocumentPipeline:
         metadata["active_runtime_stages"] = active_runtime_stages
         metadata["skipped_runtime_stages"] = skipped_runtime_stages
         metadata["failed_runtime_stages"] = failed_runtime_stages
+        observability = dict(metadata.get("pipeline_observability") or {})
+        observability["active_runtime_stages"] = list(active_runtime_stages)
+        observability["skipped_runtime_stages"] = list(skipped_runtime_stages)
+        observability["failed_runtime_stages"] = list(failed_runtime_stages)
+        observability["parser_backed_stages"] = list(self.registration.capabilities.parser_backed_stage_names)
+        metadata["pipeline_observability"] = observability
         document = replace(document, metadata=metadata)
         return document
 
@@ -454,8 +476,9 @@ class PipelineRegistry:
         request_options: Mapping[str, Any],
     ) -> DocumentPipeline:
         effective_options = _effective_options(registration.options, request_options)
-        cache_key = f"{registration.pipeline_name}:{_options_hash(effective_options)}"
-        return self.cache.get_or_create(
+        options_hash = _options_hash(effective_options)
+        cache_key = f"{registration.pipeline_name}:{options_hash}"
+        pipeline, cache_hit = self.cache.get_or_create(
             key=cache_key,
             factory=lambda: DocumentPipeline(
                 registration=registration,
@@ -467,6 +490,19 @@ class PipelineRegistry:
                 ),
             ),
         )
+        cache_snapshot = self.cache.describe()
+        pipeline.set_resolution_context(
+            {
+                "pipeline_name": registration.pipeline_name,
+                "options_hash": options_hash,
+                "cache_key": cache_key,
+                "cache_hit": cache_hit,
+                "cache_hits": cache_snapshot.get("hits", 0),
+                "cache_misses": cache_snapshot.get("misses", 0),
+                "cache_size": cache_snapshot.get("size", 0),
+            }
+        )
+        return pipeline
 
 
 def build_pipeline_registry(
@@ -514,11 +550,15 @@ def _build_document_items(blocks: Sequence[Block]) -> list[DocumentArtifactItem]
     for position, block in enumerate(blocks, start=1):
         metadata = dict(block.metadata)
         semantic_role = str(metadata.get("semantic_role") or block.type.value)
+        metadata["semantic_role"] = semantic_role
+        metadata.setdefault("item_kind", semantic_role)
+        metadata.setdefault("structure_tags", _build_structure_tags(metadata=metadata, semantic_role=semantic_role))
         items.append(
             DocumentArtifactItem(
                 item_id=f"itm-{position}",
                 block_ids=(block.block_id,),
                 kind=semantic_role,
+                semantic_role=semantic_role,
                 text=block.content,
                 page_number=_safe_int(metadata.get("page")),
                 metadata=metadata,
@@ -526,10 +566,25 @@ def _build_document_items(blocks: Sequence[Block]) -> list[DocumentArtifactItem]
                     "block_type": block.type.value,
                     "parser": str(metadata.get("parser") or ""),
                     "position": position,
+                    "semantic_role": semantic_role,
                 },
             )
         )
     return items
+
+
+def _build_structure_tags(*, metadata: Mapping[str, Any], semantic_role: str) -> list[str]:
+    tags: list[str] = [f"role:{semantic_role}"]
+    page_type = str(metadata.get("page_type") or "").strip().lower()
+    if page_type:
+        tags.append(f"page:{page_type}")
+    parser_name = str(metadata.get("parser") or "").strip().lower()
+    if parser_name:
+        tags.append(f"parser:{parser_name}")
+    kind = str(metadata.get("kind") or "").strip().lower()
+    if kind:
+        tags.append(f"kind:{kind}")
+    return tags
 
 
 def _safe_int(value: Any) -> int | None:

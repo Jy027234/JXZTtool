@@ -1,27 +1,33 @@
 {
   "config": "D:\\个人文件\\个人开发\\解析管理中台\\parsecore.toml",
-  "generated_at": "2026-04-25T17:37:08+0800",
+  "generated_at": "2026-04-27T22:34:15+0800",
   "post_process_overrides": {
     "strip_headers_footers": "default"
+  },
+  "request_option_overrides": {
+    "source": "regression-baseline"
   },
   "fixtures": [
     {
       "fixture": "D:\\app\\uploads\\27-81-17.pdf",
       "fixture_name": "27-81-17.pdf",
-      "elapsed_s": 2240.384,
+      "elapsed_s": 2101.508,
+      "request_options": {
+        "source": "regression-baseline"
+      },
       "block_counts": {
-        "total": 23464,
-        "paragraph": 23151,
+        "total": 23466,
+        "paragraph": 23153,
         "table": 312,
-        "chunks": 23464
+        "chunks": 23466
       },
       "quality": {
-        "total_blocks": 23464,
+        "total_blocks": 23466,
         "page_count": 1235,
         "median_block_length": 30.0,
-        "very_short_ratio": 0.18091544493692466,
-        "suspected_header_footer_total": 1991,
-        "numeric_heavy_total": 1887,
+        "very_short_ratio": 0.180644336486832,
+        "suspected_header_footer_total": 1993,
+        "numeric_heavy_total": 1889,
         "long_block_total": 19,
         "noisy_pages": [
           {
@@ -43,22 +49,13 @@
             "max_length": 79
           },
           {
-            "page_number": 1050,
-            "block_count": 38,
-            "median_length": 6.0,
-            "very_short_ratio": 0.7631578947368421,
-            "suspected_header_footer": 4,
-            "numeric_heavy": 4,
-            "max_length": 115
-          },
-          {
-            "page_number": 774,
+            "page_number": 1196,
             "block_count": 32,
-            "median_length": 8.0,
+            "median_length": 7.5,
             "very_short_ratio": 0.75,
             "suspected_header_footer": 1,
             "numeric_heavy": 1,
-            "max_length": 92
+            "max_length": 115
           },
           {
             "page_number": 1150,
@@ -70,6 +67,15 @@
             "max_length": 85
           },
           {
+            "page_number": 774,
+            "block_count": 31,
+            "median_length": 8.0,
+            "very_short_ratio": 0.7419354838709677,
+            "suspected_header_footer": 1,
+            "numeric_heavy": 1,
+            "max_length": 92
+          },
+          {
             "page_number": 1102,
             "block_count": 27,
             "median_length": 6.0,
@@ -77,15 +83,6 @@
             "suspected_header_footer": 1,
             "numeric_heavy": 1,
             "max_length": 83
-          },
-          {
-            "page_number": 1196,
-            "block_count": 33,
-            "median_length": 8.0,
-            "very_short_ratio": 0.7272727272727273,
-            "suspected_header_footer": 1,
-            "numeric_heavy": 1,
-            "max_length": 116
           },
           {
             "page_number": 1104,
@@ -113,6 +110,15 @@
             "suspected_header_footer": 1,
             "numeric_heavy": 1,
             "max_length": 116
+          },
+          {
+            "page_number": 1050,
+            "block_count": 37,
+            "median_length": 6.0,
+            "very_short_ratio": 0.7027027027027027,
+            "suspected_header_footer": 2,
+            "numeric_heavy": 2,
+            "max_length": 115
           }
         ]
       },
@@ -121,8 +127,283 @@
         "multi_column_pages": 2,
         "header_footer_stripped_pages": 0,
         "header_footer_stripped_blocks": 0,
+        "ocr_attempted_pages": 1235,
+        "ocr_attempted_blocks": 23465,
         "ocr_fallback_pages": 1235,
-        "ocr_fallback_blocks": 23463
+        "ocr_fallback_blocks": 23465,
+        "ocr_failed_pages": 0,
+        "ocr_failed_blocks": 0,
+        "layout_elapsed_s": 99.71959700000001,
+        "ocr_engine_init_elapsed_s": 1.298843,
+        "ocr_render_elapsed_s": 104.515047,
+        "ocr_input_prepare_elapsed_s": 3.357167,
+        "ocr_engine_exec_elapsed_s": 1843.965023,
+        "ocr_call_elapsed_s": 1847.339244,
+        "ocr_provider_elapsed_s": 1753.655384,
+        "ocr_provider_det_elapsed_s": 255.892175,
+        "ocr_provider_cls_elapsed_s": 51.934889,
+        "ocr_provider_rec_elapsed_s": 1445.828336,
+        "ocr_provider_crop_count": 47615,
+        "ocr_provider_cls_rotate_positive_count": 5945,
+        "ocr_provider_cls_rotate_high_count": 2931,
+        "ocr_postprocess_elapsed_s": 0.45867600000000003,
+        "ocr_total_elapsed_s": 1954.301599,
+        "max_ocr_page_elapsed_s": 6.476632,
+        "ocr_hot_pages": [
+          {
+            "page_number": 4,
+            "ocr_total_elapsed_s": 6.476632,
+            "ocr_engine_exec_elapsed_s": 6.391121,
+            "ocr_provider_cls_elapsed_s": 0.04674,
+            "ocr_provider_crop_count": 53,
+            "ocr_provider_cls_rotate_positive_count": 26,
+            "ocr_provider_cls_rotate_high_count": 17,
+            "cls_rotate_positive_ratio": 0.49056603773584906,
+            "cls_rotate_high_ratio": 0.32075471698113206
+          },
+          {
+            "page_number": 3,
+            "ocr_total_elapsed_s": 6.460104,
+            "ocr_engine_exec_elapsed_s": 6.368555,
+            "ocr_provider_cls_elapsed_s": 0.055614,
+            "ocr_provider_crop_count": 55,
+            "ocr_provider_cls_rotate_positive_count": 24,
+            "ocr_provider_cls_rotate_high_count": 15,
+            "cls_rotate_positive_ratio": 0.43636363636363634,
+            "cls_rotate_high_ratio": 0.2727272727272727
+          },
+          {
+            "page_number": 109,
+            "ocr_total_elapsed_s": 5.342826,
+            "ocr_engine_exec_elapsed_s": 5.265655,
+            "ocr_provider_cls_elapsed_s": 0.043737,
+            "ocr_provider_crop_count": 56,
+            "ocr_provider_cls_rotate_positive_count": 20,
+            "ocr_provider_cls_rotate_high_count": 10,
+            "cls_rotate_positive_ratio": 0.35714285714285715,
+            "cls_rotate_high_ratio": 0.17857142857142858
+          },
+          {
+            "page_number": 690,
+            "ocr_total_elapsed_s": 5.026289,
+            "ocr_engine_exec_elapsed_s": 4.888996,
+            "ocr_provider_cls_elapsed_s": 0.103947,
+            "ocr_provider_crop_count": 73,
+            "ocr_provider_cls_rotate_positive_count": 17,
+            "ocr_provider_cls_rotate_high_count": 8,
+            "cls_rotate_positive_ratio": 0.2328767123287671,
+            "cls_rotate_high_ratio": 0.1095890410958904
+          },
+          {
+            "page_number": 107,
+            "ocr_total_elapsed_s": 5.013705,
+            "ocr_engine_exec_elapsed_s": 4.947653,
+            "ocr_provider_cls_elapsed_s": 0.047379,
+            "ocr_provider_crop_count": 61,
+            "ocr_provider_cls_rotate_positive_count": 21,
+            "ocr_provider_cls_rotate_high_count": 9,
+            "cls_rotate_positive_ratio": 0.3442622950819672,
+            "cls_rotate_high_ratio": 0.14754098360655737
+          },
+          {
+            "page_number": 688,
+            "ocr_total_elapsed_s": 4.687286,
+            "ocr_engine_exec_elapsed_s": 4.566432,
+            "ocr_provider_cls_elapsed_s": 0.074198,
+            "ocr_provider_crop_count": 71,
+            "ocr_provider_cls_rotate_positive_count": 7,
+            "ocr_provider_cls_rotate_high_count": 5,
+            "cls_rotate_positive_ratio": 0.09859154929577464,
+            "cls_rotate_high_ratio": 0.07042253521126761
+          },
+          {
+            "page_number": 720,
+            "ocr_total_elapsed_s": 4.640702,
+            "ocr_engine_exec_elapsed_s": 4.544742,
+            "ocr_provider_cls_elapsed_s": 0.073079,
+            "ocr_provider_crop_count": 71,
+            "ocr_provider_cls_rotate_positive_count": 16,
+            "ocr_provider_cls_rotate_high_count": 7,
+            "cls_rotate_positive_ratio": 0.22535211267605634,
+            "cls_rotate_high_ratio": 0.09859154929577464
+          },
+          {
+            "page_number": 108,
+            "ocr_total_elapsed_s": 4.571676,
+            "ocr_engine_exec_elapsed_s": 4.49626,
+            "ocr_provider_cls_elapsed_s": 0.044977,
+            "ocr_provider_crop_count": 58,
+            "ocr_provider_cls_rotate_positive_count": 17,
+            "ocr_provider_cls_rotate_high_count": 9,
+            "cls_rotate_positive_ratio": 0.29310344827586204,
+            "cls_rotate_high_ratio": 0.15517241379310345
+          },
+          {
+            "page_number": 689,
+            "ocr_total_elapsed_s": 4.510105,
+            "ocr_engine_exec_elapsed_s": 4.399214,
+            "ocr_provider_cls_elapsed_s": 0.079646,
+            "ocr_provider_crop_count": 73,
+            "ocr_provider_cls_rotate_positive_count": 15,
+            "ocr_provider_cls_rotate_high_count": 5,
+            "cls_rotate_positive_ratio": 0.2054794520547945,
+            "cls_rotate_high_ratio": 0.0684931506849315
+          },
+          {
+            "page_number": 945,
+            "ocr_total_elapsed_s": 4.408579,
+            "ocr_engine_exec_elapsed_s": 4.292992,
+            "ocr_provider_cls_elapsed_s": 0.080571,
+            "ocr_provider_crop_count": 75,
+            "ocr_provider_cls_rotate_positive_count": 7,
+            "ocr_provider_cls_rotate_high_count": 3,
+            "cls_rotate_positive_ratio": 0.09333333333333334,
+            "cls_rotate_high_ratio": 0.04
+          }
+        ],
+        "ocr_sparse_cls_pages": [
+          {
+            "page_number": 21,
+            "ocr_total_elapsed_s": 2.602118,
+            "ocr_engine_exec_elapsed_s": 2.543105,
+            "ocr_provider_cls_elapsed_s": 0.153559,
+            "ocr_provider_crop_count": 164,
+            "ocr_provider_cls_rotate_positive_count": 2,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.012195121951219513,
+            "cls_rotate_high_ratio": 0.006097560975609756
+          },
+          {
+            "page_number": 33,
+            "ocr_total_elapsed_s": 1.880378,
+            "ocr_engine_exec_elapsed_s": 1.809881,
+            "ocr_provider_cls_elapsed_s": 0.144611,
+            "ocr_provider_crop_count": 163,
+            "ocr_provider_cls_rotate_positive_count": 7,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.04294478527607362,
+            "cls_rotate_high_ratio": 0.006134969325153374
+          },
+          {
+            "page_number": 38,
+            "ocr_total_elapsed_s": 1.394333,
+            "ocr_engine_exec_elapsed_s": 1.340197,
+            "ocr_provider_cls_elapsed_s": 0.146472,
+            "ocr_provider_crop_count": 162,
+            "ocr_provider_cls_rotate_positive_count": 3,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.018518518518518517,
+            "cls_rotate_high_ratio": 0.006172839506172839
+          },
+          {
+            "page_number": 34,
+            "ocr_total_elapsed_s": 2.303074,
+            "ocr_engine_exec_elapsed_s": 2.223214,
+            "ocr_provider_cls_elapsed_s": 0.230247,
+            "ocr_provider_crop_count": 157,
+            "ocr_provider_cls_rotate_positive_count": 4,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.025477707006369428,
+            "cls_rotate_high_ratio": 0.006369426751592357
+          },
+          {
+            "page_number": 36,
+            "ocr_total_elapsed_s": 1.908505,
+            "ocr_engine_exec_elapsed_s": 1.844579,
+            "ocr_provider_cls_elapsed_s": 0.155225,
+            "ocr_provider_crop_count": 155,
+            "ocr_provider_cls_rotate_positive_count": 3,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.01935483870967742,
+            "cls_rotate_high_ratio": 0.0064516129032258064
+          },
+          {
+            "page_number": 23,
+            "ocr_total_elapsed_s": 2.086677,
+            "ocr_engine_exec_elapsed_s": 2.032182,
+            "ocr_provider_cls_elapsed_s": 0.132661,
+            "ocr_provider_crop_count": 144,
+            "ocr_provider_cls_rotate_positive_count": 3,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.020833333333333332,
+            "cls_rotate_high_ratio": 0.006944444444444444
+          },
+          {
+            "page_number": 27,
+            "ocr_total_elapsed_s": 1.448544,
+            "ocr_engine_exec_elapsed_s": 1.395691,
+            "ocr_provider_cls_elapsed_s": 0.127507,
+            "ocr_provider_crop_count": 144,
+            "ocr_provider_cls_rotate_positive_count": 2,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.013888888888888888,
+            "cls_rotate_high_ratio": 0.006944444444444444
+          },
+          {
+            "page_number": 29,
+            "ocr_total_elapsed_s": 2.22579,
+            "ocr_engine_exec_elapsed_s": 2.175091,
+            "ocr_provider_cls_elapsed_s": 0.109738,
+            "ocr_provider_crop_count": 143,
+            "ocr_provider_cls_rotate_positive_count": 2,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.013986013986013986,
+            "cls_rotate_high_ratio": 0.006993006993006993
+          },
+          {
+            "page_number": 25,
+            "ocr_total_elapsed_s": 1.728973,
+            "ocr_engine_exec_elapsed_s": 1.652762,
+            "ocr_provider_cls_elapsed_s": 0.130558,
+            "ocr_provider_crop_count": 138,
+            "ocr_provider_cls_rotate_positive_count": 1,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.007246376811594203,
+            "cls_rotate_high_ratio": 0.007246376811594203
+          },
+          {
+            "page_number": 31,
+            "ocr_total_elapsed_s": 2.00396,
+            "ocr_engine_exec_elapsed_s": 1.937478,
+            "ocr_provider_cls_elapsed_s": 0.156475,
+            "ocr_provider_crop_count": 135,
+            "ocr_provider_cls_rotate_positive_count": 1,
+            "ocr_provider_cls_rotate_high_count": 1,
+            "cls_rotate_positive_ratio": 0.007407407407407408,
+            "cls_rotate_high_ratio": 0.007407407407407408
+          }
+        ]
+      },
+      "layout_quality": {
+        "enabled": true,
+        "multi_column_pages": 2,
+        "applied_pages": 2,
+        "applied_blocks": 164,
+        "applied_page_ratio": 1.0,
+        "strategy_counts": {
+          "column-reflow": 164
+        }
+      },
+      "embedding_quality": {
+        "total_chunks": 23466,
+        "embedded_chunks": 0,
+        "embedded_chunk_ratio": 0.0,
+        "mean_embedding_dim_norm": 0.0
+      },
+      "table_quality": {
+        "enabled": false,
+        "output_format": "markdown",
+        "table_block_count": 312,
+        "table_blocks_with_cells": 312,
+        "table_chunk_count": 312,
+        "rendered_ready_chunks": 0,
+        "rendered_ready_ratio": 0.0,
+        "markdown_ready_chunks": 0,
+        "tsv_ready_chunks": 175,
+        "total_rows": 1025,
+        "total_cols": 1099,
+        "mean_rows_per_table": 3.285,
+        "mean_cols_per_table": 3.522
       }
     }
   ]

@@ -381,6 +381,8 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(document_payload["job"]["job_id"], job_id)
                 self.assertGreaterEqual(len(document_payload["blocks"]), 2)
                 self.assertEqual(len(document_payload["chunks"]), len(document_payload["blocks"]))
+                self.assertEqual(document_payload["index_manifest"]["layers"][0]["name"], "primary")
+                self.assertEqual(document_payload["index_manifest"]["layers"][1]["name"], "structure")
 
                 wrong_tenant_document = client.get(
                     "/v1/parse/documents/doc-api-001",
@@ -425,6 +427,44 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(filtered.json()["retrieval_mode"], "keyword-fallback")
                 self.assertEqual(len(filtered.json()["items"]), 1)
                 self.assertEqual(filtered.json()["items"][0]["semantic_role"], "title")
+
+                high_precision = client.get(
+                    "/v1/parse/documents/doc-api-001/search",
+                    params={"q": "maintenance", "tenant_id": "tenant-alpha", "index_layer": "high_precision"},
+                )
+                self.assertEqual(high_precision.status_code, 200)
+                self.assertEqual(high_precision.json()["index_layer"], "high_precision")
+
+                invalid_layer = client.get(
+                    "/v1/parse/documents/doc-api-001/search",
+                    params={"q": "maintenance", "tenant_id": "tenant-alpha", "index_layer": "invalid"},
+                )
+                self.assertEqual(invalid_layer.status_code, 400)
+                self.assertEqual(invalid_layer.json()["code"], "invalid_index_layer")
+
+                structure = client.get(
+                    "/v1/parse/documents/doc-api-001/structure-search",
+                    params={"q": "maintenance manual", "tenant_id": "tenant-alpha", "tag": "page:body"},
+                )
+                self.assertEqual(structure.status_code, 200)
+                self.assertEqual(structure.json()["retrieval_mode"], "structure-keyword")
+                self.assertGreaterEqual(len(structure.json()["items"]), 1)
+
+                tasks = client.get(
+                    "/v1/parse/documents/doc-api-001/tasks/search",
+                    params={"q": "maintenance", "tenant_id": "tenant-alpha"},
+                )
+                self.assertEqual(tasks.status_code, 200)
+                self.assertIn("retrieval_mode", tasks.json())
+
+                index_metrics = client.get(
+                    "/v1/parse/indexes/metrics",
+                    params={"tenant_id": "tenant-alpha", "since_hours": 24},
+                )
+                self.assertEqual(index_metrics.status_code, 200)
+                self.assertIn("structure", index_metrics.json()["layer_counts"])
+                self.assertIn("high_precision", index_metrics.json())
+                self.assertIn("search_effectiveness", index_metrics.json())
 
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
