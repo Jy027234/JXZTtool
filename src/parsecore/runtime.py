@@ -846,7 +846,13 @@ class ParseRuntime:
             "items": items,
         }
 
-    def index_metrics(self, *, tenant_id: str | None = None, since_hours: float | None = None) -> dict[str, Any]:
+    def index_metrics(
+        self,
+        *,
+        tenant_id: str | None = None,
+        since_hours: float | None = None,
+        trend_windows_hours: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
         jobs = self.list_jobs(tenant_id=tenant_id, since_hours=since_hours)
         normalized_tenant_filter = (tenant_id or "").strip() or None
         manifests: list[dict[str, Any]] = []
@@ -889,17 +895,27 @@ class ParseRuntime:
             tenant_id=normalized_tenant_filter,
             since_hours=since_hours,
         )
+        normalized_trend_windows = _normalize_trend_windows_hours(trend_windows_hours)
+        search_effectiveness_trends: dict[str, dict[str, dict[str, Any]]] = {}
+        for window_hours in normalized_trend_windows:
+            window_label = _format_trend_window_label(window_hours)
+            search_effectiveness_trends[window_label] = self._build_search_effectiveness_snapshot(
+                tenant_id=normalized_tenant_filter,
+                since_hours=window_hours,
+            )
 
         high_precision_search = search_effectiveness.get("high_precision", {})
         return {
             "tenant_id": (tenant_id or "").strip() or None,
             "since_hours": float(since_hours) if since_hours is not None else None,
+            "trend_windows_hours": list(normalized_trend_windows),
             "documents": document_total,
             "layer_counts": layer_counts,
             "layer_items": layer_items,
             "semantic_role_coverage": semantic_roles,
             "index_versions": {key: value for key, value in versions.items() if key},
             "search_effectiveness": search_effectiveness,
+            "search_effectiveness_trends": search_effectiveness_trends,
             "high_precision": {
                 "documents": high_precision_docs,
                 "document_coverage": document_coverage,
@@ -1800,6 +1816,32 @@ def _normalize_chunk_index_layer(value: str | None) -> str:
     if normalized in {"primary", "high_precision"}:
         return normalized
     return "primary"
+
+
+def _normalize_trend_windows_hours(values: Sequence[float] | None) -> tuple[float, ...]:
+    if not values:
+        return (1.0, 6.0, 24.0)
+    normalized: list[float] = []
+    for raw in values:
+        try:
+            hours = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if hours <= 0:
+            continue
+        rounded = round(hours, 3)
+        if rounded in normalized:
+            continue
+        normalized.append(rounded)
+    if not normalized:
+        return (1.0, 6.0, 24.0)
+    return tuple(sorted(normalized))
+
+
+def _format_trend_window_label(hours: float) -> str:
+    if float(hours).is_integer():
+        return f"{int(hours)}h"
+    return f"{hours:g}h"
 
 
 def _select_high_precision_chunks(chunks: Sequence[Chunk]) -> tuple[Chunk, ...]:

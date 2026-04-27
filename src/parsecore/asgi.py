@@ -685,6 +685,7 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
         runtime_obj: ParseRuntime = request.app.state.runtime
         tenant_id = request.query_params.get("tenant_id")
         since_hours_raw = request.query_params.get("since_hours")
+        trend_windows_raw = request.query_params.getlist("trend_window_hours")
         since_hours: float | None = None
         if since_hours_raw is not None:
             try:
@@ -693,7 +694,36 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
                 return _error_response(request, code="invalid_since_hours", message="Invalid since_hours", status_code=400)
             if since_hours <= 0:
                 return _error_response(request, code="invalid_since_hours", message="Invalid since_hours", status_code=400)
-        return JSONResponse(_to_payload(runtime_obj.index_metrics(tenant_id=tenant_id, since_hours=since_hours)))
+        trend_windows_hours: list[float] | None = None
+        if trend_windows_raw:
+            trend_windows_hours = []
+            for raw in trend_windows_raw:
+                try:
+                    hours = float(raw)
+                except ValueError:
+                    return _error_response(
+                        request,
+                        code="invalid_trend_window_hours",
+                        message="Invalid trend_window_hours",
+                        status_code=400,
+                    )
+                if hours <= 0:
+                    return _error_response(
+                        request,
+                        code="invalid_trend_window_hours",
+                        message="Invalid trend_window_hours",
+                        status_code=400,
+                    )
+                trend_windows_hours.append(hours)
+        return JSONResponse(
+            _to_payload(
+                runtime_obj.index_metrics(
+                    tenant_id=tenant_id,
+                    since_hours=since_hours,
+                    trend_windows_hours=trend_windows_hours,
+                )
+            )
+        )
 
     async def reparse_document(request: Request) -> JSONResponse:
         try:

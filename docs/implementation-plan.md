@@ -320,6 +320,8 @@
 - 索引观测已补 high_precision 细粒度指标：`index_metrics` 除 layer count/item 之外，新增 `high_precision.documents/document_coverage/items/item_ratio_vs_primary`，可直接衡量高精度层覆盖规模与相对成本。
 - 检索效果观测已接入：`index_metrics` 新增 `search_effectiveness`（按 `primary/high_precision` 统计 `queries/hit_rate/avg_hits/max_hits/zero_hit_queries`），并在 `high_precision` 汇总里补 `query_count/query_hit_rate/query_avg_hits`，形成覆盖-成本-效果闭环。
 - 检索效果观测现已具备重启延续性：查询效果事件会写入 JobStore（SQLite/Postgres 均支持），`index_metrics` 优先从持久层聚合读取，不再只依赖进程内缓存，runtime 重建后指标可持续回放。
+- 观测接口已补趋势桶：`index_metrics.search_effectiveness_trends` 现提供 `1h/6h/24h` 按层命中趋势快照，可直接给 dashboard 做近期走势展示而不需二次聚合。
+- 趋势窗口已升级为可配置：`/v1/parse/indexes/metrics` 支持重复参数 `trend_window_hours`（如 `2,12`），runtime 会按传入窗口输出对应趋势桶并保留默认回退值，避免 dashboard 被固定窗口绑死。
 - 本轮验证结果：`tests.test_runtime`、`tests.test_asgi`、`tests.test_bootstrap_routing` 与全量 `unittest discover -s tests` 均通过；当前结果为 `167 passed, 5 skipped`。
 
 #### 索引策略

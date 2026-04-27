@@ -465,6 +465,27 @@ class ParseApiTests(unittest.TestCase):
                 self.assertIn("structure", index_metrics.json()["layer_counts"])
                 self.assertIn("high_precision", index_metrics.json())
                 self.assertIn("search_effectiveness", index_metrics.json())
+                self.assertIn("search_effectiveness_trends", index_metrics.json())
+
+                custom_trend = client.get(
+                    "/v1/parse/indexes/metrics",
+                    params=[
+                        ("tenant_id", "tenant-alpha"),
+                        ("trend_window_hours", "2"),
+                        ("trend_window_hours", "12"),
+                    ],
+                )
+                self.assertEqual(custom_trend.status_code, 200)
+                self.assertEqual(custom_trend.json()["trend_windows_hours"], [2.0, 12.0])
+                self.assertIn("2h", custom_trend.json()["search_effectiveness_trends"])
+                self.assertIn("12h", custom_trend.json()["search_effectiveness_trends"])
+
+                invalid_trend = client.get(
+                    "/v1/parse/indexes/metrics",
+                    params={"tenant_id": "tenant-alpha", "trend_window_hours": "0"},
+                )
+                self.assertEqual(invalid_trend.status_code, 400)
+                self.assertEqual(invalid_trend.json()["code"], "invalid_trend_window_hours")
 
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

@@ -59,6 +59,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 - Phase 7 观测补齐：`/v1/parse/indexes/metrics` 已新增 `high_precision` 汇总指标（documents/document_coverage/items/item_ratio_vs_primary），便于持续评估高精度层覆盖与成本。
 - Phase 7 效果观测补齐：`/v1/parse/indexes/metrics` 现同时返回按索引层聚合的 `search_effectiveness` 与 `high_precision.query_*` 指标，可直接观察高精度层查询命中率与平均命中量。
 - Phase 7 可观测增强：检索效果指标已改为持久化聚合（JobStore），不再只依赖进程内状态；runtime 重启后 `search_effectiveness` 与 `high_precision.query_*` 仍可延续读取。
+- Phase 7 可观测再增强：`/v1/parse/indexes/metrics` 现增加 `search_effectiveness_trends`（`1h/6h/24h`），支持直接观察各索引层查询效果的短周期趋势。
+- Phase 7 可观测再收口：趋势窗口不再写死，`/v1/parse/indexes/metrics` 现可通过 `trend_window_hours` 自定义桶（支持多值），并对非法值返回 `invalid_trend_window_hours`。
 - 单测耗时约 `7.8s`。
 - 默认 runtime describe 正常，当前形态为 `index_mode = hybrid`、`execution_mode = inline`。
 

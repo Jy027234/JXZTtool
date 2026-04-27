@@ -1044,6 +1044,10 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertGreater(summary["query_count"], 0)
         self.assertGreater(summary["query_hit_rate"], 0.0)
         self.assertIn("high_precision", metrics["search_effectiveness"])
+        self.assertIn("search_effectiveness_trends", metrics)
+        self.assertIn("1h", metrics["search_effectiveness_trends"])
+        self.assertIn("6h", metrics["search_effectiveness_trends"])
+        self.assertIn("24h", metrics["search_effectiveness_trends"])
 
     def test_index_metrics_search_effectiveness_survives_runtime_rebuild(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1071,6 +1075,32 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertIn("high_precision", metrics["search_effectiveness"])
         self.assertGreater(metrics["high_precision"]["query_count"], 0)
+
+    def test_index_metrics_supports_custom_trend_windows(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx(
+                "metrics-custom-trend.docx",
+                ["Title", "hydraulic pressure warning checklist " * 8],
+            )
+            runtime = build_runtime(workspace.config_path)
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-index-metrics-custom-trend",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"index": {"embedding_tiers": ["small", "large"]}},
+                )
+            )
+            runtime.search_document_with_mode(
+                doc_id="doc-index-metrics-custom-trend",
+                query="hydraulic pressure warning checklist",
+                index_layer="high_precision",
+            )
+            metrics = runtime.index_metrics(trend_windows_hours=[2, 12])
+
+        self.assertEqual(metrics["trend_windows_hours"], [2.0, 12.0])
+        self.assertIn("2h", metrics["search_effectiveness_trends"])
+        self.assertIn("12h", metrics["search_effectiveness_trends"])
 
     def test_batch_reindex_rebuilds_chunks_for_latest_documents(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
