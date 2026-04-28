@@ -44,6 +44,38 @@ extensions = [".docx"]
 """.strip()
 
 
+LIMITED_UPLOAD_API_CONFIG = """
+[project]
+name = "test-api-upload-limit"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+max_upload_bytes = 4
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
 QUOTA_ENFORCED_API_CONFIG = """
 [project]
 name = "test-api"
@@ -710,6 +742,47 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["code"], "invalid_base64_encoding")
             self.assertEqual(body["message"], "Invalid base64 encoding")
             self.assertEqual(body["trace_id"], response.headers["x-trace-id"])
+
+    def test_parse_batch_endpoint_rejects_oversized_file(self) -> None:
+        with TemporaryWorkspace(LIMITED_UPLOAD_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/batch",
+                    json={
+                        "file_base64": base64.b64encode(b"12345").decode("ascii"),
+                        "file_name": "too-big.txt",
+                        "media_type": "text/plain",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 413)
+            self.assertIn("x-trace-id", response.headers)
+            body = response.json()
+            self.assertFalse(body["success"])
+            self.assertEqual(body["parser_used"], "none")
+            self.assertEqual(body["code"], "file_too_large")
+            self.assertEqual(body["message"], "File exceeds configured upload limit")
+            self.assertEqual(body["detail"]["actual_bytes"], 5)
+            self.assertEqual(body["detail"]["limit_bytes"], 4)
+
+    def test_parse_upload_endpoint_rejects_oversized_file(self) -> None:
+        with TemporaryWorkspace(LIMITED_UPLOAD_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse",
+                    files={"file": ("too-big.txt", b"12345", "text/plain")},
+                )
+
+            self.assertEqual(response.status_code, 413)
+            self.assertIn("x-trace-id", response.headers)
+            body = response.json()
+            self.assertEqual(body["error"], "file_too_large")
+            self.assertEqual(body["code"], "file_too_large")
+            self.assertEqual(body["message"], "File exceeds configured upload limit")
+            self.assertEqual(body["detail"]["actual_bytes"], 5)
+            self.assertEqual(body["detail"]["limit_bytes"], 4)
 
     def test_parse_batch_endpoint_returns_429_when_quota_exceeded(self) -> None:
         with TemporaryWorkspace(QUOTA_ENFORCED_API_CONFIG) as workspace:

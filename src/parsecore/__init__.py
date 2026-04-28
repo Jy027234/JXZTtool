@@ -1,4 +1,3 @@
-from .asgi import create_app
 from .bootstrap import build_runtime
 from .jobcard import JobcardProductAdapter, build_jobcard_document_patch, build_jobcard_failure_patch, mount_into_fastapi
 from .models import Block, BlockType, Chunk, ChunkSearchHit, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
@@ -34,3 +33,11 @@ __all__ = [
     "mount_into_fastapi",
     "run_worker",
 ]
+
+
+def __getattr__(name: str):
+    if name == "create_app":
+        from .asgi import create_app
+
+        return create_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

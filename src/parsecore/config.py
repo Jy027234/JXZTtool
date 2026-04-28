@@ -23,6 +23,7 @@ class RuntimeSettings:
     execution_mode: str
     max_workers: int
     poll_interval_ms: int
+    max_upload_bytes: int = 0
     max_inflight_jobs: int = 0
     quota_enforce: bool = False
     quota_window_hours: float = 24.0
@@ -196,6 +197,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             execution_mode=str(runtime.get("execution_mode", "inline")),
             max_workers=int(runtime.get("max_workers", 2)),
             poll_interval_ms=int(runtime.get("poll_interval_ms", 1000)),
+            max_upload_bytes=int(runtime.get("max_upload_bytes", 0)),
             max_inflight_jobs=int(runtime.get("max_inflight_jobs", 0)),
             quota_enforce=bool(runtime.get("quota_enforce", False)),
             quota_window_hours=float(runtime.get("quota_window_hours", 24.0)),

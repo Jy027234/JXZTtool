@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import mimetypes
 import os
 from importlib.util import find_spec
@@ -11,6 +12,9 @@ import urllib.error
 import urllib.request
 
 from .config import OcrProviderSettings
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class OcrConfigurationError(RuntimeError):
@@ -339,7 +343,7 @@ class RapidOcrEngineAdapter:
                 )
 
             if self._engine.print_verbose:
-                print(f"dt_boxes num: {len(dt_boxes)}, elapse: {det_elapsed_s}")
+                _LOGGER.info("dt_boxes num: %s, elapse: %s", len(dt_boxes), det_elapsed_s)
 
             dt_boxes = self._engine.sorted_boxes(dt_boxes)
             img_crop_list = self._engine.get_crop_img_list(img, dt_boxes)
@@ -354,11 +358,11 @@ class RapidOcrEngineAdapter:
             ) = self._run_angle_cls(img_crop_list)
 
             if self._engine.print_verbose:
-                print(f"cls num: {len(img_crop_list)}, elapse: {cls_elapsed_s}")
+                _LOGGER.info("cls num: %s, elapse: %s", len(img_crop_list), cls_elapsed_s)
 
         rec_res, rec_elapsed_s = self._engine.text_recognizer(img_crop_list)
         if self._engine.print_verbose:
-            print(f"rec_res num: {len(rec_res)}, elapse: {rec_elapsed_s}")
+            _LOGGER.info("rec_res num: %s, elapse: %s", len(rec_res), rec_elapsed_s)
 
         filter_boxes, filter_rec_res = self._engine.filter_boxes_rec_by_score(dt_boxes, rec_res)
         fina_result = [

@@ -1,0 +1,86 @@
+name: ParseCore CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 18 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    name: Fast self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,parsers,storage]"
+      - name: Run fast gate
+        run: python tools/self_check.py --skip-regression --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
+      - name: Verify optional API boundary
+        run: python -m unittest tests.test_package_imports
+
+  regression:
+    name: Full regression suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,parsers,storage]"
+      - name: Run full gate
+        run: python tools/self_check.py --out "$RUNNER_TEMP/parsecore-self-check-full.json" --regression-timeout-seconds 900
+
+  postgres-pgvector:
+    name: Postgres and pgvector smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: parsecore
+          POSTGRES_PASSWORD: parsecore
+          POSTGRES_USER: parsecore
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U parsecore -d parsecore"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PARSECORE_TEST_POSTGRES_URL: postgresql://parsecore:parsecore@localhost:5432/parsecore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,storage]"
+      - name: Run Postgres smoke tests
+        run: python -m unittest tests.test_postgres_stores

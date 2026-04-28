@@ -42,13 +42,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 2. `1`：至少一项必需检查失败
 3. `2`：没有硬失败，但存在退化或超时
 
-## 2026-04-27 当前结论
+## 2026-04-28 当前结论
 
 ### 可靠性
 
 - 快速自检已通过。
 - 本轮等价验证已通过：全量 `unittest discover -s tests` 通过，`baseline.json` 与 `baseline.table-structure.primary.json` 的真实 `check` 均通过，并已将 layout/table 两类专项继续收口到同一回归工具路径。
-- 单测结果：`167 passed, 5 skipped`。
+- 单测结果：`173 passed, 5 skipped`。
+- 性能与稳定性补强：已新增分层 CI、同步上传大小保护和 OCR benchmark 专项工具。
 - 布局专项新增混排页顺序校验：正文与表格块不再按“先表后文”固定顺序输出，已改为按页面垂直锚点交错输出并由 `tests.test_pdf_parser_options` 覆盖。
 - 布局专项新增图注邻接校验：当 `Figure/Fig./Illustration` 标签被单独切段时，parser 会将其与下一段 caption 说明自动合并，已由 `tests.test_pdf_parser_figure_caption` 覆盖。
 - 结构索引准备项已收口：artifact typed item 已显式携带 `semantic_role` 与 `structure_tags`，并把 `semantic_role` 写入 provenance；同时 pipeline 级可观测信息已补齐 `pipeline_name/options_hash/cache_hit/cache_miss/active_stages` 并由 `tests.test_runtime` 覆盖。
@@ -61,7 +62,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 - Phase 7 可观测增强：检索效果指标已改为持久化聚合（JobStore），不再只依赖进程内状态；runtime 重启后 `search_effectiveness` 与 `high_precision.query_*` 仍可延续读取。
 - Phase 7 可观测再增强：`/v1/parse/indexes/metrics` 现增加 `search_effectiveness_trends`（`1h/6h/24h`），支持直接观察各索引层查询效果的短周期趋势。
 - Phase 7 可观测再收口：趋势窗口不再写死，`/v1/parse/indexes/metrics` 现可通过 `trend_window_hours` 自定义桶（支持多值），并对非法值返回 `invalid_trend_window_hours`。
-- 单测耗时约 `7.8s`。
+- 单测耗时约 `9.7s`。
 - 默认 runtime describe 正常，当前形态为 `index_mode = hybrid`、`execution_mode = inline`。
 
 ### 解析质量

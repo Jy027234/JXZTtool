@@ -30,6 +30,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - PDF / OCR 结构块 `semantic_role` 标注（如 `toc_entry`、`highlights_entry`、`warning`）
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可切换的 `inline` / `queue-worker` 执行模式
+- 同步上传入口的文件大小保护与分层 CI 门禁
 - 独立 worker 入口与容器运行骨架
 - 配置模板
 - 面向 jobcard 的接入建议与补丁适配器
@@ -48,6 +49,8 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)：宿主接 OCR provider 前的配置、探活、事件与回滚检查清单
 - [docs/go-live-readiness.md](docs/go-live-readiness.md)：主线版本进入产品灰度前的必做项、遗留问题分级与回滚口径
 - [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
+- [docs/performance-stability.md](docs/performance-stability.md)：分层 CI、上传保护与 OCR benchmark 的执行口径
+- [docs/gray-deployment.md](docs/gray-deployment.md)：queue-worker + Postgres + pgvector 灰度推荐配置与回滚口径
 - [archive/jobcard-host/README.md](archive/jobcard-host/README.md)：jobcard 宿主接线、切流与替换资料归档
 - [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)：jobcard 历史双跑记录、runbook 和辅助脚本归档
 
@@ -66,10 +69,12 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 ├─ docs/
 │  ├─ architecture.md
 │  ├─ go-live-readiness.md
+│  ├─ gray-deployment.md
 │  ├─ implementation-plan.md
-│  ├─ self-check-gate.md
 │  ├─ ocr-integration-checklist.md
-│  └─ ocr-gateway-contract.md
+│  ├─ ocr-gateway-contract.md
+│  ├─ performance-stability.md
+│  └─ self-check-gate.md
 ├─ src/
 │  └─ parsecore/
 │     ├─ __init__.py
@@ -164,6 +169,7 @@ docker compose --profile pgvector up -d --build
 - `parsecore-postgres` 通过 `pgvector` profile 提供，适合本地联调、自检和持久化验证
 - 若只想切 OCR provider，不改存储，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.remote-http.toml.example` 或你自己的配置文件
 - 若只想把 `chunk_embeddings` 与 hybrid search 路径在本地跑通，不依赖外部 key，可使用 `parsecore.pgvector.fake-embedding.toml.example`
+- 示例配置默认启用 `max_upload_bytes = 52428800`，同步上传超过 50 MiB 时返回 `413 file_too_large`
 
 运行测试：
 
@@ -182,6 +188,12 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 - 快速模式会执行单测和 runtime smoke
 - 全量模式去掉 `--skip-regression`，会额外跑 `var/regression/suite.json`
 - 最新 JSON 汇总写入 `var/self-check/latest.json`
+
+运行 OCR 长尾专项 benchmark：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/ocr_benchmark.py --config parsecore.toml --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
+```
 
 只重算 chunk / embedding（跳过重新解析源文件）：
 

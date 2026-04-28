@@ -1,0 +1,72 @@
+# 灰度推荐配置
+
+## 默认灰度档
+
+推荐以 `parsecore.pgvector.toml.example` 作为灰度基线：
+
+- `execution_mode = "queue-worker"`
+- `database_url = "postgresql://parsecore:parsecore@parsecore-postgres:5432/parsecore"`
+- `index.mode = "pgvector"`
+- `max_upload_bytes = 52428800`
+- RapidOCR 本地 provider
+- PDF dual-channel 和 bad-page OCR fallback 开启
+
+没有真实 embedding key 时，使用 `parsecore.pgvector.fake-embedding.toml.example` 完成本地持久化和索引链路验证。
+
+## 启动
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.toml.example"
+docker compose --profile pgvector up -d --build
+```
+
+本地无外部 embedding key：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.fake-embedding.toml.example"
+docker compose --profile pgvector up -d --build
+```
+
+## 灰度前检查
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+```
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.pgvector.toml.example
+```
+
+若有 Postgres 可用，设置 `PARSECORE_TEST_POSTGRES_URL` 后运行：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest tests.test_postgres_stores
+```
+
+## 灰度中观察
+
+- `GET /health`
+- `GET /v1/runtime`
+- `GET /v1/parse/metrics?sample_size=200`
+- `GET /v1/parse/events?limit=100`
+- `GET /v1/parse/indexes/metrics`
+- `GET /v1/parse/prometheus`
+
+重点观察：
+
+- `failed` / `dead_lettered` 任务是否增长
+- `too_many_inflight_jobs` 是否频繁出现
+- `ocr_failed` 是否出现新集中样本
+- `high_precision` 覆盖率是否异常低
+- 上传超限是否集中在特定租户或客户端
+
+## 回滚
+
+保守回滚到 SQLite queue-worker：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.queue.toml"
+docker compose up -d --build
+```
+
+需要临时关闭上传限制时，将对应配置中的 `max_upload_bytes` 改为 `0` 后重启 API。需要临时关闭 OCR fallback 时，把 PDF parser 的 `ocr_bad_pages` 改为 `false` 后重启 API / worker。

@@ -253,6 +253,7 @@ class ParseRuntime:
                 "execution_mode": self.settings.runtime.execution_mode,
                 "max_workers": self.settings.runtime.max_workers,
                 "poll_interval_ms": self.settings.runtime.poll_interval_ms,
+                "max_upload_bytes": self.settings.runtime.max_upload_bytes,
                 "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
             },
             "translation": {
@@ -1557,11 +1558,6 @@ class ParseRuntime:
                 )
                 return None
 
-
-def _tokenize(text: str) -> list[str]:
-    return [token.lower() for token in _TOKEN_PATTERN.findall(text or "") if token.strip()]
-
-
 def _job_duration_seconds(job: Any) -> float | None:
     created_at = getattr(job, "created_at", None)
     updated_at = getattr(job, "updated_at", None)
@@ -1784,7 +1780,11 @@ def _keyword_match_score(*, query: str, text: str) -> float:
 
 
 def _tokenize(text: str) -> tuple[str, ...]:
-    return tuple(token.lower() for token in _TOKEN_PATTERN.findall(str(text or "")))
+    return tuple(
+        token.lower()
+        for token in _TOKEN_PATTERN.findall(str(text or ""))
+        if token.strip()
+    )
 
 
 def _is_task_like_entry(text: str, semantic_role: str, tags: Sequence[str]) -> bool:

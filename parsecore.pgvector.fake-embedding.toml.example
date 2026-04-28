@@ -7,6 +7,8 @@ execution_mode = "queue-worker"
 max_workers = 2
 max_inflight_jobs = 0
 poll_interval_ms = 500
+# Gray-release default: reject files above 50 MiB before parser execution.
+max_upload_bytes = 52428800
 quota_enforce = false
 quota_window_hours = 24
 quota_default_limit_units = 0
