@@ -31,6 +31,7 @@ class RuntimeSettings:
     quota_limits: Mapping[str, int] = field(default_factory=lambda: _EMPTY_MAPPING)
     max_attempts: int = 3
     log_path: str = "var/logs/job_events.jsonl"
+    api_key_env: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -128,6 +129,14 @@ def _freeze_int_mapping(value: Any) -> Mapping[str, int]:
     return MappingProxyType(normalized)
 
 
+def _normalize_product_adapter(value: Any) -> str:
+    # Jobcard compatibility wiring has been removed from the mainline runtime.
+    # Keep parsing the field so old configs still load, but collapse all values
+    # to the only supported adapter contract: embedded.
+    _ = str(value or "").strip().lower()
+    return "embedded"
+
+
 def load_settings(path: str | Path) -> ParseCoreSettings:
     config_path = Path(path)
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -192,7 +201,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         index_mode=str(index.get("mode", "hybrid")),
         translation_enabled=bool(translation.get("enabled", True)),
         translation_strategy=str(translation.get("strategy", "lazy")),
-        product_adapter=str(product.get("adapter", "embedded")),
+        product_adapter=_normalize_product_adapter(product.get("adapter", "embedded")),
         runtime=RuntimeSettings(
             execution_mode=str(runtime.get("execution_mode", "inline")),
             max_workers=int(runtime.get("max_workers", 2)),
@@ -205,6 +214,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             quota_limits=_freeze_int_mapping(runtime.get("quota_limits")),
             max_attempts=int(runtime.get("max_attempts", 3)),
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
+            api_key_env=str(runtime.get("api_key_env", "")),
         ),
         parsers=parser_settings,
         providers=ProviderSettings(

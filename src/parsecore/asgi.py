@@ -32,6 +32,27 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, api_key: str, public_paths: tuple[str, ...] = ("/health",)):
+        super().__init__(app)
+        self.api_key = api_key
+        self.public_paths = frozenset(public_paths)
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in self.public_paths:
+            return await call_next(request)
+        if _extract_api_key(request) != self.api_key:
+            response = _error_response(
+                request,
+                code="unauthorized",
+                message="Missing or invalid API key",
+                status_code=401,
+            )
+            response.headers.setdefault("WWW-Authenticate", "Bearer")
+            return response
+        return await call_next(request)
+
+
 def _resolve_api_version() -> str:
     try:
         return package_version("parsecore-starter")
@@ -122,6 +143,7 @@ class QueueSubmissionRunner:
 
 def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     runtime = build_runtime(config_path)
+    required_api_key = _resolve_required_api_key(runtime)
 
     def _quota_error_response(request: Request, exc: QuotaExceededError) -> JSONResponse:
         return _error_response(
@@ -887,6 +909,8 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     )
 
     app.add_middleware(TraceIdMiddleware)
+    if required_api_key is not None:
+        app.add_middleware(ApiKeyMiddleware, api_key=required_api_key)
     return app
 
 
@@ -956,6 +980,32 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _extract_api_key(request: Request) -> str | None:
+    header_value = str(request.headers.get("x-api-key") or "").strip()
+    if header_value:
+        return header_value
+    authorization = str(request.headers.get("authorization") or "").strip()
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
+
+
+def _resolve_required_api_key(runtime: ParseRuntime) -> str | None:
+    env_name = str(getattr(runtime.settings.runtime, "api_key_env", "") or "").strip()
+    if not env_name:
+        return None
+    api_key = str(os.environ.get(env_name) or "").strip()
+    if not api_key:
+        raise ValueError(
+            f"runtime.api_key_env is set to {env_name}, but the environment variable is empty"
+        )
+    return api_key
 
 
 def _resolve_media_type(file_name: str, provided: str | None) -> str | None:

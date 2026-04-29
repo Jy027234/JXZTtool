@@ -8,6 +8,9 @@ max_workers = 2
 # 0 = auto(max_workers * 4), set explicit value to cap in-flight jobs
 max_inflight_jobs = 0
 poll_interval_ms = 500
+# Optional API ingress auth. When enabled, every HTTP endpoint except /health
+# requires x-api-key or Authorization: Bearer with the secret from this env var.
+# api_key_env = "PARSECORE_API_KEY"
 # 50 MiB request file guard for /parse and /parse/batch; set 0 to disable.
 max_upload_bytes = 52428800
 # Enforce quota units at submission time.

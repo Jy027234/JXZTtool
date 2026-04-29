@@ -6,6 +6,14 @@ from typing import Any
 from .models import Block, BlockType, ParseOutcome
 
 
+_ARTIFACT_SEMANTIC_ROLES = {
+    "header_footer",
+    "parse_artifact",
+    "version_cell",
+    "page_ref_cell",
+}
+
+
 def _to_payload(value: Any) -> Any:
     if is_dataclass(value):
         return {key: _to_payload(item) for key, item in asdict(value).items()}
@@ -84,10 +92,13 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": "body",
                 "text_parts": [],
                 "tables_markdown": [],
+                "artifacts": [],
                 "confidence_parts": [],
             },
         )
-        if block.type == BlockType.TABLE:
+        if role in _ARTIFACT_SEMANTIC_ROLES:
+            entry["artifacts"].append({"text": block.content, "semantic_role": role})
+        elif block.type == BlockType.TABLE:
             if block.content.strip():
                 entry["tables_markdown"].append(block.content)
         elif block.content.strip():
@@ -106,6 +117,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": "body",
                 "text_parts": [],
                 "tables_markdown": [],
+                "artifacts": [],
                 "confidence_parts": [],
             },
         )
@@ -129,6 +141,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": page_type,
                 "text": text,
                 "tables_markdown": entry["tables_markdown"],
+                "artifacts": entry["artifacts"],
                 "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 1.0,
             }
         )
@@ -147,6 +160,8 @@ def _infer_page_type(
     normalized_text = full_text.lower()
     if "toc_entry" in role_set or "lep_entry" in role_set:
         return "toc"
+    if any(role in role_set for role in ("front_matter", "revision_record", "distribution_list")):
+        return "front_matter"
     if any(token in normalized_text for token in ("signature", "signed by", "approved by", "签字", "签名", "审批")):
         return "signature"
     if any(token in normalized_text for token in ("appendix", "annex", "附录")):

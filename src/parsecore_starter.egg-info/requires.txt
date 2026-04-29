@@ -1,15 +1,17 @@
 
 [api]
-fastapi<1,>=0.116
-uvicorn<1,>=0.35
+starlette<2,>=1
+uvicorn<1,>=0.45
+httpx<1,>=0.28
+python-multipart<1,>=0.0.20
 
 [parsers]
-pymupdf<2,>=1.25
-python-docx<2,>=1.1
-pytesseract<1,>=0.3
+pypdf<6,>=5
+rapidocr_onnxruntime<2,>=1.2
 
 [storage]
 psycopg[binary]<4,>=3.2
+psycopg-pool<4,>=3.2
 pgvector<1,>=0.3
 
 [worker]

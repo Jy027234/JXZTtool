@@ -19,15 +19,15 @@
 1. 默认自检门禁已通过，状态为 `ok`。
 2. 单测结果为 `139 passed, 5 skipped`。
 3. runtime describe 正常，当前默认形态仍为 `index_mode = hybrid`、`execution_mode = inline`。
-4. 默认回归套件结果为 `ok = 5, skipped = 1`，其中 `sample-27-81-17` 继续按 `slow` 标签跳过。
-5. 为适配当前默认样本集，自检脚本中的回归超时默认值已从 `600s` 调整为 `900s`，避免出现“套件本身通过但门禁误报 degraded”的假降级。
+4. 默认 fast 门禁维持在日常主线样本窗口；`sample-25-51-06` 与 `sample-flight-ops-manual-r2` 进入 `slow/full` 扩展窗口，`sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 则转入独立 `perf` 长尾跟踪窗口。
+5. 长文、复杂版面与 OCR 重样本已不再全部挤在同一 full 窗口内；默认门禁继续只保留日常时长可接受的样本集，而性能长尾改由独立专项口径持续观察。
 6. 本地 API 健康检查已通过，`GET /health -> status = ok`，且 `services.pdfplumber / python_docx / paddleocr = true`。
 
 这一定义基于以下事实：
 
-1. ParseCore 默认质量门禁已经从 jobcard 双跑切回自身自检。
+1. ParseCore 默认质量门禁已经完全收口到自身自检。
 2. 主线解析、任务、存储、API、OCR provider 抽象和观测链路都已具备可执行验证。
-3. 历史 jobcard 双跑、宿主替换和 OCR 接线资料已归档，不再挤占主线判断口径。
+3. 历史单一宿主联调与 OCR 接线资料已归档，不再挤占主线判断口径。
 4. 当前最明显的性能风险集中在 OCR 重样本 `sample-cmm-32-48-21-ocr`，但它已被明确定义为长尾专项，而不是主线可靠性失效。
 
 ## 上线前必做项
@@ -47,8 +47,8 @@
 以下项目属于产品接入或宿主侧动作，不应伪装为仓库内阻塞：
 
 1. 若产品走 API 接入，按 [ocr-integration-checklist.md](ocr-integration-checklist.md) 和现有健康检查口径完成环境探活。
-2. 若产品是 jobcard 宿主替换，按 [../archive/jobcard-host/docs/jobcard-replacement-checklist.md](../archive/jobcard-host/docs/jobcard-replacement-checklist.md) 完成灰度替换。
-3. 若要彻底退场 jobcard 旧链路，还需额外满足 [../archive/jobcard-host/docs/jobcard-cutover-readiness.md](../archive/jobcard-host/docs/jobcard-cutover-readiness.md) 中的宿主样本与上传资产条件。
+2. 若环境对外暴露 ParseCore HTTP 接口，显式配置 `runtime.api_key_env`，并验证 `/health` 可匿名、其余接口需要 `x-api-key` 或 `Authorization: Bearer`。
+3. 若产品依赖 `remote-http` OCR 网关，补齐网关契约验证、失败回滚与监控口径。
 
 ## 遗留问题分级
 
@@ -56,10 +56,9 @@
 
 当前无新增仓库内阻塞项；默认门禁结果应作为唯一硬判断口径。
 
-### 不阻塞 ParseCore 进入产品灰度，但阻塞宿主彻底退场旧链路
+### 当前无单一宿主退场类阻塞项
 
-1. jobcard 宿主上传资产保全仍有外部缺口，主轮样本 `doc-main-wheel-r16` 仍属于外部数据阻塞。
-2. jobcard 宿主原生样本池仍偏小，当前更适合继续小流量灰度，而不是直接退场旧链路。
+单一宿主切换计划已经终止；本仓库不再维护任何“单一宿主退场旧链路”的前置条件或 readiness 清单。
 
 ### 上线后专项迭代
 
@@ -74,7 +73,7 @@
 
 1. ParseCore 当前版本可以进入产品灰度。
 2. 默认配置保持不变，不引入任何 OCR 实验开关。
-3. 默认质量门禁以 `tools/self_check.py` 为准，2026-04-27 最近一次全量执行结果为 `ok`。
+3. 默认质量门禁以 `tools/self_check.py` 的 fast profile 为准；涉及长文与扩展回归时补跑 `tools/self_check.py --profile slow`，涉及 `sample-27-81-17` / `sample-cmm-32-48-21-ocr` 这类重样本性能跟踪时再补跑 `tools/self_check.py --profile perf`。
 4. OCR 长尾性能问题保留为已知风险，但不单独阻塞当前灰度。
 5. 若出现主线功能故障、门禁失败或 API 不可用，再触发回滚；不要把已知 OCR 长尾波动直接等同于版本不可上线。
 
@@ -100,5 +99,3 @@
 
 - 默认门禁见 [self-check-gate.md](self-check-gate.md)
 - OCR 接入清单见 [ocr-integration-checklist.md](ocr-integration-checklist.md)
-- 宿主替换清单见 [../archive/jobcard-host/docs/jobcard-replacement-checklist.md](../archive/jobcard-host/docs/jobcard-replacement-checklist.md)
-- jobcard 切流 readiness 见 [../archive/jobcard-host/docs/jobcard-cutover-readiness.md](../archive/jobcard-host/docs/jobcard-cutover-readiness.md)

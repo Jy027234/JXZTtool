@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import time
 from pathlib import Path
@@ -18,6 +19,472 @@ _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
     enabled=True,
     provider="rapidocr",
 )
+
+_DOCX_NOISE_ROLES = {
+    SemanticRole.HEADER_FOOTER.value,
+    SemanticRole.PARSE_ARTIFACT.value,
+    SemanticRole.VERSION_CELL.value,
+    SemanticRole.PAGE_REF_CELL.value,
+}
+
+_DOCX_ROMAN_PAGE_PATTERN = r"[IVXLCDMⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]{1,10}(?:\s*至\s*[IVXLCDMⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]{1,10})?"
+_DOCX_PAGE_REF_CORE_PATTERN = (
+    r"(?:[A-Z]?\d+(?:[-./]\d+)+|"
+    + _DOCX_ROMAN_PAGE_PATTERN
+    + r"|[一二三四五六七八九十百千]+/\d+)"
+)
+_DOCX_PAGE_REF_PATTERN = re.compile(
+    rf"^\s*(?:页码\s*[:：]\s*)?(?P<label>{_DOCX_PAGE_REF_CORE_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+_DOCX_TRAILING_PAGE_REF_PATTERN = re.compile(
+    rf"(?P<label>{_DOCX_PAGE_REF_CORE_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+_DOCX_VERSION_PATTERN = re.compile(
+    r"^\s*(?:R\d+(?:TR?\d+)?|Rev(?:ision)?\s*[A-Z0-9.-]+|版次(?:/修订)?|修订(?:记录)?|版本(?:号)?|版号)\s*$",
+    re.IGNORECASE,
+)
+_DOCX_DATE_PATTERN = re.compile(r"^\s*\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s*$")
+_DOCX_TMP_ARTIFACT_PATTERN = re.compile(r"^\s*tmp[\\/_ .-].*", re.IGNORECASE)
+_DOCX_NUMBERED_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>(?:\d+(?:\.\d+)+|\d+))(?:[.、)])?\s*(?P<title>.+?)\s*$"
+)
+_DOCX_CHAPTER_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>第[\d一二三四五六七八九十百千]+[章节条款])\s*(?P<title>.+?)\s*$"
+)
+_DOCX_APPENDIX_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>(?:附录|附件|Appendix|Annex)\s*[A-Z0-9一二三四五六七八九十]*)\s*(?P<title>.*)$",
+    re.IGNORECASE,
+)
+_DOCX_HEADING_STYLE_PATTERN = re.compile(r"(?:heading|标题)", re.IGNORECASE)
+_DOCX_TOC_HEADING_PATTERN = re.compile(r"^\s*(?:目录|目次|CONTENTS?|TABLE OF CONTENTS)\s*$", re.IGNORECASE)
+_DOCX_LEP_HEADING_PATTERN = re.compile(
+    r"(?:有效页清单|LIST OF EFFECTIVE PAGES)",
+    re.IGNORECASE,
+)
+_DOCX_REVISION_HEADING_PATTERN = re.compile(
+    r"(?:修订记录|修订页|版次表|版次/修订|RECORD OF REVISIONS|REVISION(?:\s+RECORD|\s+HISTORY)?)",
+    re.IGNORECASE,
+)
+_DOCX_DISTRIBUTION_HEADING_PATTERN = re.compile(
+    r"(?:分发清单|放行人员清单|外委单位清单|DISTRIBUTION LIST|AUTHORIZED RELEASE|VENDOR LIST)",
+    re.IGNORECASE,
+)
+_DOCX_SIGNATURE_HEADING_PATTERN = re.compile(
+    r"(?:签字|签署|批准|审批|SIGNATURE|APPROVAL)",
+    re.IGNORECASE,
+)
+_DOCX_HEADER_FOOTER_PATTERN = re.compile(
+    r"^\s*(?:页码\s*[:：]\s*)?(?:第\s*\d+\s*页|Page\s+\d+|[A-Z]{2,}\s+\d+(?:\.\d+)*)\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(slots=True)
+class _DocxParseState:
+    body_started: bool = False
+    toc_active: bool = False
+    lep_active: bool = False
+    last_heading_text: str | None = None
+    last_heading_role: str | None = None
+    last_heading_page_type: str = "body"
+    heading_context_open: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class _DocxParagraphInfo:
+    text: str
+    style: str | None = None
+    outline_level: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _DocxClassification:
+    block_type: BlockType
+    semantic_role: str
+    content: str
+    page_type: str
+    logical_page_label: str | None = None
+    heading_level: int | None = None
+    normalized_title: str | None = None
+    kind: str | None = None
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _normalize_inline_whitespace(text: str) -> str:
+    return re.sub(r"[ \t\u3000]+", " ", str(text or "")).strip()
+
+
+def _docx_paragraph_info(
+    paragraph: ET.Element,
+    *,
+    namespaces: Mapping[str, str],
+) -> _DocxParagraphInfo:
+    parts: list[str] = []
+    for node in paragraph.iter():
+        local_name = _xml_local_name(node.tag)
+        if local_name == "t" and node.text:
+            parts.append(node.text)
+        elif local_name == "tab":
+            parts.append(" ")
+        elif local_name in {"br", "cr"}:
+            parts.append("\n")
+    lines = [_normalize_inline_whitespace(item) for item in "".join(parts).splitlines()]
+    text = "\n".join(item for item in lines if item).strip()
+
+    style = None
+    style_node = paragraph.find("./w:pPr/w:pStyle", namespaces)
+    if style_node is not None:
+        style = style_node.get(f"{{{namespaces['w']}}}val") or style_node.get("val")
+    outline_level = None
+    outline_node = paragraph.find("./w:pPr/w:outlineLvl", namespaces)
+    if outline_node is not None:
+        raw_level = outline_node.get(f"{{{namespaces['w']}}}val") or outline_node.get("val")
+        try:
+            outline_level = int(raw_level) + 1 if raw_level is not None else None
+        except (TypeError, ValueError):
+            outline_level = None
+    return _DocxParagraphInfo(text=text, style=style, outline_level=outline_level)
+
+
+def _docx_extract_page_label(text: str) -> str | None:
+    stripped = _normalize_inline_whitespace(text)
+    if not stripped:
+        return None
+    match = _DOCX_PAGE_REF_PATTERN.match(stripped)
+    if match:
+        return str(match.group("label") or "").strip() or None
+    trailing = _DOCX_TRAILING_PAGE_REF_PATTERN.search(stripped)
+    if trailing:
+        label = str(trailing.group("label") or "").strip()
+        if label and label != stripped:
+            return label
+    return None
+
+
+def _docx_extract_numbered_heading(text: str) -> tuple[str, str, str | None, int | None] | None:
+    stripped = _normalize_inline_whitespace(text)
+    if not stripped:
+        return None
+    if _DOCX_PAGE_REF_PATTERN.match(stripped):
+        return None
+    logical_page = _docx_extract_page_label(stripped)
+    if logical_page:
+        trailing = _DOCX_TRAILING_PAGE_REF_PATTERN.search(stripped)
+        if trailing is not None and trailing.start() > 0:
+            stripped = stripped[: trailing.start()].rstrip()
+
+    appendix_match = _DOCX_APPENDIX_HEADING_PATTERN.match(stripped)
+    if appendix_match:
+        number = _normalize_inline_whitespace(appendix_match.group("number") or "")
+        title = _normalize_inline_whitespace(appendix_match.group("title") or "")
+        normalized = number if not title else f"{number} {title}".strip()
+        return normalized, SemanticRole.APPENDIX.value, logical_page, 1
+
+    chapter_match = _DOCX_CHAPTER_HEADING_PATTERN.match(stripped)
+    if chapter_match:
+        number = _normalize_inline_whitespace(chapter_match.group("number") or "")
+        title = _normalize_inline_whitespace(chapter_match.group("title") or "")
+        normalized = number if not title else f"{number} {title}".strip()
+        return normalized, SemanticRole.BODY_SECTION.value, logical_page, 1
+
+    numbered_match = _DOCX_NUMBERED_HEADING_PATTERN.match(stripped)
+    if numbered_match:
+        number = _normalize_inline_whitespace(numbered_match.group("number") or "")
+        title = _normalize_inline_whitespace(numbered_match.group("title") or "")
+        if title:
+            normalized = f"{number} {title}".strip()
+            heading_level = number.count(".") + 1
+            return normalized, SemanticRole.BODY_SECTION.value, logical_page, heading_level
+    return None
+
+
+def _is_docx_heading_style(style: str | None) -> bool:
+    if not style:
+        return False
+    return _DOCX_HEADING_STYLE_PATTERN.search(style) is not None
+
+
+def _classify_docx_noise(text: str) -> str | None:
+    stripped = _normalize_inline_whitespace(text)
+    if not stripped:
+        return None
+    if _DOCX_TMP_ARTIFACT_PATTERN.match(stripped):
+        return SemanticRole.PARSE_ARTIFACT.value
+    if _DOCX_VERSION_PATTERN.match(stripped):
+        return SemanticRole.VERSION_CELL.value
+    if _DOCX_PAGE_REF_PATTERN.match(stripped):
+        return SemanticRole.PAGE_REF_CELL.value
+    if _DOCX_HEADER_FOOTER_PATTERN.match(stripped) or _DOCX_DATE_PATTERN.match(stripped):
+        return SemanticRole.HEADER_FOOTER.value
+    return None
+
+
+def _classify_docx_paragraph(
+    info: _DocxParagraphInfo,
+    *,
+    state: _DocxParseState,
+) -> _DocxClassification:
+    stripped = info.text.strip()
+    if not stripped:
+        return _DocxClassification(
+            block_type=BlockType.PARAGRAPH,
+            semantic_role=SemanticRole.PARAGRAPH.value,
+            content="",
+            page_type="body",
+            kind=BlockType.PARAGRAPH.value,
+        )
+
+    if _DOCX_TOC_HEADING_PATTERN.match(stripped):
+        state.toc_active = True
+        state.lep_active = False
+        state.heading_context_open = True
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.FRONT_MATTER.value,
+            content=stripped,
+            page_type="front_matter",
+            normalized_title=stripped,
+            kind=BlockType.TITLE.value,
+        )
+
+    if _DOCX_LEP_HEADING_PATTERN.search(stripped):
+        state.toc_active = False
+        state.lep_active = True
+        state.heading_context_open = True
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.FRONT_MATTER.value,
+            content=_normalize_inline_whitespace(stripped),
+            page_type="front_matter",
+            normalized_title=_normalize_inline_whitespace(stripped),
+            kind=BlockType.TITLE.value,
+        )
+
+    if _DOCX_REVISION_HEADING_PATTERN.search(stripped):
+        state.toc_active = False
+        state.lep_active = False
+        state.heading_context_open = True
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.FRONT_MATTER.value,
+            content=_normalize_inline_whitespace(stripped),
+            page_type="front_matter",
+            normalized_title=_normalize_inline_whitespace(stripped),
+            kind=BlockType.TITLE.value,
+        )
+
+    if _DOCX_DISTRIBUTION_HEADING_PATTERN.search(stripped):
+        state.toc_active = False
+        state.lep_active = False
+        state.heading_context_open = True
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.FRONT_MATTER.value,
+            content=_normalize_inline_whitespace(stripped),
+            page_type="front_matter",
+            normalized_title=_normalize_inline_whitespace(stripped),
+            kind=BlockType.TITLE.value,
+        )
+
+    if _DOCX_SIGNATURE_HEADING_PATTERN.search(stripped) and not state.body_started:
+        state.toc_active = False
+        state.lep_active = False
+        state.heading_context_open = True
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.FRONT_MATTER.value,
+            content=_normalize_inline_whitespace(stripped),
+            page_type="signature",
+            normalized_title=_normalize_inline_whitespace(stripped),
+            kind=BlockType.TITLE.value,
+        )
+
+    heading = _docx_extract_numbered_heading(stripped)
+    if heading is not None:
+        normalized_title, inferred_role, logical_page_label, heading_level = heading
+        if state.body_started or _is_docx_heading_style(info.style) or inferred_role == SemanticRole.APPENDIX.value or logical_page_label is None:
+            page_type = "appendix" if inferred_role == SemanticRole.APPENDIX.value else "body"
+            state.body_started = inferred_role != SemanticRole.FRONT_MATTER.value
+            state.toc_active = False
+            state.lep_active = False
+            state.heading_context_open = True
+            return _DocxClassification(
+                block_type=BlockType.TITLE,
+                semantic_role=inferred_role,
+                content=normalized_title,
+                page_type=page_type,
+                logical_page_label=logical_page_label,
+                heading_level=info.outline_level or heading_level,
+                normalized_title=normalized_title,
+                kind=BlockType.TITLE.value,
+            )
+        state.heading_context_open = False
+        return _DocxClassification(
+            block_type=BlockType.PARAGRAPH,
+            semantic_role=SemanticRole.TOC_ENTRY.value,
+            content=normalized_title,
+            page_type="toc",
+            logical_page_label=logical_page_label,
+            normalized_title=normalized_title,
+            kind=BlockType.PARAGRAPH.value,
+        )
+
+    noise_role = _classify_docx_noise(stripped)
+    if noise_role is not None:
+        state.heading_context_open = False
+        return _DocxClassification(
+            block_type=BlockType.PARAGRAPH,
+            semantic_role=noise_role,
+            content=_normalize_inline_whitespace(stripped),
+            page_type="body" if state.body_started else "front_matter",
+            logical_page_label=_docx_extract_page_label(stripped),
+            kind=BlockType.PARAGRAPH.value,
+        )
+
+    role = _infer_semantic_role(stripped)
+    if role == SemanticRole.PARAGRAPH.value and state.toc_active and _docx_extract_page_label(stripped):
+        role = SemanticRole.TOC_ENTRY.value
+    elif role == SemanticRole.PARAGRAPH.value and state.lep_active:
+        role = SemanticRole.LEP_ENTRY.value
+
+    page_type = "body"
+    if role == SemanticRole.TOC_ENTRY.value:
+        page_type = "toc"
+    elif role == SemanticRole.LEP_ENTRY.value or not state.body_started:
+        page_type = "front_matter"
+    elif state.body_started and _DOCX_APPENDIX_HEADING_PATTERN.match(stripped):
+        page_type = "appendix"
+
+    if _is_docx_heading_style(info.style) and role == SemanticRole.PARAGRAPH.value:
+        state.body_started = True
+        state.heading_context_open = True
+        normalized_title = _normalize_inline_whitespace(stripped)
+        return _DocxClassification(
+            block_type=BlockType.TITLE,
+            semantic_role=SemanticRole.BODY_SECTION.value,
+            content=normalized_title,
+            page_type="body",
+            logical_page_label=_docx_extract_page_label(stripped),
+            heading_level=info.outline_level,
+            normalized_title=normalized_title,
+            kind=BlockType.TITLE.value,
+        )
+
+    state.heading_context_open = False
+    return _DocxClassification(
+        block_type=BlockType.PARAGRAPH,
+        semantic_role=role if state.body_started or role in {SemanticRole.TOC_ENTRY.value, SemanticRole.LEP_ENTRY.value, SemanticRole.NOTE.value, SemanticRole.WARNING.value, SemanticRole.CAUTION.value} else SemanticRole.PARAGRAPH.value,
+        content=stripped,
+        page_type=page_type,
+        logical_page_label=_docx_extract_page_label(stripped),
+        kind=BlockType.PARAGRAPH.value,
+    )
+
+
+def _docx_table_cells(
+    table: ET.Element,
+    *,
+    namespaces: Mapping[str, str],
+) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for row in table.findall("./w:tr", namespaces):
+        values: list[str] = []
+        for cell in row.findall("./w:tc", namespaces):
+            parts: list[str] = []
+            for paragraph in cell.findall("./w:p", namespaces):
+                info = _docx_paragraph_info(paragraph, namespaces=namespaces)
+                if info.text:
+                    parts.append(info.text)
+            values.append("\n".join(item for item in parts if item).strip())
+        if any(value for value in values):
+            rows.append(values)
+    return rows
+
+
+def _escape_markdown_table_cell(text: str) -> str:
+    return str(text or "").replace("|", "\\|").replace("\n", "<br>").strip()
+
+
+def _render_docx_table_markdown(rows: Sequence[Sequence[str]], *, header_rows: int = 1) -> str:
+    normalized_rows = [list(row) for row in rows if any(str(cell or "").strip() for cell in row)]
+    if not normalized_rows:
+        return ""
+    width = max((len(row) for row in normalized_rows), default=0)
+    padded = [row + [""] * (width - len(row)) for row in normalized_rows]
+    if width == 0:
+        return ""
+    rendered: list[str] = []
+    header = padded[0]
+    rendered.append("| " + " | ".join(_escape_markdown_table_cell(cell) for cell in header) + " |")
+    rendered.append("| " + " | ".join("---" for _ in header) + " |")
+    for row in padded[header_rows:]:
+        rendered.append("| " + " | ".join(_escape_markdown_table_cell(cell) for cell in row) + " |")
+    return "\n".join(rendered)
+
+
+def _classify_docx_table(
+    cells: Sequence[Sequence[str]],
+    *,
+    state: _DocxParseState,
+) -> tuple[str, str, str, str | None, list[list[str]]]:
+    flattened = "\n".join(
+        _normalize_inline_whitespace(cell)
+        for row in cells
+        for cell in row
+        if _normalize_inline_whitespace(cell)
+    )
+    cell_roles: list[list[str]] = []
+    non_empty_roles: set[str] = set()
+    logical_page_labels: list[str] = []
+    for row in cells:
+        row_roles: list[str] = []
+        for cell in row:
+            normalized = _normalize_inline_whitespace(cell)
+            role = _classify_docx_noise(normalized) or SemanticRole.PARAGRAPH.value
+            row_roles.append(role)
+            if normalized:
+                non_empty_roles.add(role)
+            label = _docx_extract_page_label(normalized)
+            if label:
+                logical_page_labels.append(label)
+        cell_roles.append(row_roles)
+
+    table_type = "general_table"
+    semantic_role = SemanticRole.TABLE.value
+    page_type = "body" if state.body_started else "front_matter"
+    if _DOCX_LEP_HEADING_PATTERN.search(flattened) or state.last_heading_role == SemanticRole.FRONT_MATTER.value and state.last_heading_text and _DOCX_LEP_HEADING_PATTERN.search(state.last_heading_text):
+        semantic_role = SemanticRole.LEP_ENTRY.value
+        table_type = "effective_page_list"
+        page_type = "front_matter"
+    elif _DOCX_REVISION_HEADING_PATTERN.search(flattened) or state.last_heading_text and _DOCX_REVISION_HEADING_PATTERN.search(state.last_heading_text):
+        semantic_role = SemanticRole.REVISION_RECORD.value
+        table_type = "revision_record"
+        page_type = "front_matter"
+    elif _DOCX_DISTRIBUTION_HEADING_PATTERN.search(flattened) or state.last_heading_text and _DOCX_DISTRIBUTION_HEADING_PATTERN.search(state.last_heading_text):
+        semantic_role = SemanticRole.DISTRIBUTION_LIST.value
+        page_type = "front_matter"
+        if re.search(r"放行人员", flattened):
+            table_type = "release_personnel_list"
+        elif re.search(r"外委单位", flattened):
+            table_type = "outsourced_vendor_list"
+        else:
+            table_type = "distribution_list"
+    elif state.last_heading_role == SemanticRole.APPENDIX.value:
+        semantic_role = SemanticRole.APPENDIX.value
+        page_type = "appendix"
+        table_type = "appendix_table"
+    elif non_empty_roles and non_empty_roles.issubset(_DOCX_NOISE_ROLES):
+        semantic_role = SemanticRole.PARSE_ARTIFACT.value
+        page_type = "front_matter" if not state.body_started else "body"
+        table_type = "artifact_table"
+
+    logical_page_label = logical_page_labels[0] if logical_page_labels else None
+    return semantic_role, table_type, page_type, logical_page_label, cell_roles
 
 
 def _classify_ocr_error(exc: Exception) -> str:
@@ -49,6 +516,7 @@ class DocxParser(ParserAdapter):
 
         root = ET.fromstring(document_xml)
         namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        body = root.find("./w:body", namespaces)
         blocks: list[Block] = [
             Block(
                 block_id=f"{request.doc_id}-title",
@@ -59,29 +527,98 @@ class DocxParser(ParserAdapter):
                     "page": 1,
                     "page_type": "body",
                     "parser": self.name,
+                    "kind": BlockType.TITLE.value,
                     "semantic_role": SemanticRole.TITLE.value,
                 },
             )
         ]
+        if body is None:
+            return tuple(blocks)
+
+        state = _DocxParseState()
         position = 1
-        for paragraph in root.findall(".//w:p", namespaces):
-            texts = [node.text for node in paragraph.findall(".//w:t", namespaces) if node.text]
-            content = "".join(texts).strip()
+        for child in list(body):
+            local_name = _xml_local_name(child.tag)
+            if local_name == "p":
+                info = _docx_paragraph_info(child, namespaces=namespaces)
+                if not info.text:
+                    continue
+                classified = _classify_docx_paragraph(info, state=state)
+                if not classified.content:
+                    continue
+                metadata = {
+                    "page": 1,
+                    "page_type": classified.page_type,
+                    "parser": self.name,
+                    "position": position,
+                    "semantic_role": classified.semantic_role,
+                    "kind": classified.kind or classified.block_type.value,
+                }
+                if classified.normalized_title:
+                    metadata["normalized_title"] = classified.normalized_title
+                if classified.logical_page_label:
+                    metadata["logical_page_label"] = classified.logical_page_label
+                if classified.heading_level is not None:
+                    metadata["heading_level"] = int(classified.heading_level)
+                if classified.block_type == BlockType.TITLE and classified.semantic_role in {
+                    SemanticRole.FRONT_MATTER.value,
+                    SemanticRole.BODY_SECTION.value,
+                    SemanticRole.APPENDIX.value,
+                }:
+                    metadata["is_section_heading"] = True
+                    state.last_heading_text = classified.content
+                    state.last_heading_role = classified.semantic_role
+                    state.last_heading_page_type = classified.page_type
+                elif classified.semantic_role not in _DOCX_NOISE_ROLES:
+                    state.heading_context_open = False
+
+                blocks.append(
+                    Block(
+                        block_id=f"{request.doc_id}-p-{position}",
+                        doc_id=request.doc_id,
+                        type=classified.block_type,
+                        content=classified.content,
+                        metadata=metadata,
+                    )
+                )
+                position += 1
+                continue
+
+            if local_name != "tbl":
+                continue
+
+            cells = _docx_table_cells(child, namespaces=namespaces)
+            if not cells:
+                continue
+            semantic_role, table_type, page_type, logical_page_label, cell_roles = _classify_docx_table(cells, state=state)
+            content = _render_docx_table_markdown(cells)
             if not content:
                 continue
+            metadata = {
+                "page": 1,
+                "page_type": page_type,
+                "parser": self.name,
+                "position": position,
+                "semantic_role": semantic_role,
+                "kind": BlockType.TABLE.value,
+                "table_type": table_type,
+                "cells": [list(row) for row in cells],
+                "cell_semantic_roles": cell_roles,
+                "rows": len(cells),
+                "cols": max((len(row) for row in cells), default=0),
+                "header_rows": 1,
+            }
+            if state.heading_context_open and state.last_heading_text:
+                metadata["table_title"] = state.last_heading_text
+            if logical_page_label:
+                metadata["logical_page_label"] = logical_page_label
             blocks.append(
                 Block(
                     block_id=f"{request.doc_id}-p-{position}",
                     doc_id=request.doc_id,
-                    type=BlockType.PARAGRAPH,
+                    type=BlockType.TABLE,
                     content=content,
-                    metadata={
-                        "page": 1,
-                        "page_type": "body",
-                        "parser": self.name,
-                        "position": position,
-                        "semantic_role": SemanticRole.PARAGRAPH.value,
-                    },
+                    metadata=metadata,
                 )
             )
             position += 1

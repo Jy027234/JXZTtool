@@ -6,3 +6,11 @@ dist/
 build/
 *.pyc
 var/parsecore.db
+var/*.db
+var/logs/
+var/regression/
+var/self-check/
+var/tmp/
+var/ocr_smoke.png
+tools/pdf_engine_eval_result.json
+tools/undersplit_inspection.json

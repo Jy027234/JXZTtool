@@ -23,6 +23,24 @@ def build_docx_paragraph(text: str) -> str:
     return f"<w:p><w:r><w:t>{escaped}</w:t></w:r></w:p>"
 
 
+def build_docx_table(rows: list[list[str]]) -> str:
+    rendered_rows: list[str] = []
+    for row in rows:
+        rendered_cells: list[str] = []
+        for cell in row:
+            escaped = (
+                str(cell)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            rendered_cells.append(
+                "<w:tc><w:p><w:r><w:t>" + escaped + "</w:t></w:r></w:p></w:tc>"
+            )
+        rendered_rows.append("<w:tr>" + "".join(rendered_cells) + "</w:tr>")
+    return "<w:tbl>" + "".join(rendered_rows) + "</w:tbl>"
+
+
 def _escape_pdf_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
@@ -110,6 +128,14 @@ class TemporaryWorkspace:
         assert self.root is not None
         target = self.root / name
         document_xml = DOCX_XML.format(paragraphs="".join(build_docx_paragraph(item) for item in paragraphs))
+        with zipfile.ZipFile(target, "w") as archive:
+            archive.writestr("word/document.xml", document_xml)
+        return target
+
+    def create_docx_with_body(self, name: str, body_xml: str) -> Path:
+        assert self.root is not None
+        target = self.root / name
+        document_xml = DOCX_XML.format(paragraphs=body_xml)
         with zipfile.ZipFile(target, "w") as archive:
             archive.writestr("word/document.xml", document_xml)
         return target

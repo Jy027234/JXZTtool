@@ -28,15 +28,52 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[api,parsers,storage]"
+      - name: Detect fast regression corpus
+        id: fast-corpus
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
+          suite = root / "var" / "regression" / "suite.fast.json"
+          payload = json.loads(suite.read_text(encoding="utf-8"))
+          fixtures = []
+          for entry in payload.get("entries", []):
+              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
+              if not baseline.exists():
+                  continue
+              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
+              for item in baseline_payload.get("fixtures", []):
+                  relative = str(item.get("fixture_relative_path", "")).strip()
+                  raw = str(item.get("fixture", "")).strip()
+                  candidates = []
+                  if relative and fixture_root is not None:
+                      candidates.append(fixture_root / Path(relative))
+                  if raw:
+                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
+                  fixtures.append(any(candidate.exists() for candidate in candidates))
+
+          missing = sum(1 for available in fixtures if not available)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+            handle.write(f"available={'false' if missing else 'true'}\n")
+          if missing:
+            print("::notice::Fast regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the sample PDFs to enable baseline checks.")
       - name: Run fast gate
+        if: steps.fast-corpus.outputs.available == 'true'
+        run: python tools/self_check.py --profile fast --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
+      - name: Run fast smoke fallback
+        if: steps.fast-corpus.outputs.available != 'true'
         run: python tools/self_check.py --skip-regression --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
       - name: Verify optional API boundary
         run: python -m unittest tests.test_package_imports
 
   regression:
-    name: Full regression suite
+    name: Full self-check
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 75
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -48,8 +85,301 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[api,parsers,storage]"
+      - name: Detect full regression corpus
+        id: full-corpus
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
+          suite = root / "var" / "regression" / "suite.full.json"
+          payload = json.loads(suite.read_text(encoding="utf-8"))
+          fixtures = []
+          for entry in payload.get("entries", []):
+              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
+              if not baseline.exists():
+                  continue
+              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
+              for item in baseline_payload.get("fixtures", []):
+                  relative = str(item.get("fixture_relative_path", "")).strip()
+                  raw = str(item.get("fixture", "")).strip()
+                  candidates = []
+                  if relative and fixture_root is not None:
+                      candidates.append(fixture_root / Path(relative))
+                  if raw:
+                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
+                  fixtures.append(any(candidate.exists() for candidate in candidates))
+
+          missing = sum(1 for available in fixtures if not available)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+            handle.write(f"available={'false' if missing else 'true'}\n")
+          if missing:
+            print("::notice::Full regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the sample PDFs to enable full baseline checks.")
       - name: Run full gate
-        run: python tools/self_check.py --out "$RUNNER_TEMP/parsecore-self-check-full.json" --regression-timeout-seconds 900
+        if: steps.full-corpus.outputs.available == 'true'
+        run: python tools/self_check.py --profile slow --out "$RUNNER_TEMP/parsecore-self-check-full.json"
+      - name: Skip full gate
+        if: steps.full-corpus.outputs.available != 'true'
+        run: echo "Full regression corpus unavailable on this runner; skipped."
+
+  performance:
+    name: Performance tracking
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,parsers,storage]"
+      - name: Detect performance regression corpus
+        id: perf-corpus
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
+          suite = root / "var" / "regression" / "suite.perf.json"
+          payload = json.loads(suite.read_text(encoding="utf-8"))
+          fixtures = []
+          for entry in payload.get("entries", []):
+              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
+              if not baseline.exists():
+                  continue
+              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
+              for item in baseline_payload.get("fixtures", []):
+                  relative = str(item.get("fixture_relative_path", "")).strip()
+                  raw = str(item.get("fixture", "")).strip()
+                  candidates = []
+                  if relative and fixture_root is not None:
+                      candidates.append(fixture_root / Path(relative))
+                  if raw:
+                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
+                  fixtures.append(any(candidate.exists() for candidate in candidates))
+
+          missing = sum(1 for available in fixtures if not available)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+            handle.write(f"available={'false' if missing else 'true'}\n")
+          if missing:
+            print("::notice::Performance regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the heavy sample PDFs to enable perf tracking.")
+      - name: Resolve perf history paths
+        id: perf-history
+        if: steps.perf-corpus.outputs.available == 'true'
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          explicit_previous = str(os.environ.get("PARSECORE_PREVIOUS_PERF_REPORT") or "").strip()
+          history_dir_raw = str(os.environ.get("PARSECORE_PERF_HISTORY_DIR") or "").strip()
+          compare_report = ""
+          persist_report = ""
+
+          if explicit_previous:
+              explicit_path = Path(explicit_previous).expanduser()
+              if explicit_path.exists():
+                  compare_report = str(explicit_path)
+              else:
+                  print(f"::notice::PARSECORE_PREVIOUS_PERF_REPORT points to missing file: {explicit_path}")
+
+          if history_dir_raw:
+              history_dir = Path(history_dir_raw).expanduser()
+              history_dir.mkdir(parents=True, exist_ok=True)
+              latest_report = history_dir / "latest.perf.json"
+              persist_report = str(latest_report)
+              if not compare_report and latest_report.exists():
+                  compare_report = str(latest_report)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"compare_report={compare_report}\n")
+              handle.write(f"persist_report={persist_report}\n")
+
+          if compare_report:
+              print(f"::notice::Using previous perf report for comparison: {compare_report}")
+          else:
+              print("::notice::No previous perf report configured; this run will establish a fresh baseline.")
+          if persist_report:
+              print(f"::notice::Current perf report will be persisted to: {persist_report}")
+      - name: Run perf gate
+        if: steps.perf-corpus.outputs.available == 'true'
+        run: |
+          if [ -n "${{ steps.perf-history.outputs.compare_report }}" ]; then
+            python tools/self_check.py --profile perf --out "$RUNNER_TEMP/parsecore-self-check-perf.json" --compare-report "${{ steps.perf-history.outputs.compare_report }}"
+          else
+            python tools/self_check.py --profile perf --out "$RUNNER_TEMP/parsecore-self-check-perf.json"
+          fi
+      - name: Summarize perf metrics
+        if: always() && steps.perf-corpus.outputs.available == 'true'
+        env:
+          PERF_REPORT: ${{ runner.temp }}/parsecore-self-check-perf.json
+        run: |
+          python <<'PY'
+          import json, os, pathlib
+
+          def sample_metric(sample, metric_name):
+              if metric_name == "elapsed_s":
+                  return sample.get("elapsed_s")
+              ocr_metric = (sample.get("ocr_metrics") or {}).get(metric_name)
+              if isinstance(ocr_metric, dict):
+                  return ocr_metric.get("current")
+              metric = (sample.get("metrics") or {}).get(metric_name)
+              if isinstance(metric, dict):
+                  return metric.get("current")
+              return None
+
+          def fmt(value, digits=3):
+              if value is None:
+                  return ""
+              if isinstance(value, int):
+                  return str(value)
+              return f"{float(value):.{digits}f}"
+
+          report_path = pathlib.Path(os.environ["PERF_REPORT"])
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not summary_path or not report_path.exists():
+              print("perf report or summary path missing; skipping summary")
+              raise SystemExit(0)
+          payload = json.loads(report_path.read_text(encoding="utf-8"))
+          lines = []
+          lines.append("# ParseCore perf gate")
+          lines.append("")
+          lines.append(f"- status: **{payload.get('status')}**")
+          lines.append(f"- profile: `{payload.get('profile')}`")
+          lines.append(f"- suite: `{payload.get('suite')}`")
+          lines.append(f"- generated_at: {payload.get('generated_at')}")
+          timeout_s = payload.get("regression_timeout_seconds")
+          if timeout_s:
+              lines.append(f"- regression_timeout_s: {timeout_s}")
+          lines.append("")
+
+            perf_tracking = payload.get("perf_tracking") or {}
+            overview = perf_tracking.get("overview") or {}
+            if overview.get("sample_count"):
+              lines.append("## Perf samples")
+              lines.append("")
+              lines.append("| sample | elapsed_s | ocr_total_s | call_s | provider_s | rec_s | max_page_ocr_s |")
+              lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+              for sample in perf_tracking.get("samples", []) or []:
+                lines.append(
+                  "| {name} | {elapsed_s} | {ocr_total_s} | {call_s} | {provider_s} | {rec_s} | {max_page_ocr_s} |".format(
+                    name=sample.get("name", "?"),
+                    elapsed_s=fmt(sample_metric(sample, "elapsed_s"), 1),
+                    ocr_total_s=fmt(sample_metric(sample, "ocr_total_s")),
+                    call_s=fmt(sample_metric(sample, "call_s")),
+                    provider_s=fmt(sample_metric(sample, "provider_s")),
+                    rec_s=fmt(sample_metric(sample, "rec_s")),
+                    max_page_ocr_s=fmt(sample_metric(sample, "max_page_ocr_s")),
+                  )
+                )
+              slowest = overview.get("slowest_sample") or {}
+              hottest = overview.get("highest_ocr_total_sample") or {}
+              if slowest:
+                lines.append("")
+                lines.append(f"- slowest_sample: `{slowest.get('name')}` ({fmt(slowest.get('elapsed_s'), 1)}s)")
+              if hottest:
+                lines.append(f"- highest_ocr_total_sample: `{hottest.get('name')}` ({fmt(hottest.get('ocr_total_s'))}s)")
+              lines.append("")
+
+          comparison = perf_tracking.get("comparison") or {}
+          if comparison.get("available"):
+              lines.append("## Perf deltas vs previous report")
+              lines.append("")
+              lines.append("| sample | Δelapsed_s | Δocr_total_s | Δcall_s | Δprovider_s | Δrec_s | Δmax_page_ocr_s |")
+              lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+              for sample in comparison.get("samples", []) or []:
+                  metrics = sample.get("metrics") or {}
+                  lines.append(
+                      "| {name} | {elapsed} | {ocr_total} | {call} | {provider} | {rec} | {max_page} |".format(
+                          name=sample.get("name", "?"),
+                          elapsed=fmt((metrics.get("elapsed_s") or {}).get("delta"), 1),
+                          ocr_total=fmt((metrics.get("ocr_total_s") or {}).get("delta")),
+                          call=fmt((metrics.get("call_s") or {}).get("delta")),
+                          provider=fmt((metrics.get("provider_s") or {}).get("delta")),
+                          rec=fmt((metrics.get("rec_s") or {}).get("delta")),
+                          max_page=fmt((metrics.get("max_page_ocr_s") or {}).get("delta")),
+                      )
+                  )
+              lines.append("")
+              lines.append(f"- compare_report: `{comparison.get('compare_report')}`")
+              lines.append("")
+          elif comparison:
+              lines.append("## Perf comparison")
+              lines.append("")
+              lines.append(f"- compare_report: `{comparison.get('compare_report')}`")
+              lines.append(f"- status: unavailable ({comparison.get('reason', 'no comparable samples')})")
+              lines.append("")
+
+          lines.append("## Checks")
+          lines.append("")
+          lines.append("| name | status | elapsed_s | summary |")
+          lines.append("| --- | --- | ---: | --- |")
+          for item in payload.get("checks", []) or []:
+              name = item.get("name", "?")
+              status = item.get("status", "?")
+              elapsed = item.get("elapsed_s", "")
+              summary = (item.get("summary") or "").replace("|", "\\|")
+              lines.append(f"| {name} | {status} | {elapsed} | {summary} |")
+          structure = None
+          for item in payload.get("checks", []) or []:
+              details = item.get("details") or {}
+              if details.get("structure_metrics"):
+                  structure = details["structure_metrics"]
+                  break
+          if structure:
+              lines.append("")
+              lines.append("## Structure metrics (last suite)")
+              lines.append("")
+              lines.append("| metric | value |")
+              lines.append("| --- | ---: |")
+              for key in ("toc_recog", "chapter_cov", "noise_ratio", "heading_bind", "evidence_bind"):
+                  if key in structure:
+                      lines.append(f"| {key} | {structure[key]:.4f} |")
+          pathlib.Path(summary_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+      - name: Upload perf report
+        if: always() && steps.perf-corpus.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parsecore-self-check-perf
+          path: ${{ runner.temp }}/parsecore-self-check-perf.json
+          if-no-files-found: ignore
+      - name: Persist perf report
+        if: always() && steps.perf-corpus.outputs.available == 'true' && steps.perf-history.outputs.persist_report != ''
+        shell: python
+        env:
+          PERF_REPORT: ${{ runner.temp }}/parsecore-self-check-perf.json
+          PERF_PERSIST_REPORT: ${{ steps.perf-history.outputs.persist_report }}
+        run: |
+          import os
+          import shutil
+          import time
+          from pathlib import Path
+
+          source = Path(os.environ["PERF_REPORT"])
+          target = Path(os.environ["PERF_PERSIST_REPORT"])
+          if not source.exists():
+              print(f"::notice::Perf report missing, skip persist: {source}")
+              raise SystemExit(0)
+          target.parent.mkdir(parents=True, exist_ok=True)
+          snapshot = target.parent / f"parsecore-self-check-perf.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
+          shutil.copy2(source, target)
+          shutil.copy2(source, snapshot)
+          print(f"::notice::Persisted perf report to {target}")
+          print(f"::notice::Archived perf snapshot to {snapshot}")
+      - name: Skip perf gate
+        if: steps.perf-corpus.outputs.available != 'true'
+        run: echo "Performance regression corpus unavailable on this runner; skipped."
 
   postgres-pgvector:
     name: Postgres and pgvector smoke

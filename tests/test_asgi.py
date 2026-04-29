@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import Future
+import os
 import unittest
 
 from starlette.testclient import TestClient
@@ -243,7 +244,76 @@ extensions = [".pdf"]
 """.strip()
 
 
+API_KEY_PROTECTED_CONFIG = """
+[project]
+name = "test-api-protected"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+api_key_env = "PARSECORE_API_KEY"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+""".strip()
+
+
 class ParseApiTests(unittest.TestCase):
+    def test_api_key_protects_runtime_endpoint_but_not_health(self) -> None:
+        with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
+            with patch.dict(os.environ, {"PARSECORE_API_KEY": "test-secret"}, clear=False):
+                app = create_app(workspace.config_path)
+                with TestClient(app) as client:
+                    health = client.get("/health")
+                    self.assertEqual(health.status_code, 200)
+
+                    unauthorized = client.get("/v1/runtime")
+                    self.assertEqual(unauthorized.status_code, 401)
+                    self.assertEqual(unauthorized.json()["code"], "unauthorized")
+                    self.assertEqual(unauthorized.headers.get("www-authenticate"), "Bearer")
+
+                    authorized = client.get(
+                        "/v1/runtime",
+                        headers={"x-api-key": "test-secret"},
+                    )
+                    self.assertEqual(authorized.status_code, 200)
+                    self.assertEqual(authorized.json()["runtime"]["api_auth_enabled"], True)
+
+    def test_api_key_accepts_bearer_authorization_header(self) -> None:
+        with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
+            with patch.dict(os.environ, {"PARSECORE_API_KEY": "test-secret"}, clear=False):
+                app = create_app(workspace.config_path)
+                with TestClient(app) as client:
+                    response = client.get(
+                        "/v1/runtime",
+                        headers={"Authorization": "Bearer test-secret"},
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+    def test_create_app_fails_fast_when_api_key_env_is_empty(self) -> None:
+        with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
+            with patch.dict(os.environ, {"PARSECORE_API_KEY": ""}, clear=False):
+                with self.assertRaisesRegex(ValueError, "PARSECORE_API_KEY"):
+                    create_app(workspace.config_path)
+
     def test_job_lifecycle_endpoints(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("spec.docx", ["Maintenance Manual", "Apply torque"])
@@ -476,7 +546,7 @@ class ParseApiTests(unittest.TestCase):
 
                 structure = client.get(
                     "/v1/parse/documents/doc-api-001/structure-search",
-                    params={"q": "maintenance manual", "tenant_id": "tenant-alpha", "tag": "page:body"},
+                    params={"q": "maintenance manual", "tenant_id": "tenant-alpha", "tag": "page:front_matter"},
                 )
                 self.assertEqual(structure.status_code, 200)
                 self.assertEqual(structure.json()["retrieval_mode"], "structure-keyword")
@@ -542,7 +612,7 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["error"], None)
             self.assertEqual(len(body["pages"]), 1)
             self.assertEqual(body["pages"][0]["page_number"], 1)
-            self.assertEqual(body["pages"][0]["page_type"], "body")
+            self.assertEqual(body["pages"][0]["page_type"], "front_matter")
             self.assertIn("Maintenance Manual", body["pages"][0]["text"])
             self.assertEqual(body["pages"][0]["tables_markdown"], [])
             self.assertEqual(body["pages"][0]["confidence"], 1.0)
@@ -574,7 +644,7 @@ class ParseApiTests(unittest.TestCase):
             )
             self.assertEqual(body["total_pages"], 1)
             self.assertEqual(body["metadata"]["parser"], "python-docx")
-            self.assertEqual(body["pages"][0]["page_type"], "body")
+            self.assertEqual(body["pages"][0]["page_type"], "front_matter")
             self.assertIn("Maintenance Manual", body["pages"][0]["text"])
 
     def test_health_reports_pdf_service_when_pdf_parser_registered(self) -> None:

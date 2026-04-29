@@ -16,6 +16,7 @@ mode = "embedded-sdk"
 execution_mode = "inline"
 max_workers = 1
 poll_interval_ms = 500
+api_key_env = "PARSECORE_API_KEY"
 
 [storage]
 database_url = "sqlite:///./var/x.db"
@@ -86,10 +87,19 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.providers.ocr.api_key_env, "PARSECORE_OCR_API_KEY")
         self.assertEqual(settings.providers.ocr.timeout_seconds, 9.5)
         self.assertEqual(settings.providers.ocr.max_retries, 4)
+        self.assertEqual(settings.runtime.api_key_env, "PARSECORE_API_KEY")
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},
         )
+
+    def test_legacy_jobcard_adapter_is_normalized_to_embedded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(_TOML.replace('adapter = "embedded"', 'adapter = "jobcard"'), encoding="utf-8")
+            settings = load_settings(path)
+
+        self.assertEqual(settings.product_adapter, "embedded")
 
 
 if __name__ == "__main__":

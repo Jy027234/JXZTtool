@@ -31,12 +31,21 @@ class SemanticRole(str, Enum):
     PARAGRAPH = "paragraph"
     TABLE = "table"
     IMAGE = "image"
+    FRONT_MATTER = "front_matter"
+    BODY_SECTION = "body_section"
+    APPENDIX = "appendix"
     TOC_ENTRY = "toc_entry"
     LEP_ENTRY = "lep_entry"
+    REVISION_RECORD = "revision_record"
+    DISTRIBUTION_LIST = "distribution_list"
     HIGHLIGHTS_ENTRY = "highlights_entry"
     NOTE = "note"
     WARNING = "warning"
     CAUTION = "caution"
+    HEADER_FOOTER = "header_footer"
+    PARSE_ARTIFACT = "parse_artifact"
+    VERSION_CELL = "version_cell"
+    PAGE_REF_CELL = "page_ref_cell"
 
 
 @dataclass(slots=True, frozen=True)

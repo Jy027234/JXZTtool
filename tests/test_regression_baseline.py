@@ -1,13 +1,67 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from parsecore.models import Block, BlockType, Chunk, SemanticRole
 from tools import regression_baseline
 
 
 class RegressionBaselineTests(unittest.TestCase):
+    def test_fixture_record_captures_relative_path_from_fixture_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            fixture_root = Path(temp_dir)
+            fixture = fixture_root / "sample.pdf"
+            fixture.write_bytes(b"pdf")
+
+            record = regression_baseline._fixture_record(fixture, fixture_root)
+
+        self.assertEqual(record["fixture_name"], "sample.pdf")
+        self.assertEqual(record["fixture_relative_path"], "sample.pdf")
+
+    def test_resolve_fixture_entry_path_prefers_portable_fixture_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            fixture_root = Path(temp_dir)
+            fixture = fixture_root / "sample.pdf"
+            fixture.write_bytes(b"pdf")
+
+            resolved = regression_baseline._resolve_fixture_entry_path(
+                {
+                    "fixture": r"D:\app\uploads\sample.pdf",
+                    "fixture_relative_path": "sample.pdf",
+                },
+                baseline_dir=Path(temp_dir),
+                fixture_root=fixture_root,
+                fixture_root_env=regression_baseline.FIXTURE_ROOT_ENV,
+            )
+
+        self.assertEqual(resolved, fixture)
+
+    def test_resolve_fixture_entry_path_uses_fixture_root_env(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            fixture_root = Path(temp_dir)
+            fixture = fixture_root / "env-sample.pdf"
+            fixture.write_bytes(b"pdf")
+            with patch.dict(
+                "os.environ",
+                {regression_baseline.FIXTURE_ROOT_ENV: str(fixture_root)},
+                clear=False,
+            ):
+                resolved = regression_baseline._resolve_fixture_entry_path(
+                    {
+                        "fixture": r"D:\app\uploads\env-sample.pdf",
+                        "fixture_relative_path": "env-sample.pdf",
+                    },
+                    baseline_dir=Path(temp_dir),
+                    fixture_root=None,
+                    fixture_root_env=regression_baseline.FIXTURE_ROOT_ENV,
+                )
+
+        self.assertEqual(resolved, fixture)
+
     def test_request_option_overrides_include_table_stage_when_enabled(self) -> None:
         args = argparse.Namespace(
             enable_layout_reading_order=None,
@@ -231,6 +285,77 @@ class RegressionBaselineTests(unittest.TestCase):
         self.assertEqual(len(failures), 2)
         self.assertTrue(any("applied_pages" in failure for failure in failures))
         self.assertTrue(any("applied_page_ratio" in failure for failure in failures))
+
+    def test_check_drift_flags_structure_metric_regression(self) -> None:
+        args = argparse.Namespace(
+            max_very_short_delta=0.01,
+            max_block_count_delta_pct=0.05,
+            max_page_count_delta=0,
+            max_numeric_heavy_delta=2,
+            max_header_footer_delta=2,
+            max_embedded_chunk_ratio_drop=0.05,
+            max_layout_reading_order_pages_drop=0,
+            max_layout_reading_order_page_ratio_drop=0.05,
+            max_table_rendered_ready_ratio_drop=0.05,
+            max_table_blocks_with_cells_drop=0,
+            max_directory_recognition_drop=0.05,
+            max_chapter_coverage_drop=0.05,
+            max_noise_ratio_increase=0.05,
+            max_heading_body_binding_drop=0.05,
+            max_evidence_binding_strength_drop=0.05,
+        )
+        baseline = {
+            "block_counts": {"total": 10},
+            "quality": {
+                "very_short_ratio": 0.0,
+                "page_count": 1,
+                "numeric_heavy_total": 0,
+                "suspected_header_footer_total": 0,
+            },
+            "embedding_quality": {"embedded_chunk_ratio": 1.0},
+            "structure_quality": {
+                "directory_recognition_rate": 1.0,
+                "toc_recognition_rate": 1.0,
+                "chapter_coverage_rate": 1.0,
+                "noise_ratio": 0.05,
+                "heading_body_binding_rate": 1.0,
+                "evidence_binding_strength": 1.0,
+                "structure_usability_score": 0.99,
+            },
+        }
+        candidate = {
+            "block_counts": {"total": 10},
+            "quality": {
+                "very_short_ratio": 0.0,
+                "page_count": 1,
+                "numeric_heavy_total": 0,
+                "suspected_header_footer_total": 0,
+            },
+            "embedding_quality": {"embedded_chunk_ratio": 1.0},
+            "structure_quality": {
+                "directory_recognition_rate": 0.8,
+                "toc_recognition_rate": 0.8,
+                "chapter_coverage_rate": 0.7,
+                "noise_ratio": 0.2,
+                "heading_body_binding_rate": 0.8,
+                "evidence_binding_strength": 0.7,
+                "structure_usability_score": 0.64,
+            },
+        }
+
+        failures = regression_baseline._check_drift(
+            name="structure-sample",
+            baseline=baseline,
+            candidate=candidate,
+            args=args,
+        )
+
+        self.assertEqual(len(failures), 5)
+        self.assertTrue(any("directory_recognition_rate" in failure for failure in failures))
+        self.assertTrue(any("chapter_coverage_rate" in failure for failure in failures))
+        self.assertTrue(any("noise_ratio" in failure for failure in failures))
+        self.assertTrue(any("heading_body_binding_rate" in failure for failure in failures))
+        self.assertTrue(any("evidence_binding_strength" in failure for failure in failures))
 
 
 if __name__ == "__main__":

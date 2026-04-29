@@ -170,6 +170,14 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertIn("pipeline_cache", description)
         self.assertEqual(description["pipeline_cache"]["size"], 1)
 
+    def test_describe_normalizes_legacy_jobcard_adapter_to_embedded(self) -> None:
+        legacy_config = SAMPLE_CONFIG.replace('adapter = "embedded"', 'adapter = "jobcard"')
+        with TemporaryWorkspace(legacy_config) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            description = runtime.describe()
+
+        self.assertEqual(description["product_adapter"], "embedded")
+
     def test_pipeline_registry_describes_format_backend_stage_matrix(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
@@ -767,6 +775,66 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertTrue(toc_roles)
         self.assertTrue(all(role == SemanticRole.TOC_ENTRY.value for role in toc_roles))
         self.assertTrue(all(chunk.semantic_role == SemanticRole.TOC_ENTRY.value for chunk in outcome.chunks[1:]))
+
+    def test_pdf_snapshot_infers_manual_anatomy_for_heading_like_pages(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def extract_text(self) -> str:
+                return self._text
+
+        class FakeReader:
+            def __init__(self, file_path: str) -> None:
+                self.pages = [
+                    FakePage(
+                        "TABLE OF CONTENTS\n"
+                        "7.1 Maintenance License .................. 7-1\n"
+                        "APPENDIX A Reference Table .................. A-1"
+                    ),
+                    FakePage(
+                        "7.1 Maintenance License\n"
+                        "Apply for maintenance license.\n"
+                        "Keep records."
+                    ),
+                    FakePage(
+                        "RECORD OF REVISIONS\n"
+                        "Revision A 2024-01-01"
+                    ),
+                    FakePage(
+                        "APPENDIX A Reference Table\n"
+                        "Reference material."
+                    ),
+                ]
+
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_text_file("sample.pdf", "placeholder")
+            runtime = build_runtime(workspace.config_path)
+            with patch("parsecore.parsers._load_pdf_reader", return_value=FakeReader):
+                outcome = runtime.submit(
+                    ParseRequest(
+                        doc_id="pdf-manual-anatomy",
+                        file_path=str(document_path),
+                        media_type="application/pdf",
+                    )
+                )
+                snapshot = runtime.get_document(doc_id="pdf-manual-anatomy")
+
+        self.assertEqual(outcome.job.state, ParseJobState.DONE)
+        manifest = snapshot.get("index_manifest") or {}
+        anatomy = manifest.get("manual_anatomy") or {}
+        structure = manifest.get("structure_quality") or {}
+        chapter_titles = [entry.get("text") for entry in anatomy.get("chapter_tree") or []]
+        non_business_roles = [entry.get("semantic_role") for entry in anatomy.get("non_business_items") or []]
+
+        self.assertIn("7.1 Maintenance License", chapter_titles)
+        self.assertIn("APPENDIX A Reference Table", chapter_titles)
+        self.assertIn("toc_entry", non_business_roles)
+        self.assertIn("revision_record", non_business_roles)
+        self.assertEqual(structure.get("toc_recognition_rate"), 1.0)
+        self.assertGreater(structure.get("chapter_coverage_rate", 0.0), 0.0)
+        self.assertGreater(structure.get("heading_body_binding_rate", 0.0), 0.0)
+        self.assertGreater(structure.get("evidence_binding_strength", 0.0), 0.0)
 
     def test_submit_applies_embedding_provider_when_enabled(self) -> None:
         with TemporaryWorkspace(EMBEDDING_SAMPLE_CONFIG) as workspace:

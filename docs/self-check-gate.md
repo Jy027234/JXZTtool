@@ -2,7 +2,7 @@
 
 ## 目的
 
-当前默认质量门禁已经从 jobcard 双跑切回 ParseCore 自身验证。
+当前默认质量门禁已经完全收口到 ParseCore 自身验证。
 
 这套门禁用于回答三个问题：
 
@@ -12,21 +12,45 @@
 
 ## 默认入口
 
-快速自检：
+极快 smoke：
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
 ```
 
-全量自检：
+默认 fast 自检：
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py
 ```
 
-说明：当前默认回归套件已包含 OCR 重样本 `sample-cmm-32-48-21-ocr`，因此全量自检的默认回归超时现为 `900s`，避免在套件实际可通过时误报 `degraded`。
+slow/full 专项自检：
 
-输出会同时打印到终端，并写入 [var/self-check/latest.json](../var/self-check/latest.json)。
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile slow
+```
+
+perf 长尾性能跟踪：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf
+```
+
+如需和上一份 perf 报告做趋势对比：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf --compare-report var/self-check/previous.perf.json
+```
+
+说明：`tools/self_check.py` 现支持三档门禁。默认 `fast` profile 会跑 `var/regression/suite.fast.json`，只覆盖日常主线 baseline；`slow`（等价别名 `full`）会切到 `var/regression/suite.full.json`，保留主线加中等时长 slow baseline；`perf` 会切到 `var/regression/suite.perf.json`，单独跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本。对应回归超时默认值分别为 `900s`、`4200s` 和 `4200s`。
+
+`perf` profile 现在会在输出 JSON 中额外写入 `perf_tracking.samples / overview / comparison`。当 `--compare-report` 指向上一份 self-check JSON 时，会按样本生成 `elapsed_s / ocr_total_s / call_s / provider_s / rec_s / max_page_ocr_s` 的 delta，便于 CI 或自托管 runner 长期跟踪趋势。
+
+在 GitHub Actions 的 `performance` job 中，若 runner 提供 `PARSECORE_PERF_HISTORY_DIR`，workflow 会自动读取其中的 `latest.perf.json` 作为 compare report，并在本次执行后把新报告覆盖写回该目录。
+
+输出会同时打印到终端。默认 `fast` profile 写入 [var/self-check/latest.json](../var/self-check/latest.json)，`slow/full` 默认写入 [var/self-check/latest.full.json](../var/self-check/latest.full.json)，`perf` 默认写入 [var/self-check/latest.perf.json](../var/self-check/latest.perf.json)；显式传 `--out` 时仍以手工路径为准。
+
+CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径和 `fixture_relative_path` 元数据；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。若仍缺样本，workflow 才会把 fast 降级为 smoke-only，并跳过 full/perf 专项门禁，而不是直接失败。
 
 ## 覆盖范围
 
@@ -34,7 +58,10 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 
 1. 单测：`unittest discover -s tests -p "test_*.py"`
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
-3. 回归基线：`tools/regression_baseline.py check-suite --suite var/regression/suite.json`
+3. 回归基线：
+	- `fast`：`tools/regression_baseline.py check-suite --suite var/regression/suite.fast.json`
+	- `slow/full`：`tools/regression_baseline.py check-suite --suite var/regression/suite.full.json`
+	- `perf`：`tools/regression_baseline.py check-suite --suite var/regression/suite.perf.json`
 
 ## 退出码语义
 
@@ -67,24 +94,22 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 
 ### 解析质量
 
-已确认以下基线样本在预算内通过：
+fast profile 当前覆盖以下基线样本：
 
 1. `primary-default`
 2. `primary-table-structure`
 3. `primary-strip-hf`
-4. `sample-25-51-06`
-5. `sample-flight-ops-manual-r2`
 
-`sample-27-81-17` 依照 `suite.json` 默认策略以 `slow` 标签跳过，不计入默认门禁失败。
+`sample-flight-ops-manual-r2` 与 `sample-25-51-06` 现留给 `slow/full` 专项窗口；`sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 已拆到独立 `perf` 窗口，不计入默认 fast 门禁失败。
 
-该样本当前同时承担复杂版面阅读顺序专项样本职责：`tools/regression_baseline.py` 已为其补上 `layout_quality` 指标与 drift 门槛，且 `baseline.27-81-17.json` 已重存为原生携带 `layout_quality` 的 slow baseline；最近一次单独 `check` 结果为 `multi_col=2 / layout_ro_pages=2 / OK`。它仍保持 `slow` 标签，避免把布局专项长样本混入日常默认门禁时长。
+`sample-27-81-17` 当前同时承担复杂版面阅读顺序专项样本职责：`tools/regression_baseline.py` 已为其补上 `layout_quality` 指标与 drift 门槛，且 `baseline.27-81-17.json` 已重存为原生携带 `layout_quality` 的专项 baseline；最近一次单独 `check` 结果为 `multi_col=2 / layout_ro_pages=2 / OK`。它现转入 `perf` 窗口，避免继续把布局/OCR 重样本压在 `full` 门禁内。
 
 2026-04-27 最近一次全量自检结果：
 
 1. `regression_suite` 已新增 `primary-table-structure` 表格专项门禁
-2. 默认 suite 已包含 `sample-cmm-32-48-21-ocr`
-3. `sample-27-81-17` 现作为 slow layout 专项样本保留在同一 suite 路径中，默认跳过但继续沿用 baseline/suite 口径
-4. 本轮 `check-suite` 在 `sample-cmm-32-48-21-ocr` 之前的所有默认样本均在预算内通过；该 OCR 长尾样本仍需按专项性能窗口观察
+2. 默认 suite 现保留 `primary-default`、`primary-table-structure`、`primary-strip-hf` 与 `sample-flight-ops-manual-r2` 作为日常门禁
+3. `sample-25-51-06` 继续保留在 `slow/full` 窗口；`sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 已拆到独立 `perf` 窗口，继续沿用 baseline/tooling 口径
+4. 布局/OCR 重样本现通过 `tools/regression_baseline.py check-suite --suite var/regression/suite.perf.json` 单独纳入性能跟踪窗口观察
 
 ### 性能风险
 
@@ -94,7 +119,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 
 ## 当前建议
 
-1. 日常改动默认跑快速自检。
-2. 涉及 PDF 后处理、OCR、分页重排和门禁口径调整时跑全量自检。
-3. 若全量自检返回 `degraded`，优先检查是否再次触发默认超时边界或 OCR 长尾异常放大。
-4. 若要继续收敛长尾性能，应把 OCR 重样本优化视为专项任务，而不是继续改变默认上线口径。
+1. 日常改动默认跑 `tools/self_check.py` 的 fast profile。
+2. 涉及 PDF 后处理、长文样本和门禁口径调整时跑 `tools/self_check.py --profile slow`。
+3. 涉及 `sample-27-81-17`、`sample-cmm-32-48-21-ocr` 这类布局/OCR 重样本性能跟踪时跑 `tools/self_check.py --profile perf`。
+4. 若 `slow/full` 或 `perf` 返回 `degraded`，优先检查是否再次触发超时边界或 OCR 长尾异常放大。
+5. 若要继续收敛长尾性能，应把 OCR/复杂版面重样本优化视为专项任务，而不是继续改变默认上线口径。

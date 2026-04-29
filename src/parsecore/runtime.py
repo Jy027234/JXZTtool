@@ -22,14 +22,23 @@ _SEARCH_METRICS_HISTORY_LIMIT = 5000
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
     "title": 1.35,
+    "body_section": 1.3,
     "warning": 1.25,
     "caution": 1.15,
     "note": 1.1,
     "table": 1.05,
     "paragraph": 1.0,
+    "appendix": 0.95,
     "highlights_entry": 0.95,
+    "front_matter": 0.8,
+    "revision_record": 0.75,
+    "distribution_list": 0.75,
     "toc_entry": 0.7,
     "lep_entry": 0.55,
+    "header_footer": 0.3,
+    "parse_artifact": 0.2,
+    "version_cell": 0.2,
+    "page_ref_cell": 0.2,
 }
 _TASK_LIKE_PATTERN = re.compile(
     r"^(?:\d+(?:\.\d+)*[.)]|\([a-z]\)|step\s+\d+|task\s+\d+)",
@@ -255,6 +264,7 @@ class ParseRuntime:
                 "poll_interval_ms": self.settings.runtime.poll_interval_ms,
                 "max_upload_bytes": self.settings.runtime.max_upload_bytes,
                 "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
+                "api_auth_enabled": bool(str(self.settings.runtime.api_key_env).strip()),
             },
             "translation": {
                 "enabled": self.settings.translation_enabled,
@@ -735,7 +745,7 @@ class ParseRuntime:
             doc_id=doc_id,
             query=query,
             limit=max(limit * 3, 10),
-            semantic_roles=("paragraph", "warning", "caution", "note"),
+            semantic_roles=("paragraph", "body_section", "warning", "caution", "note"),
             tenant_id=tenant_id,
         )
         task_hits = tuple(
@@ -1326,6 +1336,8 @@ class ParseRuntime:
             "index_version": index_version,
             "embedding_tiers": embedding_tiers,
             "layers": layers,
+            "manual_anatomy": dict((getattr(document, "metadata", {}) or {}).get("manual_anatomy") or {}),
+            "structure_quality": dict((getattr(document, "metadata", {}) or {}).get("structure_quality") or {}),
         }
 
     @staticmethod
@@ -1849,7 +1861,7 @@ def _select_high_precision_chunks(chunks: Sequence[Chunk]) -> tuple[Chunk, ...]:
     for chunk in chunks:
         role = str(chunk.semantic_role or "paragraph").strip().lower()
         text = str(chunk.text or "").strip()
-        if role in {"title", "warning", "caution", "note", "table"}:
+        if role in {"title", "body_section", "warning", "caution", "note", "table"}:
             selected.append(chunk)
             continue
         if len(text) >= 120:

@@ -1,6 +1,8 @@
 # jobcard 接入建议
 
-## 当前判断
+## 历史判断
+
+历史注记：本文件描述的是 2026-04-26 前后的宿主接线状态。2026-04-29 起，主线源码已删除当时用于宿主接线与补丁映射的 helper；下文相关“升级抓手”和“最小集成示例”仅作为归档证据，不再代表当前 mainline 仍可直接执行的方式。
 
 jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合先接入 ParseCore 作为后端模块，再逐步拆成 sidecar 或独立服务。
 
@@ -52,14 +54,14 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 
 ## 现在已经具备的升级抓手
 
-当前 Starter Kit 已提供两类直接可用的接入能力：
+历史接线阶段曾提供两类直接可用的接入能力：
 
-- ASGI 子应用：可通过 `mount_into_fastapi(app, ...)` 直接挂到 jobcard 的 FastAPI 主应用。
-- jobcard 补丁适配：`build_jobcard_document_patch()` 会把 ParseOutcome 转成现有文档路由更容易消费的补丁结构。
+- 宿主内嵌 ParseCore 子应用，并挂到 `/internal/parsecore` 一类内部前缀。
+- 解析完成后，将 ParseOutcome 映射成宿主文档补丁并写回宿主 store。
 
-当前实际进度：
+当时实际进度：
 
-- 历史双跑记录、runbook 和辅助脚本已统一归档到 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md)。
+- 历史双跑记录、runbook 和辅助脚本已统一归档到 [../../jobcard-dual-run/README.md](../../jobcard-dual-run/README.md)。
 
 - 已在 jobcard 主应用内挂载 ParseCore 子应用。
 - 已把普通文档库和管理文库的旧后台解析入口切到 ParseCore。
@@ -80,7 +82,7 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 
 ### 文档库
 
-普通文档库这一步已经完成首轮接线，当前状态是：
+普通文档库这一步在当时已经完成首轮接线，当时状态是：
 
 1. 上传完成后仍保持原接口。
 2. 点击解析时优先调用 ParseCore。
@@ -89,30 +91,22 @@ jobcard 当前是 Docker 化的 FastAPI 后端加前端一体工程，更适合�
 
 ### 管理文库
 
-管理文库也已经完成同样的首轮接线，当前与普通文档库保持同样策略。
+管理文库也已经完成同样的首轮接线，当时与普通文档库保持同样策略。
 
-## 下一步重点
+## 当时的下一步重点
 
 1. 把 ParseCore 自检门禁固定为 `unittest`、`tools/regression_baseline.py check-suite`、`GET /health` 和最小解析 smoke。
 2. 宿主侧只保留少量真实样本的灰度复验，不再默认继续扩大双跑样本池。
-3. 若宿主出现兼容性问题，再回到 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md) 中的记录和脚本复现旧场景。
+3. 若宿主出现兼容性问题，再回到 [../../jobcard-dual-run/README.md](../../jobcard-dual-run/README.md) 中的记录和脚本复现旧场景。
 4. 在此基础上继续收敛 PDF 生产级策略，并评估部署时是继续走 inline，还是切换到 `queue-worker` 模式。
 
-如果要回看当前仓库已经完成的 jobcard 历史联调路径，优先按 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md) 进入；当前 OCR provider 的独立验收则继续按 [ocr-integration-checklist.md](ocr-integration-checklist.md) 补齐。
+如果要回看当时仓库里已经完成的 jobcard 历史联调路径，优先按 [../../jobcard-dual-run/README.md](../../jobcard-dual-run/README.md) 进入；OCR provider 的独立验收则继续按 [../../../docs/ocr-integration-checklist.md](../../../docs/ocr-integration-checklist.md) 补齐。
 
 ## 最小集成示例
 
-```python
-from parsecore.jobcard import mount_into_fastapi
+历史接线示意：
 
-mount_into_fastapi(app, config_path="parsecore.toml", prefix="/internal/parsecore")
-```
+1. 把 ParseCore 子应用挂到宿主内部前缀，例如 `/internal/parsecore`。
+2. 当 ParseCore 完成解析后，把 ParseOutcome 映射为宿主文档补丁，再写回 jobcard 自身的文档 store。
 
-当 ParseCore 完成解析后，可把结果映射为 jobcard 文档补丁：
-
-```python
-from parsecore.jobcard import build_jobcard_document_patch
-
-patch = build_jobcard_document_patch(outcome)
-# 然后把 patch 写回 jobcard 自身的文档 store
-```
+说明：上述 helper 已于 2026-04-29 从主线删除，因此这里仅保留行为说明，不再保留当前可执行的 import 示例。

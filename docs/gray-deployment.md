@@ -60,6 +60,13 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 - `high_precision` 覆盖率是否异常低
 - 上传超限是否集中在特定租户或客户端
 
+若灰度节点同时承担 nightly perf 跟踪，建议在同一台 runner 或主机上额外挂两类持久目录：
+
+- 样本目录：通过 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向 perf PDF 根目录
+- perf 历史目录：通过 `PARSECORE_PERF_HISTORY_DIR` 指向持久目录，供 workflow 自动复用 `latest.perf.json`
+
+这样 nightly perf job 会自动形成“本次 vs 上次”的趋势对比，而不是每次只看孤立数值。
+
 ## 回滚
 
 保守回滚到 SQLite queue-worker：

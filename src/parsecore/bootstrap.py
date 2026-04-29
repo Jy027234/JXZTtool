@@ -4,7 +4,6 @@ from pathlib import Path
 
 from .config import load_settings
 from .embeddings import EmbeddingConfigurationError, build_embedding_provider
-from .jobcard import JobcardProductAdapter
 from .llm import LlmBoundaryRefiner, LlmConfigurationError, build_llm_client
 from .parsers import build_parser
 from .pipelines import build_pipeline_registry
@@ -73,10 +72,7 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
     pipeline_registry.warmup()
     job_store = _build_job_store(settings.database_url)
     index = _build_index(settings.database_url, settings.index_mode)
-    if settings.product_adapter == "jobcard":
-        product_adapter = JobcardProductAdapter()
-    else:
-        product_adapter = EmbeddedProductAdapter()
+    product_adapter = EmbeddedProductAdapter()
     try:
         embedding_provider = (
             build_embedding_provider(settings.providers.embedding)

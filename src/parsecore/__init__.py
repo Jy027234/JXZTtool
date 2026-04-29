@@ -1,5 +1,4 @@
 from .bootstrap import build_runtime
-from .jobcard import JobcardProductAdapter, build_jobcard_document_patch, build_jobcard_failure_patch, mount_into_fastapi
 from .models import Block, BlockType, Chunk, ChunkSearchHit, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
 from .parsers import DocxParser, PdfTextParser, TextParser
 from .runtime import ParseRuntime
@@ -12,7 +11,6 @@ __all__ = [
     "Chunk",
     "ChunkSearchHit",
     "DocxParser",
-    "JobcardProductAdapter",
     "ParseJob",
     "ParseJobState",
     "ParseOutcome",
@@ -25,12 +23,9 @@ __all__ = [
     "SQLiteJobStore",
     "SemanticRole",
     "TextParser",
-    "build_jobcard_document_patch",
-    "build_jobcard_failure_patch",
     "build_worker",
     "build_runtime",
     "create_app",
-    "mount_into_fastapi",
     "run_worker",
 ]
 

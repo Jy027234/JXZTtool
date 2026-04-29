@@ -31,17 +31,16 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
+- 可选 API key 入口鉴权（`x-api-key` / `Authorization: Bearer`，`/health` 例外）
 - 独立 worker 入口与容器运行骨架
 - 配置模板
-- 面向 jobcard 的接入建议与补丁适配器
-- 历史 jobcard 双跑资料与辅助脚本归档
 - 基础单元测试
 
 ## 建议演进路径
 
 1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
 2. 再把真实解析器、任务队列、数据库和向量检索逐步替换进来。
-3. 以兼容接线加 ParseCore 自检门禁接入 jobcard；历史双跑资料只保留为归档证据。
+3. 以 ParseCore 自检门禁、可选入口鉴权和受控灰度接入目标产品；单一宿主历史资料只保留为归档证据。
 
 ## 文档导航
 
@@ -51,21 +50,12 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
 - [docs/performance-stability.md](docs/performance-stability.md)：分层 CI、上传保护与 OCR benchmark 的执行口径
 - [docs/gray-deployment.md](docs/gray-deployment.md)：queue-worker + Postgres + pgvector 灰度推荐配置与回滚口径
-- [archive/jobcard-host/README.md](archive/jobcard-host/README.md)：jobcard 宿主接线、切流与替换资料归档
-- [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)：jobcard 历史双跑记录、runbook 和辅助脚本归档
 
 ## 目录结构
 
 ```text
 .
 ├─ archive/
-│  ├─ jobcard-host/
-│  │  ├─ README.md
-│  │  └─ docs/
-│  └─ jobcard-dual-run/
-│     ├─ README.md
-│     ├─ docs/
-│     └─ tools/
 ├─ docs/
 │  ├─ architecture.md
 │  ├─ go-live-readiness.md
@@ -83,7 +73,6 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │     ├─ cli.py
 │     ├─ config.py
 │     ├─ contracts.py
-│     ├─ jobcard.py
 │     ├─ models.py
 │     ├─ runtime.py
 │     ├─ stores.py
@@ -91,7 +80,6 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │     └─ stubs.py
 ├─ tests/
 │  ├─ test_asgi.py
-│  ├─ test_jobcard.py
 │  └─ test_runtime.py
 ├─ .dockerignore
 ├─ Dockerfile
@@ -180,14 +168,28 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 运行默认自检门禁：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py
+```
+
+运行 slow/full 专项自检：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile slow
+```
+
+运行 perf 长尾性能跟踪：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf
 ```
 
 说明：
 
-- 快速模式会执行单测和 runtime smoke
-- 全量模式去掉 `--skip-regression`，会额外跑 `var/regression/suite.json`
-- 最新 JSON 汇总写入 `var/self-check/latest.json`
+- 默认 `fast` profile 会执行单测、runtime smoke 和 `var/regression/suite.fast.json`
+- `slow/full` profile 会执行 `var/regression/suite.full.json`，覆盖主线样本加中等时长 slow baseline
+- `perf` profile 会执行 `var/regression/suite.perf.json`，专门跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本
+- 若样本目录不在原始机器路径下，可设置 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向实际 PDF 目录，baseline 会优先按 `fixture_relative_path` 解析
+- 默认输出分别写入 `var/self-check/latest.json`、`var/self-check/latest.full.json` 和 `var/self-check/latest.perf.json`
 
 运行 OCR 长尾专项 benchmark：
 
@@ -220,7 +222,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `GET /v1/parse/dashboard?tenant_id=...&sample_size=200&recent_limit=5`：单请求聚合租户 usage + metrics + recent_jobs
 - `since_hours`：可选时间窗口（小时），用于 `quotas/usage`、`metrics`、`dashboard` 仅统计最近 N 小时任务
 - `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
-- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方
+- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
 - `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
 - `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退
 - `services`：健康检查中的能力矩阵会结合当前注册 parser 与实际 OCR runtime 可用性返回；兼容字段名仍为 `paddleocr`，但在 ParseCore 中代表 RapidOCR 驱动的 OCR 能力可用性
@@ -328,7 +330,6 @@ options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" }
 - `tools/regression_baseline.py` 的 `layout_signals` 现已额外输出 `ocr_attempted_pages` / `ocr_failed_pages`，可直接观察远程 OCR 网关是否在真实样本上发生失败或退化
 - `event_aggregator` 现会按文档汇总 OCR 摘要事件，并把页数记入 Prometheus 计数；因此 `/v1/parse/events` 更适合看具体 `attempt_reasons / error_reasons`，而 `/v1/parse/prometheus` 更适合看租户维度的 OCR 失败页总量
 - 详细 HTTP 契约见 [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)，宿主侧接入步骤见 [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)
-- 若需要回看 jobcard 宿主资料，先看 [archive/jobcard-host/README.md](archive/jobcard-host/README.md)；若要继续追历史联调细节，再进入 [archive/jobcard-dual-run/README.md](archive/jobcard-dual-run/README.md)
 
 真实 embedding 端到端 smoke test：
 
@@ -359,6 +360,6 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 ## 下一步优先级
 
 1. 把 `tools/self_check.py` 固化为默认自检入口，并继续收敛 OCR 长尾样本性能。
-2. 在 queue-worker + pgvector 模式下继续做宿主最小灰度，而不再扩写双跑记录。
-3. 把 `parsecore.pgvector.toml.example` 收口成宿主环境正式配置。
+2. 在 queue-worker + pgvector 模式下固化入口鉴权、灰度配置与回滚口径。
+3. 为 `fast/full/perf` 三档门禁补稳定样本环境与持续趋势跟踪。
 4. 继续优化 OCR provider 的失败诊断、embedding 覆盖率与检索命中质量。

@@ -58,5 +58,4 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 ## 关联文档
 
 - OCR HTTP 契约见 [ocr-gateway-contract.md](ocr-gateway-contract.md)
-- 宿主替换总清单见 [../archive/jobcard-host/docs/jobcard-replacement-checklist.md](../archive/jobcard-host/docs/jobcard-replacement-checklist.md)
-- jobcard 历史联调资料见 [../archive/jobcard-dual-run/README.md](../archive/jobcard-dual-run/README.md)
+- 产品灰度收口见 [go-live-readiness.md](go-live-readiness.md)

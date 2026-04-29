@@ -4,11 +4,74 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Protocol, Sequence
+from uuid import uuid4
 
 from .config import ParserSettings
 from .contracts import ChunkBuilder, ParserAdapter
 from .models import Block, Chunk, ParseRequest
+
+
+_ARTIFACT_SEMANTIC_ROLES = {
+    "header_footer",
+    "parse_artifact",
+    "version_cell",
+    "page_ref_cell",
+}
+
+_DOCX_SECTION_ANCHOR_ROLES = {
+    "front_matter",
+    "body_section",
+    "appendix",
+}
+
+_DOCX_GROUPABLE_ROLES = {
+    "toc_entry",
+    "lep_entry",
+    "revision_record",
+    "distribution_list",
+    "front_matter",
+}
+
+_MANUAL_NUMBERED_HEADING_PATTERN = re.compile(
+    r"^(?:\d+(?:\.\d+)*|第[\d一二三四五六七八九十百千]+[章节条款]|chapter\s+[a-z0-9ivxlcdm]+|section\s+[a-z0-9ivxlcdm]+)\b",
+    re.IGNORECASE,
+)
+
+_MANUAL_APPENDIX_HEADING_PATTERN = re.compile(
+    r"^(?:appendix|annex|附录|附件)\b",
+    re.IGNORECASE,
+)
+
+_MANUAL_FRONT_MATTER_PATTERN = re.compile(
+    r"(?:table\s+of\s+contents|contents|目录|目次|list\s+of\s+effective\s+pages|有效页清单|record\s+of\s+revisions|revision(?:\s+record|\s+history)?|修订记录|版次表|distribution\s+list|分发清单|signature|approval|highlights)",
+    re.IGNORECASE,
+)
+
+_MANUAL_ALL_CAPS_HEADING_PATTERN = re.compile(r"^[A-Z][A-Z0-9/&() .,-]{2,80}$")
+
+_MANUAL_EFFECTIVE_PAGE_PATTERN = re.compile(
+    r"(?:list\s+of\s+effective\s+pages|有效页清单)",
+    re.IGNORECASE,
+)
+
+_MANUAL_REVISION_PATTERN = re.compile(
+    r"(?:record\s+of\s+revisions|revision(?:\s+record|\s+history)?|修订记录|版次表)",
+    re.IGNORECASE,
+)
+
+_MANUAL_DISTRIBUTION_PATTERN = re.compile(
+    r"(?:distribution\s+list|分发清单|release\s+personnel\s+list|outsourced\s+vendor\s+list)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(slots=True)
+class _ChunkAccumulator:
+    role: str
+    text_parts: list[str] = field(default_factory=list)
+    block_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,12 +235,16 @@ class DocumentSummaryStage:
             role_counts[item.semantic_role] = role_counts.get(item.semantic_role, 0) + 1
             if item.page_number is not None:
                 page_numbers.add(item.page_number)
+        manual_anatomy = _build_manual_anatomy(document.items)
+        structure_quality = _build_structure_quality(document.items)
         metadata["summary"] = {
             "block_count": len(document.blocks),
             "item_count": len(document.items),
             "page_count": len(page_numbers),
             "item_kinds": role_counts,
         }
+        metadata["manual_anatomy"] = manual_anatomy
+        metadata["structure_quality"] = structure_quality
         return replace(document, metadata=metadata)
 
 
@@ -269,6 +336,10 @@ class ArtifactBackedChunker:
         self._base_builder = base_builder
 
     def build(self, *, document: ParsedDocumentArtifact) -> Sequence[Chunk]:
+        if str(document.format_name).strip().lower() == "docx":
+            structured_chunks = _build_docx_section_chunks(document=document)
+            if structured_chunks:
+                return structured_chunks
         base_chunks = tuple(
             self._base_builder.build(doc_id=document.doc_id, blocks=document.blocks)
         )
@@ -291,6 +362,365 @@ class ArtifactBackedChunker:
                     text = str(rendered_text or item.text or text)
             enriched.append(replace(chunk, semantic_role=semantic_role, text=text))
         return tuple(enriched)
+
+
+def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chunk, ...]:
+    chunks: list[Chunk] = []
+    current_section: _ChunkAccumulator | None = None
+    current_group: _ChunkAccumulator | None = None
+
+    def flush_group() -> None:
+        nonlocal current_group
+        if current_group is None or not current_group.block_ids:
+            current_group = None
+            return
+        text = "\n\n".join(part for part in current_group.text_parts if part.strip())
+        if text.strip():
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chk-{uuid4().hex[:12]}",
+                    doc_id=document.doc_id,
+                    block_ids=tuple(current_group.block_ids),
+                    text=text,
+                    semantic_role=current_group.role,
+                )
+            )
+        current_group = None
+
+    def flush_section() -> None:
+        nonlocal current_section
+        if current_section is None or not current_section.block_ids:
+            current_section = None
+            return
+        text = "\n\n".join(part for part in current_section.text_parts if part.strip())
+        if text.strip():
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chk-{uuid4().hex[:12]}",
+                    doc_id=document.doc_id,
+                    block_ids=tuple(current_section.block_ids),
+                    text=text,
+                    semantic_role=current_section.role,
+                )
+            )
+        current_section = None
+
+    for item in document.items:
+        metadata = item.metadata or {}
+        role = str(item.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
+        if role in _ARTIFACT_SEMANTIC_ROLES:
+            continue
+        text = str(metadata.get("rendered_text") or item.text or "").strip()
+        if not text:
+            continue
+        block_type = str(item.provenance.get("block_type") or metadata.get("kind") or "").strip().lower()
+        is_section_heading = bool(metadata.get("is_section_heading"))
+
+        if role == "title" and block_type == "title" and not is_section_heading:
+            flush_group()
+            flush_section()
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chk-{uuid4().hex[:12]}",
+                    doc_id=document.doc_id,
+                    block_ids=item.block_ids,
+                    text=text,
+                    semantic_role=role,
+                )
+            )
+            continue
+
+        if is_section_heading and role in _DOCX_SECTION_ANCHOR_ROLES:
+            flush_group()
+            flush_section()
+            current_section = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(item.block_ids))
+            continue
+
+        if current_section is not None:
+            if current_section.role == "front_matter" and role in _DOCX_GROUPABLE_ROLES - {"front_matter"}:
+                current_section.role = role
+            current_section.text_parts.append(text)
+            current_section.block_ids.extend(item.block_ids)
+            continue
+
+        if role in _DOCX_GROUPABLE_ROLES:
+            if current_group is not None and current_group.role == role:
+                current_group.text_parts.append(text)
+                current_group.block_ids.extend(item.block_ids)
+            else:
+                flush_group()
+                current_group = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(item.block_ids))
+            continue
+
+        flush_group()
+        chunks.append(
+            Chunk(
+                chunk_id=f"chk-{uuid4().hex[:12]}",
+                doc_id=document.doc_id,
+                block_ids=item.block_ids,
+                text=text,
+                semantic_role=role,
+            )
+        )
+
+    flush_group()
+    flush_section()
+    return tuple(chunks)
+
+
+def _entry_projection(
+    item: DocumentArtifactItem,
+    *,
+    semantic_role: str | None = None,
+) -> dict[str, Any]:
+    metadata = item.metadata or {}
+    resolved_role = semantic_role or item.semantic_role
+    text_value = str(
+        metadata.get("normalized_title")
+        or metadata.get("table_title")
+        or item.text
+        or ""
+    ).strip()
+    if (
+        resolved_role in {"front_matter", "body_section", "appendix", "revision_record", "distribution_list", "lep_entry"}
+        and not metadata.get("normalized_title")
+        and not metadata.get("table_title")
+        and "\n" in text_value
+    ):
+        text_value = text_value.splitlines()[0].strip()
+    entry = {
+        "item_id": item.item_id,
+        "semantic_role": resolved_role,
+        "text": text_value,
+    }
+    logical_page_label = str(metadata.get("logical_page_label") or "").strip()
+    if logical_page_label:
+        entry["logical_page_label"] = logical_page_label
+    if item.page_number is not None:
+        entry["page_number"] = item.page_number
+    table_type = str(metadata.get("table_type") or "").strip()
+    if table_type:
+        entry["table_type"] = table_type
+    return entry
+
+
+def _item_block_type(item: DocumentArtifactItem) -> str:
+    metadata = item.metadata or {}
+    return str(item.provenance.get("block_type") or metadata.get("kind") or "").strip().lower()
+
+
+def _item_page_type(item: DocumentArtifactItem) -> str:
+    return str((item.metadata or {}).get("page_type") or "").strip().lower()
+
+
+def _has_evidence_anchor(item: DocumentArtifactItem) -> bool:
+    metadata = item.metadata or {}
+    if str(metadata.get("logical_page_label") or "").strip():
+        return True
+    return item.page_number is not None and int(item.page_number) > 0
+
+
+def _looks_manual_heading_text(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    if not normalized or len(normalized) > 90:
+        return False
+    if _MANUAL_APPENDIX_HEADING_PATTERN.match(normalized):
+        return True
+    if _MANUAL_NUMBERED_HEADING_PATTERN.match(normalized):
+        return True
+    if _MANUAL_ALL_CAPS_HEADING_PATTERN.match(normalized):
+        return True
+    return False
+
+
+def _infer_manual_role(item: DocumentArtifactItem) -> str | None:
+    metadata = item.metadata or {}
+    role = str(item.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
+    if role in _ARTIFACT_SEMANTIC_ROLES:
+        return None
+    if bool(metadata.get("is_section_heading")) and role in _DOCX_SECTION_ANCHOR_ROLES:
+        return role
+    if role in {"toc_entry", "lep_entry", "revision_record", "distribution_list"}:
+        return role
+
+    text = str(
+        metadata.get("normalized_title")
+        or metadata.get("table_title")
+        or item.text
+        or ""
+    ).strip()
+    if not text:
+        return None
+
+    block_type = _item_block_type(item)
+    page_type = _item_page_type(item)
+    table_type = str(metadata.get("table_type") or "").strip().lower()
+    if block_type == "table":
+        if table_type == "effective_page_list":
+            return "lep_entry"
+        if table_type == "revision_record":
+            return "revision_record"
+        if table_type in {"distribution_list", "release_personnel_list", "outsourced_vendor_list"}:
+            return "distribution_list"
+        if table_type == "appendix_table":
+            return "appendix"
+        if _MANUAL_EFFECTIVE_PAGE_PATTERN.search(text):
+            return "lep_entry"
+        if _MANUAL_REVISION_PATTERN.search(text):
+            return "revision_record"
+        if _MANUAL_DISTRIBUTION_PATTERN.search(text):
+            return "distribution_list"
+        if _MANUAL_FRONT_MATTER_PATTERN.search(text):
+            return "front_matter"
+        return None
+
+    if role == "title" and block_type == "title":
+        return None
+
+    normalized = " ".join(text.split())
+    if _MANUAL_EFFECTIVE_PAGE_PATTERN.search(normalized):
+        return "lep_entry"
+    if _MANUAL_REVISION_PATTERN.search(normalized):
+        return "revision_record"
+    if _MANUAL_DISTRIBUTION_PATTERN.search(normalized):
+        return "distribution_list"
+    if _MANUAL_FRONT_MATTER_PATTERN.search(normalized):
+        return "front_matter"
+    if _MANUAL_APPENDIX_HEADING_PATTERN.match(normalized) or page_type == "appendix":
+        if _looks_manual_heading_text(normalized):
+            return "appendix"
+    if page_type in {"toc", "signature"}:
+        return "front_matter" if _looks_manual_heading_text(normalized) else None
+    if _looks_manual_heading_text(normalized):
+        return "body_section"
+    return None
+
+
+def _build_manual_anatomy(items: Sequence[DocumentArtifactItem]) -> dict[str, Any]:
+    chapter_tree: list[dict[str, Any]] = []
+    non_business_items: list[dict[str, Any]] = []
+    body_sections: list[dict[str, Any]] = []
+    tables_and_appendices: list[dict[str, Any]] = []
+    suspected_noise: list[dict[str, Any]] = []
+
+    for item in items:
+        role = str(item.semantic_role or "paragraph").strip().lower()
+        metadata = item.metadata or {}
+        inferred_role = _infer_manual_role(item)
+        projected = _entry_projection(item, semantic_role=inferred_role)
+        if role in {"front_matter", "toc_entry", "lep_entry", "revision_record", "distribution_list"} or inferred_role in {
+            "front_matter",
+            "lep_entry",
+            "revision_record",
+            "distribution_list",
+        }:
+            non_business_items.append(projected)
+        if inferred_role in {"body_section", "appendix"}:
+            chapter_tree.append(projected)
+        if inferred_role == "body_section":
+            body_sections.append(projected)
+        if inferred_role == "appendix" or _item_block_type(item) == "table":
+            tables_and_appendices.append(projected)
+        if role in _ARTIFACT_SEMANTIC_ROLES:
+            suspected_noise.append(projected)
+
+    return {
+        "manual_parts": {
+            "front_matter_items": len(non_business_items),
+            "body_sections": len(body_sections),
+            "tables_and_appendices": len(tables_and_appendices),
+            "suspected_noise": len(suspected_noise),
+        },
+        "chapter_tree": chapter_tree,
+        "non_business_items": non_business_items,
+        "body_sections": body_sections,
+        "tables_and_appendices": tables_and_appendices,
+        "suspected_noise": suspected_noise,
+    }
+
+
+def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str, Any]:
+    total_items = max(len(items), 1)
+    heading_items: list[tuple[int, DocumentArtifactItem, str]] = []
+    body_like_headings: list[tuple[int, DocumentArtifactItem, str]] = []
+    for position, item in enumerate(items):
+        inferred_role = _infer_manual_role(item)
+        if inferred_role in {"front_matter", "body_section", "appendix"}:
+            heading_items.append((position, item, inferred_role))
+        if inferred_role in {"body_section", "appendix"}:
+            body_like_headings.append((position, item, inferred_role))
+    noise_items = [
+        item
+        for item in items
+        if str(item.semantic_role or "").strip().lower() in _ARTIFACT_SEMANTIC_ROLES
+    ]
+    toc_candidates = [
+        item
+        for item in items
+        if str(item.semantic_role or "").strip().lower() in {"toc_entry", "lep_entry"}
+        or str((item.metadata or {}).get("page_type") or "").strip().lower() == "toc"
+    ]
+    toc_recognized = [
+        item
+        for item in items
+        if str(item.semantic_role or "").strip().lower() in {"toc_entry", "lep_entry"}
+    ]
+
+    bound_sections = 0
+    evidence_bound_items = 0
+    relevant_for_evidence = 0
+    for list_index, (start_position, item, _inferred_role) in enumerate(body_like_headings):
+        if _has_evidence_anchor(item):
+            evidence_bound_items += 1
+        relevant_for_evidence += 1
+        next_heading_position = (
+            body_like_headings[list_index + 1][0]
+            if list_index + 1 < len(body_like_headings)
+            else len(items)
+        )
+        for follower in items[start_position + 1 : next_heading_position]:
+            follower_role = str(follower.semantic_role or "paragraph").strip().lower()
+            if follower_role in _ARTIFACT_SEMANTIC_ROLES:
+                continue
+            if _item_block_type(follower) == "table":
+                relevant_for_evidence += 1
+                if _has_evidence_anchor(follower):
+                    evidence_bound_items += 1
+            bound_sections += 1
+            break
+
+    directory_recognition_rate = len(toc_recognized) / max(len(toc_candidates), 1)
+    chapter_coverage_rate = len(body_like_headings) / max(len(heading_items), 1)
+    noise_ratio = len(noise_items) / total_items
+    heading_body_binding_rate = bound_sections / max(len(body_like_headings), 1)
+    evidence_binding_strength = evidence_bound_items / max(relevant_for_evidence, 1)
+    structure_usability_score = round(
+        (
+            directory_recognition_rate
+            + chapter_coverage_rate
+            + (1.0 - noise_ratio)
+            + heading_body_binding_rate
+            + evidence_binding_strength
+        )
+        / 5.0,
+        4,
+    )
+    return {
+        "directory_recognition_rate": round(directory_recognition_rate, 4),
+        "toc_recognition_rate": round(directory_recognition_rate, 4),
+        "chapter_coverage_rate": round(chapter_coverage_rate, 4),
+        "noise_ratio": round(noise_ratio, 4),
+        "heading_body_binding_rate": round(heading_body_binding_rate, 4),
+        "evidence_binding_strength": round(evidence_binding_strength, 4),
+        "structure_usability_score": structure_usability_score,
+        "counts": {
+            "total_items": len(items),
+            "heading_items": len(heading_items),
+            "body_like_headings": len(body_like_headings),
+            "noise_items": len(noise_items),
+            "toc_items": len(toc_recognized),
+        },
+    }
 
 
 class DocumentPipeline:

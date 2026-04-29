@@ -31,6 +31,11 @@ Guard budgets (tunable via CLI):
     --max-page-count-delta        absolute delta on page_count
     --max-numeric-heavy-delta     absolute delta on numeric_heavy_total
     --max-header-footer-delta     absolute delta on suspected_header_footer_total
+    --max-directory-recognition-drop    maximum allowed drop in TOC/LEP recognition rate
+    --max-chapter-coverage-drop         maximum allowed drop in chapter coverage rate
+    --max-noise-ratio-increase          maximum allowed increase in structure noise ratio
+    --max-heading-body-binding-drop     maximum allowed drop in heading-body binding rate
+    --max-evidence-binding-strength-drop maximum allowed drop in evidence binding strength
 """
 
 from __future__ import annotations
@@ -38,12 +43,15 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_ROOT_ENV = "PARSECORE_REGRESSION_FIXTURE_ROOT"
 sys.path.insert(0, str(ROOT / "src"))
 
 from parsecore.bootstrap import build_runtime  # noqa: E402
@@ -58,10 +66,65 @@ from parsecore.quality import (  # noqa: E402
 
 
 def _resolve_path(base_dir: Path, raw_path: str) -> Path:
-    path = Path(raw_path)
+    expanded = os.path.expandvars(os.path.expanduser(str(raw_path or "").strip()))
+    path = Path(expanded)
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def _resolve_fixture_root(
+    raw_root: str | None,
+    *,
+    env_name: str = FIXTURE_ROOT_ENV,
+) -> Path | None:
+    configured_root = str(raw_root or "").strip() or os.environ.get(env_name, "")
+    expanded = os.path.expandvars(os.path.expanduser(configured_root.strip()))
+    if not expanded:
+        return None
+    return Path(expanded)
+
+
+def _fixture_relative_path(fixture: Path, fixture_root: Path | None) -> str | None:
+    if fixture_root is None:
+        return None
+    try:
+        return fixture.resolve().relative_to(fixture_root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _fixture_record(fixture: Path, fixture_root: Path | None) -> dict[str, Any]:
+    payload = {
+        "fixture": str(fixture),
+        "fixture_name": fixture.name,
+    }
+    relative_path = _fixture_relative_path(fixture, fixture_root)
+    if relative_path:
+        payload["fixture_relative_path"] = relative_path
+    return payload
+
+
+def _resolve_fixture_entry_path(
+    entry: dict[str, Any],
+    *,
+    baseline_dir: Path,
+    fixture_root: Path | None,
+    fixture_root_env: str | None = None,
+) -> Path:
+    raw_path = str(entry.get("fixture") or "").strip()
+    baseline_path = _resolve_path(baseline_dir, raw_path) if raw_path else baseline_dir
+    relative_path = str(entry.get("fixture_relative_path") or "").strip()
+    resolved_root = fixture_root or _resolve_fixture_root(None, env_name=fixture_root_env or FIXTURE_ROOT_ENV)
+    if relative_path and resolved_root is not None:
+        candidate = (resolved_root / Path(relative_path)).resolve()
+        if candidate.exists() or not baseline_path.exists():
+            return candidate
+    if baseline_path.exists() or not raw_path:
+        return baseline_path
+    if resolved_root is not None:
+        return (resolved_root / Path(relative_path or raw_path).name).resolve()
+    return baseline_path
 
 
 def _detect_media_type(path: Path) -> str | None:
@@ -264,6 +327,24 @@ def _layout_quality_for_check(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _structure_quality_for_check(payload: dict[str, Any]) -> dict[str, Any]:
+    existing = payload.get("structure_quality")
+    if isinstance(existing, dict) and existing:
+        result = dict(existing)
+        result["enabled"] = True
+        return result
+    return {
+        "enabled": False,
+        "directory_recognition_rate": 0.0,
+        "toc_recognition_rate": 0.0,
+        "chapter_coverage_rate": 0.0,
+        "noise_ratio": 0.0,
+        "heading_body_binding_rate": 0.0,
+        "evidence_binding_strength": 0.0,
+        "structure_usability_score": 0.0,
+    }
+
+
 def _table_quality_to_dict(
     *,
     blocks: Sequence[Any],
@@ -347,21 +428,63 @@ def _apply_runtime_overrides(runtime: Any, args: argparse.Namespace) -> None:
             parser._strip_hf_enabled = target
 
 
-def _run_one(runtime, *, fixture: Path, top_pages: int, request_options: dict[str, Any]) -> dict[str, Any]:
+def _run_one(
+    runtime,
+    *,
+    fixture: Path,
+    top_pages: int,
+    request_options: dict[str, Any],
+    fixture_root: Path | None = None,
+) -> dict[str, Any]:
     media_type = _detect_media_type(fixture)
     started = time.monotonic()
-    outcome = runtime.submit(
-        ParseRequest(
-            doc_id=f"regression:{fixture.name}",
-            file_path=str(fixture),
-            media_type=media_type,
-            options=request_options,
+    doc_id = f"regression:{fixture.name}"
+    tenant_id = str(request_options.get("tenant_id") or "default")
+    try:
+        heartbeat_interval = float(os.environ.get("PARSECORE_REGRESSION_HEARTBEAT_S", "30") or 30)
+    except ValueError:
+        heartbeat_interval = 30.0
+    stop_heartbeat = threading.Event()
+
+    def _emit_heartbeat() -> None:
+        while heartbeat_interval > 0 and not stop_heartbeat.wait(heartbeat_interval):
+            elapsed = time.monotonic() - started
+            print(
+                f"[heartbeat] {fixture.name}: {elapsed:.1f}s elapsed (still parsing)",
+                flush=True,
+            )
+
+    print(f"[run] {fixture.name}: parsing started", flush=True)
+    heartbeat_thread: threading.Thread | None = None
+    if heartbeat_interval > 0:
+        heartbeat_thread = threading.Thread(
+            target=_emit_heartbeat,
+            name=f"regression-heartbeat-{fixture.name}",
+            daemon=True,
         )
-    )
+        heartbeat_thread.start()
+    try:
+        outcome = runtime.submit(
+            ParseRequest(
+                doc_id=doc_id,
+                file_path=str(fixture),
+                media_type=media_type,
+                options=request_options,
+            )
+        )
+    finally:
+        stop_heartbeat.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
     elapsed_s = round(time.monotonic() - started, 3)
+    print(f"[run] {fixture.name}: parsing finished in {elapsed_s:.1f}s", flush=True)
     quality = evaluate_blocks(outcome.blocks)
     layout_signals = evaluate_layout_signals(outcome.blocks)
     embedding_quality = evaluate_chunk_embeddings(outcome.chunks)
+    snapshot = runtime.get_document(doc_id=doc_id, tenant_id=tenant_id)
+    index_manifest = snapshot.get("index_manifest") or {}
+    structure_quality = dict(index_manifest.get("structure_quality") or {})
+    manual_anatomy = dict(index_manifest.get("manual_anatomy") or {})
 
     table_blocks = sum(1 for b in outcome.blocks if getattr(b.type, "value", b.type) == "table")
     paragraph_blocks = sum(
@@ -369,8 +492,7 @@ def _run_one(runtime, *, fixture: Path, top_pages: int, request_options: dict[st
     )
 
     return {
-        "fixture": str(fixture),
-        "fixture_name": fixture.name,
+        **_fixture_record(fixture, fixture_root),
         "elapsed_s": elapsed_s,
         "request_options": request_options,
         "block_counts": {
@@ -391,6 +513,8 @@ def _run_one(runtime, *, fixture: Path, top_pages: int, request_options: dict[st
             chunks=outcome.chunks,
             request_options=request_options,
         ),
+        "structure_quality": structure_quality,
+        "manual_anatomy": manual_anatomy,
     }
 
 
@@ -417,13 +541,21 @@ def _cmd_save(args: argparse.Namespace) -> int:
     runtime = build_runtime(Path(args.config))
     _apply_runtime_overrides(runtime, args)
     request_option_overrides = _request_option_overrides_from_args(args)
+    fixture_root = _resolve_fixture_root(getattr(args, "fixture_root", None))
     payload = {
         "config": str(Path(args.config)),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "post_process_overrides": {"strip_headers_footers": args.strip_headers_footers},
         "request_option_overrides": request_option_overrides,
+        "fixture_root_env": FIXTURE_ROOT_ENV if fixture_root is not None else None,
         "fixtures": [
-            _run_one(runtime, fixture=Path(p), top_pages=args.top_pages, request_options=request_option_overrides)
+            _run_one(
+                runtime,
+                fixture=Path(p),
+                top_pages=args.top_pages,
+                request_options=request_option_overrides,
+                fixture_root=fixture_root,
+            )
             for p in args.pdf
         ],
     }
@@ -433,6 +565,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
     for fixture in payload["fixtures"]:
         q = fixture["quality"]
         layout = fixture["layout_signals"]
+        structure = _structure_quality_for_check(fixture)
         print(
             f"[save] {fixture['fixture_name']}"
             f" blocks={fixture['block_counts']['total']}"
@@ -448,6 +581,11 @@ def _cmd_save(args: argparse.Namespace) -> int:
             f" embedded_ratio={fixture['embedding_quality']['embedded_chunk_ratio']:.4f}"
             f" table_ready={fixture['table_quality']['rendered_ready_ratio']:.4f}"
             f" table_cells={fixture['table_quality']['table_blocks_with_cells']}"
+            f" toc_recog={structure.get('toc_recognition_rate', structure.get('directory_recognition_rate', 0.0)):.4f}"
+            f" chapter_cov={structure.get('chapter_coverage_rate', 0.0):.4f}"
+            f" noise_ratio={structure.get('noise_ratio', 0.0):.4f}"
+            f" heading_bind={structure.get('heading_body_binding_rate', 0.0):.4f}"
+            f" evidence_bind={structure.get('evidence_binding_strength', 0.0):.4f}"
             f" elapsed={fixture['elapsed_s']}s"
         )
     print(f"[save] wrote {out}")
@@ -549,14 +687,54 @@ def _check_drift(
                 f"{name}: table_blocks_with_cells dropped by {cells_drop}"
                 f" (budget +{args.max_table_blocks_with_cells_drop})"
             )
+
+    bs = _structure_quality_for_check(baseline)
+    cs = _structure_quality_for_check(candidate)
+    if bs.get("enabled") or cs.get("enabled"):
+        for key, budget_attr in (
+            ("directory_recognition_rate", "max_directory_recognition_drop"),
+            ("chapter_coverage_rate", "max_chapter_coverage_drop"),
+            ("heading_body_binding_rate", "max_heading_body_binding_drop"),
+            ("evidence_binding_strength", "max_evidence_binding_strength_drop"),
+        ):
+            budget = float(getattr(args, budget_attr, 0.05))
+            delta = float(bs.get(key, 0.0)) - float(cs.get(key, 0.0))
+            if delta > budget:
+                failures.append(
+                    f"{name}: {key} dropped by {delta:.4f}"
+                    f" (budget +{budget:.4f})"
+                )
+        noise_increase_budget = float(getattr(args, "max_noise_ratio_increase", 0.05))
+        noise_delta = float(cs.get("noise_ratio", 0.0)) - float(bs.get("noise_ratio", 0.0))
+        if noise_delta > noise_increase_budget:
+            failures.append(
+                f"{name}: noise_ratio increased by {noise_delta:.4f}"
+                f" (budget +{noise_increase_budget:.4f})"
+            )
     return failures
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    baseline_payload = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+    baseline_path = Path(args.baseline)
+    baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     baseline_index = {fx["fixture_name"]: fx for fx in baseline_payload["fixtures"]}
+    baseline_fixture_root_env = str(
+        baseline_payload.get("fixture_root_env") or FIXTURE_ROOT_ENV
+    ).strip() or FIXTURE_ROOT_ENV
+    fixture_root = _resolve_fixture_root(
+        getattr(args, "fixture_root", None),
+        env_name=baseline_fixture_root_env,
+    )
 
-    fixtures = [Path(p) for p in args.pdf] or [Path(fx["fixture"]) for fx in baseline_payload["fixtures"]]
+    fixtures = [Path(p) for p in args.pdf] or [
+        _resolve_fixture_entry_path(
+            fx,
+            baseline_dir=baseline_path.parent,
+            fixture_root=fixture_root,
+            fixture_root_env=baseline_fixture_root_env,
+        )
+        for fx in baseline_payload["fixtures"]
+    ]
     runtime = build_runtime(Path(args.config))
     baseline_override = str(
         (baseline_payload.get("post_process_overrides") or {}).get(
@@ -601,6 +779,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         baseline_embedding = base.get("embedding_quality", {})
         candidate_table = candidate.get("table_quality", {})
         baseline_table = base.get("table_quality", {})
+        candidate_structure = _structure_quality_for_check(candidate)
+        baseline_structure = _structure_quality_for_check(base)
         print(
             f"[check] {fixture.name}"
             f" blocks={candidate['block_counts']['total']} (baseline {base['block_counts']['total']})"
@@ -622,6 +802,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
             f" (baseline {baseline_table.get('rendered_ready_ratio', 0.0):.4f})"
             f" table_cells={candidate_table.get('table_blocks_with_cells', 0)}"
             f" (baseline {baseline_table.get('table_blocks_with_cells', 0)})"
+            f" toc_recog={candidate_structure.get('toc_recognition_rate', candidate_structure.get('directory_recognition_rate', 0.0)):.4f}"
+            f" (baseline {baseline_structure.get('toc_recognition_rate', baseline_structure.get('directory_recognition_rate', 0.0)):.4f})"
+            f" chapter_cov={candidate_structure.get('chapter_coverage_rate', 0.0):.4f}"
+            f" (baseline {baseline_structure.get('chapter_coverage_rate', 0.0):.4f})"
+            f" noise_ratio={candidate_structure.get('noise_ratio', 0.0):.4f}"
+            f" (baseline {baseline_structure.get('noise_ratio', 0.0):.4f})"
+            f" heading_bind={candidate_structure.get('heading_body_binding_rate', 0.0):.4f}"
+            f" (baseline {baseline_structure.get('heading_body_binding_rate', 0.0):.4f})"
+            f" evidence_bind={candidate_structure.get('evidence_binding_strength', 0.0):.4f}"
+            f" (baseline {baseline_structure.get('evidence_binding_strength', 0.0):.4f})"
         )
         if (
             candidate_layout.get("ocr_attempted_pages", 0)
@@ -714,6 +904,7 @@ def _cmd_check_suite(args: argparse.Namespace) -> int:
         print(f"[suite] {label}: {baseline_path}")
         check_args = argparse.Namespace(
             config=args.config,
+            fixture_root=args.fixture_root,
             top_pages=args.top_pages,
             strip_headers_footers=args.strip_headers_footers,
             enable_layout_reading_order=args.enable_layout_reading_order,
@@ -732,6 +923,11 @@ def _cmd_check_suite(args: argparse.Namespace) -> int:
             max_layout_reading_order_page_ratio_drop=args.max_layout_reading_order_page_ratio_drop,
             max_table_rendered_ready_ratio_drop=args.max_table_rendered_ready_ratio_drop,
             max_table_blocks_with_cells_drop=args.max_table_blocks_with_cells_drop,
+            max_directory_recognition_drop=args.max_directory_recognition_drop,
+            max_chapter_coverage_drop=args.max_chapter_coverage_drop,
+            max_noise_ratio_increase=args.max_noise_ratio_increase,
+            max_heading_body_binding_drop=args.max_heading_body_binding_drop,
+            max_evidence_binding_strength_drop=args.max_evidence_binding_strength_drop,
         )
         if _cmd_check(check_args) != 0:
             failures.append(label)
@@ -749,6 +945,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         default=str(ROOT / "parsecore.toml"),
         help="ParseCore config file (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--fixture-root",
+        default=None,
+        help=f"Portable regression fixture root (defaults to env {FIXTURE_ROOT_ENV})",
     )
     parser.add_argument("--top-pages", type=int, default=10, help="Top-N noisy pages to record")
     parser.add_argument(
@@ -810,6 +1011,36 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Maximum allowed drop in table blocks carrying cells metadata vs baseline",
+    )
+    parser.add_argument(
+        "--max-directory-recognition-drop",
+        type=float,
+        default=0.05,
+        help="Maximum allowed drop in TOC/LEP recognition rate",
+    )
+    parser.add_argument(
+        "--max-chapter-coverage-drop",
+        type=float,
+        default=0.05,
+        help="Maximum allowed drop in chapter coverage rate",
+    )
+    parser.add_argument(
+        "--max-noise-ratio-increase",
+        type=float,
+        default=0.05,
+        help="Maximum allowed increase in structure noise ratio",
+    )
+    parser.add_argument(
+        "--max-heading-body-binding-drop",
+        type=float,
+        default=0.05,
+        help="Maximum allowed drop in heading-body binding rate",
+    )
+    parser.add_argument(
+        "--max-evidence-binding-strength-drop",
+        type=float,
+        default=0.05,
+        help="Maximum allowed drop in evidence binding strength",
     )
 
     sub = parser.add_subparsers(dest="cmd", required=True)
