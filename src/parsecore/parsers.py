@@ -473,6 +473,26 @@ def _trim_excel_rows(rows: Sequence[Sequence[str]]) -> tuple[list[list[str]], in
     return trimmed, first_row + 1, first_col + 1
 
 
+def _split_excel_table_regions(rows: Sequence[Sequence[str]]) -> list[tuple[list[list[str]], int]]:
+    regions: list[tuple[list[list[str]], int]] = []
+    current: list[list[str]] = []
+    start_row = 0
+    for index, row in enumerate(rows, start=1):
+        normalized = [str(cell or "").strip() for cell in row]
+        if any(normalized):
+            if not current:
+                start_row = index
+            current.append(normalized)
+            continue
+        if current:
+            regions.append((current, start_row))
+            current = []
+            start_row = 0
+    if current:
+        regions.append((current, start_row))
+    return regions
+
+
 def _render_excel_table_markdown(rows: Sequence[Sequence[str]]) -> str:
     return _render_docx_table_markdown(rows)
 
@@ -771,53 +791,62 @@ class ExcelParser(ParserAdapter):
                         values.append(_normalize_excel_cell_value(value))
                     raw_rows.append(values)
 
-                rows, start_row, start_col = _trim_excel_rows(raw_rows)
-                if not rows:
-                    continue
-                content = _render_excel_table_markdown(rows)
-                if not content:
-                    continue
-                end_row = start_row + len(rows) - 1
-                end_col = start_col + max((len(row) for row in rows), default=1) - 1
-                metadata = {
-                    "page": sheet_index,
-                    "logical_page": sheet_index,
-                    "page_type": "body",
-                    "parser": self.name,
-                    "position": position,
-                    "semantic_role": SemanticRole.TABLE.value,
-                    "kind": BlockType.TABLE.value,
-                    "table_type": "spreadsheet",
-                    "sheet_name": str(worksheet.title),
-                    "sheet_index": sheet_index,
-                    "hidden_sheet": hidden_sheet,
-                    "row_range": f"{start_row}:{end_row}",
-                    "column_range": f"{get_column_letter(start_col)}:{get_column_letter(end_col)}",
-                    "cell_range": (
-                        f"{get_column_letter(start_col)}{start_row}:"
-                        f"{get_column_letter(end_col)}{end_row}"
-                    ),
-                    "rows": len(rows),
-                    "cols": max((len(row) for row in rows), default=0),
-                    "header_rows": 1,
-                    "has_formula": has_formula,
-                    "formula_count": formula_count,
-                    "truncated": (
-                        int(worksheet.max_row or 0) > self._max_rows_per_sheet
-                        or int(worksheet.max_column or 0) > self._max_cols_per_sheet
-                    ),
-                    "cells": [list(row) for row in rows],
-                }
-                blocks.append(
-                    Block(
-                        block_id=f"{request.doc_id}-sheet-{sheet_index}",
-                        doc_id=request.doc_id,
-                        type=BlockType.TABLE,
-                        content=content,
-                        metadata=metadata,
+                table_regions = _split_excel_table_regions(raw_rows)
+                table_count = len(table_regions)
+                for table_index, (region_rows, region_start_row) in enumerate(
+                    table_regions,
+                    start=1,
+                ):
+                    rows, relative_start_row, start_col = _trim_excel_rows(region_rows)
+                    if not rows:
+                        continue
+                    start_row = region_start_row + relative_start_row - 1
+                    content = _render_excel_table_markdown(rows)
+                    if not content:
+                        continue
+                    end_row = start_row + len(rows) - 1
+                    end_col = start_col + max((len(row) for row in rows), default=1) - 1
+                    metadata = {
+                        "page": sheet_index,
+                        "logical_page": sheet_index,
+                        "page_type": "body",
+                        "parser": self.name,
+                        "position": position,
+                        "semantic_role": SemanticRole.TABLE.value,
+                        "kind": BlockType.TABLE.value,
+                        "table_type": "spreadsheet",
+                        "sheet_name": str(worksheet.title),
+                        "sheet_index": sheet_index,
+                        "sheet_table_index": table_index,
+                        "sheet_table_count": table_count,
+                        "hidden_sheet": hidden_sheet,
+                        "row_range": f"{start_row}:{end_row}",
+                        "column_range": f"{get_column_letter(start_col)}:{get_column_letter(end_col)}",
+                        "cell_range": (
+                            f"{get_column_letter(start_col)}{start_row}:"
+                            f"{get_column_letter(end_col)}{end_row}"
+                        ),
+                        "rows": len(rows),
+                        "cols": max((len(row) for row in rows), default=0),
+                        "header_rows": 1,
+                        "has_formula": has_formula,
+                        "formula_count": formula_count,
+                        "truncated": (
+                            int(worksheet.max_row or 0) > self._max_rows_per_sheet
+                            or int(worksheet.max_column or 0) > self._max_cols_per_sheet
+                        ),
+                        "cells": [list(row) for row in rows],
+                    }
+                    blocks.append(
+                        Block(
+                            block_id=f"{request.doc_id}-sheet-{sheet_index}-table-{table_index}",
+                            doc_id=request.doc_id,
+                            type=BlockType.TABLE,
+                            content=content,
+                            metadata=metadata,
+                        )
                     )
-                )
-                position += 1
+                    position += 1
         finally:
             close = getattr(workbook, "close", None)
             if callable(close):

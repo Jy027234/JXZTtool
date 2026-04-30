@@ -225,6 +225,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
 - `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
 - `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
+- `excel-native`：`.xlsx/.xlsm` 会按 worksheet 内的空行分隔识别多个表格区域，输出 `TABLE` block，并在 metadata 中携带 `sheet_name / cell_range / sheet_table_index / has_formula / hidden_sheet`
 - `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退
 - `services`：健康检查中的能力矩阵会结合当前注册 parser 与实际 runtime 可用性返回；`openpyxl` 代表 Excel parser 可用性，兼容字段名 `paddleocr` 在 ParseCore 中代表 RapidOCR 驱动的 OCR 能力可用性
 - `x-trace-id`：所有 HTTP 响应都会回传该请求头；若调用方未传入，ParseCore 会自动生成，便于宿主系统串联日志与事件

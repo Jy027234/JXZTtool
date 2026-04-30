@@ -71,6 +71,22 @@ class ExcelParserTests(unittest.TestCase):
         workbook.save(target)
         return target
 
+    def _create_multi_table_workbook(self, workspace: TemporaryWorkspace, name: str):
+        from openpyxl import Workbook
+
+        assert workspace.root is not None
+        target = workspace.root / name
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Mixed"
+        sheet.append(["Part", "Qty"])
+        sheet.append(["A-100", 2])
+        sheet.append([])
+        sheet.append(["Checklist", "Status"])
+        sheet.append(["Torque", "Done"])
+        workbook.save(target)
+        return target
+
     def test_excel_parser_emits_sheet_table_blocks(self) -> None:
         with TemporaryWorkspace(EXCEL_CONFIG) as workspace:
             workbook_path = self._create_workbook(workspace, "bom.xlsx")
@@ -94,6 +110,8 @@ class ExcelParserTests(unittest.TestCase):
         self.assertEqual(bom.metadata["table_type"], "spreadsheet")
         self.assertEqual(bom.metadata["sheet_name"], "BOM")
         self.assertEqual(bom.metadata["cell_range"], "A1:C3")
+        self.assertEqual(bom.metadata["sheet_table_index"], 1)
+        self.assertEqual(bom.metadata["sheet_table_count"], 1)
         self.assertEqual(bom.metadata["row_range"], "1:3")
         self.assertEqual(bom.metadata["column_range"], "A:C")
         self.assertEqual(bom.metadata["rows"], 3)
@@ -104,6 +122,31 @@ class ExcelParserTests(unittest.TestCase):
         hidden = table_blocks[1]
         self.assertEqual(hidden.metadata["sheet_name"], "HiddenCalc")
         self.assertTrue(hidden.metadata["hidden_sheet"])
+
+    def test_excel_parser_splits_tables_separated_by_blank_rows(self) -> None:
+        with TemporaryWorkspace(EXCEL_CONFIG) as workspace:
+            workbook_path = self._create_multi_table_workbook(workspace, "mixed.xlsx")
+            runtime = build_runtime(workspace.config_path)
+            outcome = runtime.submit(
+                ParseRequest(
+                    doc_id="doc-excel-mixed",
+                    file_path=str(workbook_path),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            )
+
+        table_blocks = [block for block in outcome.blocks if block.type == BlockType.TABLE]
+        self.assertEqual(len(table_blocks), 2)
+        first, second = table_blocks
+        self.assertEqual(first.metadata["sheet_name"], "Mixed")
+        self.assertEqual(first.metadata["sheet_table_index"], 1)
+        self.assertEqual(first.metadata["sheet_table_count"], 2)
+        self.assertEqual(first.metadata["cell_range"], "A1:B2")
+        self.assertIn("| Part | Qty |", first.content)
+        self.assertEqual(second.metadata["sheet_table_index"], 2)
+        self.assertEqual(second.metadata["sheet_table_count"], 2)
+        self.assertEqual(second.metadata["cell_range"], "A4:B5")
+        self.assertIn("| Checklist | Status |", second.content)
 
     def test_excel_parser_honors_visibility_and_size_options(self) -> None:
         with TemporaryWorkspace(EXCEL_VISIBLE_ONLY_CONFIG) as workspace:
