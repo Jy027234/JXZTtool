@@ -67,8 +67,13 @@ name = "excel-native"
 media_types = [
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "application/vnd.ms-excel",
 ]
-extensions = [".xlsx", ".xlsm"]
+extensions = [".xlsx", ".xlsm", ".xls"]
+# options.max_rows_per_sheet = 5000
+# options.max_cols_per_sheet = 100
+# options.max_metadata_cells = 1000
+# options.include_hidden_sheets = true
 
 [[parsers]]
 name = "text-native"

@@ -439,10 +439,25 @@ def _render_docx_table_markdown(rows: Sequence[Sequence[str]], *, header_rows: i
 def _normalize_excel_cell_value(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
     isoformat = getattr(value, "isoformat", None)
     if callable(isoformat):
         return str(isoformat())
     return str(value).strip()
+
+
+def _excel_column_letter(index: int) -> str:
+    value = max(1, int(index))
+    letters: list[str] = []
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters.append(chr(65 + remainder))
+    return "".join(reversed(letters))
+
+
+def _excel_cell_ref(row: int, col: int) -> str:
+    return f"{_excel_column_letter(col)}{row}"
 
 
 def _trim_excel_rows(rows: Sequence[Sequence[str]]) -> tuple[list[list[str]], int, int]:
@@ -477,8 +492,21 @@ def _split_excel_table_regions(rows: Sequence[Sequence[str]]) -> list[tuple[list
     regions: list[tuple[list[list[str]], int]] = []
     current: list[list[str]] = []
     start_row = 0
-    for index, row in enumerate(rows, start=1):
+    normalized_rows = [[str(cell or "").strip() for cell in row] for row in rows]
+    for offset, row in enumerate(normalized_rows):
+        index = offset + 1
         normalized = [str(cell or "").strip() for cell in row]
+        next_row = normalized_rows[offset + 1] if offset + 1 < len(normalized_rows) else []
+        starts_new_titled_region = (
+            bool(current)
+            and _excel_non_empty_count(normalized) == 1
+            and _excel_non_empty_count(next_row) >= 2
+        )
+        if any(normalized) and starts_new_titled_region:
+            regions.append((current, start_row))
+            current = [normalized]
+            start_row = index
+            continue
         if any(normalized):
             if not current:
                 start_row = index
@@ -491,6 +519,65 @@ def _split_excel_table_regions(rows: Sequence[Sequence[str]]) -> list[tuple[list
     if current:
         regions.append((current, start_row))
     return regions
+
+
+def _excel_non_empty_count(row: Sequence[str]) -> int:
+    return sum(1 for cell in row if str(cell or "").strip())
+
+
+def _detect_excel_table_layout(
+    rows: Sequence[Sequence[str]],
+    *,
+    start_row: int,
+) -> tuple[list[list[str]], int, str | None, int | None, int | None]:
+    normalized_rows = [[str(cell or "").strip() for cell in row] for row in rows]
+    if (
+        len(normalized_rows) >= 2
+        and _excel_non_empty_count(normalized_rows[0]) == 1
+        and _excel_non_empty_count(normalized_rows[1]) >= 2
+    ):
+        title = next(cell for cell in normalized_rows[0] if cell)
+        header_row = start_row + 1
+        return normalized_rows[1:], header_row, title, start_row, header_row
+    header_row = start_row if normalized_rows else None
+    return normalized_rows, start_row, None, None, header_row
+
+
+def _excel_range_ref(start_row: int, start_col: int, end_row: int, end_col: int) -> str:
+    return f"{_excel_cell_ref(start_row, start_col)}:{_excel_cell_ref(end_row, end_col)}"
+
+
+def _excel_range_intersects(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> bool:
+    left_min_row, left_min_col, left_max_row, left_max_col = left
+    right_min_row, right_min_col, right_max_row, right_max_col = right
+    return not (
+        left_max_row < right_min_row
+        or right_max_row < left_min_row
+        or left_max_col < right_min_col
+        or right_max_col < left_min_col
+    )
+
+
+def _excel_cells_metadata(rows: Sequence[Sequence[str]], *, max_cells: int) -> dict[str, Any]:
+    row_count = len(rows)
+    col_count = max((len(row) for row in rows), default=0)
+    total_cells = row_count * col_count
+    if total_cells <= max(0, int(max_cells)):
+        return {
+            "cells": [list(row) for row in rows],
+            "cells_truncated": False,
+            "cells_total": total_cells,
+        }
+    preview_rows = max(1, min(row_count, max(1, int(max_cells)) // max(col_count, 1)))
+    return {
+        "cells_preview": [list(row) for row in rows[:preview_rows]],
+        "cells_truncated": True,
+        "cells_total": total_cells,
+        "cells_preview_rows": preview_rows,
+    }
 
 
 def _render_excel_table_markdown(rows: Sequence[Sequence[str]]) -> str:
@@ -725,6 +812,7 @@ class ExcelParser(ParserAdapter):
         self._include_hidden_sheets = bool(self._options.get("include_hidden_sheets", True))
         self._max_rows_per_sheet = max(1, int(self._options.get("max_rows_per_sheet", 5000)))
         self._max_cols_per_sheet = max(1, int(self._options.get("max_cols_per_sheet", 100)))
+        self._max_metadata_cells = max(1, int(self._options.get("max_metadata_cells", 1000)))
 
     def supports(self, *, media_type: str | None, suffix: str) -> bool:
         normalized_type = (media_type or "").lower()
@@ -732,35 +820,74 @@ class ExcelParser(ParserAdapter):
         return normalized_type in self._media_types or normalized_suffix in self._extensions
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
+        document_path = Path(request.file_path)
+        blocks: list[Block] = [self._title_block(request=request, document_path=document_path)]
+        suffix = document_path.suffix.lower()
+        if suffix == ".xls" or (
+            suffix not in {".xlsx", ".xlsm"}
+            and (request.media_type or "").lower() == "application/vnd.ms-excel"
+        ):
+            blocks.extend(self._parse_xls(request=request, document_path=document_path))
+            return tuple(blocks)
+        blocks.extend(self._parse_xlsx(request=request, document_path=document_path))
+        return tuple(blocks)
+
+    def _title_block(self, *, request: ParseRequest, document_path: Path) -> Block:
+        return Block(
+            block_id=f"{request.doc_id}-title",
+            doc_id=request.doc_id,
+            type=BlockType.TITLE,
+            content=document_path.stem,
+            metadata={
+                "page": 1,
+                "page_type": "body",
+                "parser": self.name,
+                "kind": BlockType.TITLE.value,
+                "semantic_role": SemanticRole.TITLE.value,
+            },
+        )
+
+    def _parse_xlsx(self, *, request: ParseRequest, document_path: Path) -> list[Block]:
         try:
             from openpyxl import load_workbook
-            from openpyxl.utils import get_column_letter
         except ImportError as exc:
             raise RuntimeError(
                 "excel-native parser requires openpyxl; install parsecore-starter[parsers]"
             ) from exc
 
-        document_path = Path(request.file_path)
+        merged_by_sheet: dict[str, list[tuple[str, tuple[int, int, int, int]]]] = {}
+        metadata_workbook = None
+        try:
+            metadata_workbook = load_workbook(
+                filename=document_path,
+                read_only=False,
+                data_only=self._data_only,
+            )
+            for worksheet in metadata_workbook.worksheets:
+                merged_by_sheet[str(worksheet.title)] = [
+                    (
+                        str(merged_range),
+                        (
+                            int(merged_range.min_row),
+                            int(merged_range.min_col),
+                            int(merged_range.max_row),
+                            int(merged_range.max_col),
+                        ),
+                    )
+                    for merged_range in worksheet.merged_cells.ranges
+                ]
+        finally:
+            if metadata_workbook is not None:
+                close_metadata = getattr(metadata_workbook, "close", None)
+                if callable(close_metadata):
+                    close_metadata()
+
         workbook = load_workbook(
             filename=document_path,
             read_only=True,
             data_only=self._data_only,
         )
-        blocks: list[Block] = [
-            Block(
-                block_id=f"{request.doc_id}-title",
-                doc_id=request.doc_id,
-                type=BlockType.TITLE,
-                content=document_path.stem,
-                metadata={
-                    "page": 1,
-                    "page_type": "body",
-                    "parser": self.name,
-                    "kind": BlockType.TITLE.value,
-                    "semantic_role": SemanticRole.TITLE.value,
-                },
-            )
-        ]
+        blocks: list[Block] = []
         try:
             position = 1
             for sheet_index, worksheet in enumerate(workbook.worksheets, start=1):
@@ -771,8 +898,7 @@ class ExcelParser(ParserAdapter):
                 sheet_max_row = min(int(worksheet.max_row or 1), self._max_rows_per_sheet)
                 sheet_max_col = min(int(worksheet.max_column or 1), self._max_cols_per_sheet)
                 raw_rows: list[list[str]] = []
-                has_formula = False
-                formula_count = 0
+                formula_cells: set[tuple[int, int]] = set()
                 for row in worksheet.iter_rows(
                     min_row=1,
                     max_row=sheet_max_row,
@@ -786,72 +912,176 @@ class ExcelParser(ParserAdapter):
                             isinstance(value, str) and value.startswith("=")
                         )
                         if is_formula:
-                            has_formula = True
-                            formula_count += 1
+                            formula_cells.add((int(getattr(cell, "row", 0)), int(getattr(cell, "column", 0))))
                         values.append(_normalize_excel_cell_value(value))
                     raw_rows.append(values)
-
-                table_regions = _split_excel_table_regions(raw_rows)
-                table_count = len(table_regions)
-                for table_index, (region_rows, region_start_row) in enumerate(
-                    table_regions,
-                    start=1,
-                ):
-                    rows, relative_start_row, start_col = _trim_excel_rows(region_rows)
-                    if not rows:
-                        continue
-                    start_row = region_start_row + relative_start_row - 1
-                    content = _render_excel_table_markdown(rows)
-                    if not content:
-                        continue
-                    end_row = start_row + len(rows) - 1
-                    end_col = start_col + max((len(row) for row in rows), default=1) - 1
-                    metadata = {
-                        "page": sheet_index,
-                        "logical_page": sheet_index,
-                        "page_type": "body",
-                        "parser": self.name,
-                        "position": position,
-                        "semantic_role": SemanticRole.TABLE.value,
-                        "kind": BlockType.TABLE.value,
-                        "table_type": "spreadsheet",
-                        "sheet_name": str(worksheet.title),
-                        "sheet_index": sheet_index,
-                        "sheet_table_index": table_index,
-                        "sheet_table_count": table_count,
-                        "hidden_sheet": hidden_sheet,
-                        "row_range": f"{start_row}:{end_row}",
-                        "column_range": f"{get_column_letter(start_col)}:{get_column_letter(end_col)}",
-                        "cell_range": (
-                            f"{get_column_letter(start_col)}{start_row}:"
-                            f"{get_column_letter(end_col)}{end_row}"
-                        ),
-                        "rows": len(rows),
-                        "cols": max((len(row) for row in rows), default=0),
-                        "header_rows": 1,
-                        "has_formula": has_formula,
-                        "formula_count": formula_count,
-                        "truncated": (
-                            int(worksheet.max_row or 0) > self._max_rows_per_sheet
-                            or int(worksheet.max_column or 0) > self._max_cols_per_sheet
-                        ),
-                        "cells": [list(row) for row in rows],
-                    }
-                    blocks.append(
-                        Block(
-                            block_id=f"{request.doc_id}-sheet-{sheet_index}-table-{table_index}",
-                            doc_id=request.doc_id,
-                            type=BlockType.TABLE,
-                            content=content,
-                            metadata=metadata,
-                        )
-                    )
-                    position += 1
+                appended = self._append_sheet_blocks(
+                    blocks=blocks,
+                    request=request,
+                    sheet_name=str(worksheet.title),
+                    sheet_index=sheet_index,
+                    hidden_sheet=hidden_sheet,
+                    raw_rows=raw_rows,
+                    formula_cells=formula_cells,
+                    merged_ranges=merged_by_sheet.get(str(worksheet.title), []),
+                    original_max_row=int(worksheet.max_row or 0),
+                    original_max_col=int(worksheet.max_column or 0),
+                    position=position,
+                )
+                position += appended
         finally:
             close = getattr(workbook, "close", None)
             if callable(close):
                 close()
-        return tuple(blocks)
+        return blocks
+
+    def _parse_xls(self, *, request: ParseRequest, document_path: Path) -> list[Block]:
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise RuntimeError(
+                "excel-native parser requires xlrd for .xls files; install parsecore-starter[parsers]"
+            ) from exc
+
+        try:
+            workbook = xlrd.open_workbook(document_path, formatting_info=True)
+        except NotImplementedError:
+            workbook = xlrd.open_workbook(document_path, formatting_info=False)
+        blocks: list[Block] = []
+        position = 1
+        for sheet_index, worksheet in enumerate(workbook.sheets(), start=1):
+            hidden_sheet = int(getattr(worksheet, "visibility", 0)) != 0
+            if hidden_sheet and not self._include_hidden_sheets:
+                continue
+            sheet_max_row = min(int(worksheet.nrows or 1), self._max_rows_per_sheet)
+            sheet_max_col = min(int(worksheet.ncols or 1), self._max_cols_per_sheet)
+            raw_rows: list[list[str]] = []
+            for row_index in range(sheet_max_row):
+                values: list[str] = []
+                for col_index in range(sheet_max_col):
+                    cell = worksheet.cell(row_index, col_index)
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        try:
+                            value = xlrd.xldate_as_datetime(cell.value, workbook.datemode)
+                        except (TypeError, ValueError, OverflowError):
+                            value = cell.value
+                    else:
+                        value = cell.value
+                    values.append(_normalize_excel_cell_value(value))
+                raw_rows.append(values)
+            merged_ranges = [
+                (
+                    _excel_range_ref(row_low + 1, col_low + 1, row_high, col_high),
+                    (row_low + 1, col_low + 1, row_high, col_high),
+                )
+                for row_low, row_high, col_low, col_high in getattr(worksheet, "merged_cells", [])
+            ]
+            appended = self._append_sheet_blocks(
+                blocks=blocks,
+                request=request,
+                sheet_name=str(worksheet.name),
+                sheet_index=sheet_index,
+                hidden_sheet=hidden_sheet,
+                raw_rows=raw_rows,
+                formula_cells=set(),
+                merged_ranges=merged_ranges,
+                original_max_row=int(worksheet.nrows or 0),
+                original_max_col=int(worksheet.ncols or 0),
+                position=position,
+            )
+            position += appended
+        return blocks
+
+    def _append_sheet_blocks(
+        self,
+        *,
+        blocks: list[Block],
+        request: ParseRequest,
+        sheet_name: str,
+        sheet_index: int,
+        hidden_sheet: bool,
+        raw_rows: Sequence[Sequence[str]],
+        formula_cells: set[tuple[int, int]],
+        merged_ranges: Sequence[tuple[str, tuple[int, int, int, int]]],
+        original_max_row: int,
+        original_max_col: int,
+        position: int,
+    ) -> int:
+        table_regions = _split_excel_table_regions(raw_rows)
+        appended = 0
+        table_count = len(table_regions)
+        for table_index, (region_rows, region_start_row) in enumerate(table_regions, start=1):
+            candidate_rows, candidate_start_row, table_title, title_row, header_row = _detect_excel_table_layout(
+                region_rows,
+                start_row=region_start_row,
+            )
+            rows, relative_start_row, start_col = _trim_excel_rows(candidate_rows)
+            if not rows:
+                continue
+            start_row = candidate_start_row + relative_start_row - 1
+            content = _render_excel_table_markdown(rows)
+            if not content:
+                continue
+            end_row = start_row + len(rows) - 1
+            end_col = start_col + max((len(row) for row in rows), default=1) - 1
+            source_start_row = title_row or start_row
+            source_range = (source_start_row, start_col, end_row, end_col)
+            table_range = (start_row, start_col, end_row, end_col)
+            table_formula_cells = {
+                cell for cell in formula_cells if _excel_range_intersects((cell[0], cell[1], cell[0], cell[1]), table_range)
+            }
+            merged_cells = [
+                label
+                for label, merged_range in merged_ranges
+                if _excel_range_intersects(merged_range, source_range)
+            ]
+            metadata: dict[str, Any] = {
+                "page": sheet_index,
+                "logical_page": sheet_index,
+                "page_type": "body",
+                "parser": self.name,
+                "position": position + appended,
+                "semantic_role": SemanticRole.TABLE.value,
+                "kind": BlockType.TABLE.value,
+                "table_type": "spreadsheet",
+                "sheet_name": sheet_name,
+                "sheet_index": sheet_index,
+                "sheet_table_index": table_index,
+                "sheet_table_count": table_count,
+                "hidden_sheet": hidden_sheet,
+                "row_range": f"{start_row}:{end_row}",
+                "column_range": f"{_excel_column_letter(start_col)}:{_excel_column_letter(end_col)}",
+                "cell_range": _excel_range_ref(start_row, start_col, end_row, end_col),
+                "source_cell_range": _excel_range_ref(source_start_row, start_col, end_row, end_col),
+                "rows": len(rows),
+                "cols": max((len(row) for row in rows), default=0),
+                "header_rows": 1 if rows else 0,
+                "header_row": header_row,
+                "header_values": list(rows[0]) if rows else [],
+                "has_formula": bool(table_formula_cells),
+                "formula_count": len(table_formula_cells),
+                "truncated": (
+                    original_max_row > self._max_rows_per_sheet
+                    or original_max_col > self._max_cols_per_sheet
+                ),
+            }
+            if table_title:
+                metadata["table_title"] = table_title
+                metadata["title_row"] = title_row
+            if merged_cells:
+                metadata["merged_cells"] = merged_cells
+            metadata.update(_excel_cells_metadata(rows, max_cells=self._max_metadata_cells))
+            blocks.append(
+                Block(
+                    block_id=f"{request.doc_id}-sheet-{sheet_index}-table-{table_index}",
+                    doc_id=request.doc_id,
+                    type=BlockType.TABLE,
+                    content=content,
+                    metadata=metadata,
+                )
+            )
+            appended += 1
+        return appended
 
 
 class TextParser(ParserAdapter):

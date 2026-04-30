@@ -966,6 +966,7 @@ def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
         "pdfplumber": "pdf-text" in parser_names,
         "python_docx": "docx-native" in parser_names,
         "openpyxl": "excel-native" in parser_names and find_spec("openpyxl") is not None,
+        "xlrd": "excel-native" in parser_names and find_spec("xlrd") is not None,
         "paddleocr": "image-ocr" in parser_names and _is_ocr_service_available(runtime),
     }
 
