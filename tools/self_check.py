@@ -158,6 +158,16 @@ def _tail_lines(text: str, *, limit: int = 20) -> list[str]:
     return lines[-limit:]
 
 
+def _write_stdout(text: str) -> None:
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer is not None:
+        stdout_buffer.write(text.encode("utf-8", errors="replace"))
+        stdout_buffer.write(b"\n")
+        stdout_buffer.flush()
+        return
+    print(text.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8"))
+
+
 def _run_subprocess(
     name: str,
     args: list[str],
@@ -606,10 +616,11 @@ def main(argv: list[str] | None = None) -> int:
                 }
         payload["perf_tracking"] = perf_tracking
 
+    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
     out_path = Path(out_path_str)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    out_path.write_text(payload_text, encoding="utf-8")
+    _write_stdout(payload_text)
     return exit_code
 
 
