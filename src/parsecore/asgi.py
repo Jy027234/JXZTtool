@@ -9,48 +9,27 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
-from uuid import uuid4
 
 from starlette.applications import Starlette
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .api_payloads import _batch_success_response, _parse_success_response, _project_pages, _to_payload
+from .api_support import (
+    ApiKeyMiddleware,
+    TraceIdMiddleware,
+    _estimated_base64_decoded_size,
+    _exceeds_upload_limit,
+    _file_too_large_detail,
+    _max_upload_bytes,
+    _resolve_required_api_key,
+    _trace_id_for_request,
+)
 from .bootstrap import build_runtime
 from .models import ParseJob, ParseOutcome, ParseRequest
 from .ocr import is_ocr_provider_available
 from .runtime import ParseRuntime, QuotaExceededError
-
-
-class TraceIdMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request.state.trace_id = request.headers.get("x-trace-id") or f"trace-{uuid4().hex}"
-        response = await call_next(request)
-        response.headers.setdefault("x-trace-id", request.state.trace_id)
-        return response
-
-
-class ApiKeyMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, api_key: str, public_paths: tuple[str, ...] = ("/health",)):
-        super().__init__(app)
-        self.api_key = api_key
-        self.public_paths = frozenset(public_paths)
-
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path in self.public_paths:
-            return await call_next(request)
-        if _extract_api_key(request) != self.api_key:
-            response = _error_response(
-                request,
-                code="unauthorized",
-                message="Missing or invalid API key",
-                status_code=401,
-            )
-            response.headers.setdefault("WWW-Authenticate", "Bearer")
-            return response
-        return await call_next(request)
 
 
 def _resolve_api_version() -> str:
@@ -960,15 +939,6 @@ def _error_response(
     return JSONResponse(payload, status_code=status_code)
 
 
-def _trace_id_for_request(request: Request) -> str:
-    trace_id = getattr(request.state, "trace_id", None)
-    if isinstance(trace_id, str) and trace_id:
-        return trace_id
-    fallback = request.headers.get("x-trace-id") or f"trace-{uuid4().hex}"
-    request.state.trace_id = fallback
-    return fallback
-
-
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -982,63 +952,11 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _extract_api_key(request: Request) -> str | None:
-    header_value = str(request.headers.get("x-api-key") or "").strip()
-    if header_value:
-        return header_value
-    authorization = str(request.headers.get("authorization") or "").strip()
-    if not authorization:
-        return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer":
-        return None
-    token = token.strip()
-    return token or None
-
-
-def _resolve_required_api_key(runtime: ParseRuntime) -> str | None:
-    env_name = str(getattr(runtime.settings.runtime, "api_key_env", "") or "").strip()
-    if not env_name:
-        return None
-    api_key = str(os.environ.get(env_name) or "").strip()
-    if not api_key:
-        raise ValueError(
-            f"runtime.api_key_env is set to {env_name}, but the environment variable is empty"
-        )
-    return api_key
-
-
 def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
     if provided and provided not in {"application/octet-stream", ""}:
         return provided
     guessed, _ = mimetypes.guess_type(file_name)
     return guessed
-
-
-def _max_upload_bytes(runtime: ParseRuntime) -> int:
-    try:
-        return max(0, int(runtime.settings.runtime.max_upload_bytes))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _exceeds_upload_limit(actual_bytes: int, limit_bytes: int) -> bool:
-    return limit_bytes > 0 and actual_bytes > limit_bytes
-
-
-def _file_too_large_detail(*, actual_bytes: int, limit_bytes: int) -> dict[str, int]:
-    return {
-        "actual_bytes": actual_bytes,
-        "limit_bytes": limit_bytes,
-    }
-
-
-def _estimated_base64_decoded_size(value: str) -> int:
-    compact = "".join(value.split())
-    if not compact:
-        return 0
-    padding = len(compact) - len(compact.rstrip("="))
-    return max(0, (len(compact) * 3 // 4) - padding)
 
 
 def _health_services(runtime: ParseRuntime) -> dict[str, bool]:

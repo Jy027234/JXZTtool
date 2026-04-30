@@ -98,6 +98,12 @@ Actions summary 会额外展示：
 - 与上一份 perf 报告相比的 delta 表
 - 当前最慢样本和 OCR 最重样本
 
+同一份摘要也可以在本地从 self-check JSON 生成：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/perf_trend_report.py var/self-check/latest.perf.json --out-md var/self-check/latest.perf.md --out-json var/self-check/latest.perf.summary.json
+```
+
 推荐约定：
 
 ```text

@@ -67,6 +67,36 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 
 这样 nightly perf job 会自动形成“本次 vs 上次”的趋势对比，而不是每次只看孤立数值。
 
+## 灰度性能基线
+
+灰度第一个稳定窗口建议固化一份运行态基线，至少保存：
+
+- `failure_rate`
+- `durations_s.p50 / p90 / p99 / max`
+- `active_jobs`
+- `too_many_inflight_jobs`、`ocr_failed`、`embedding_skipped` 等事件计数
+- `high_precision` 覆盖率与查询效果指标
+
+运行中的 API 可直接生成快照：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --since-hours 24 --sample-size 200 --out var/self-check/gray-baseline.json
+```
+
+如果开启了 `runtime.api_key_env`：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --api-key $env:PARSECORE_API_KEY --out var/self-check/gray-baseline.json
+```
+
+建议保存三个阶段的基线：
+
+1. 灰度前压测或预热后。
+2. 灰度 10% 流量稳定 30 到 60 分钟后。
+3. 灰度 50% 或计划流量峰值后。
+
+后续性能判断优先和这些基线比较，而不是只看单次绝对值。
+
 ## 回滚
 
 保守回滚到 SQLite queue-worker：
