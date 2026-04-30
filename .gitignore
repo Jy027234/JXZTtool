@@ -12,5 +12,10 @@ var/regression/
 var/self-check/
 var/tmp/
 var/ocr_smoke.png
+var/cache/
+var/fixtures/enterprise/*.pdf
+var/fixtures/enterprise/*.docx
+var/fixtures/enterprise/*.PDF
+var/fixtures/enterprise/*.DOCX
 tools/pdf_engine_eval_result.json
 tools/undersplit_inspection.json

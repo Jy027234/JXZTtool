@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
+from .quality import ParseQualitySummary, evaluate_parse_quality
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -12,6 +13,10 @@ _ARTIFACT_SEMANTIC_ROLES = {
     "version_cell",
     "page_ref_cell",
 }
+
+# Increment when the shape of pages[] or top-level fields changes in a
+# backwards-incompatible way.  Consumers can gate on this string.
+PAYLOAD_SCHEMA_VERSION = "2026-04"
 
 
 def _to_payload(value: Any) -> Any:
@@ -24,13 +29,32 @@ def _to_payload(value: Any) -> Any:
     return value
 
 
+def _quality_payload(qs: ParseQualitySummary) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "score": qs.score,
+        "flags": sorted(qs.flags),
+        "warnings": list(qs.warnings),
+        "total_cid_tokens": qs.total_cid_tokens,
+    }
+    if qs.recommended_action:
+        payload["recommended_action"] = qs.recommended_action
+    if qs.ocr_failed_pages:
+        payload["ocr_failed_pages"] = qs.ocr_failed_pages
+    if qs.suspect_signature_pages:
+        payload["suspect_signature_pages"] = qs.suspect_signature_pages
+    return payload
+
+
 def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
+    qs = evaluate_parse_quality(outcome.blocks)
     return {
+        "schema_version": PAYLOAD_SCHEMA_VERSION,
         "success": True,
         "total_pages": len(pages),
         "pages": pages,
         "parser_used": _infer_parser_used(outcome.blocks),
+        "quality": _quality_payload(qs),
         "error": None,
     }
 
@@ -44,25 +68,90 @@ def _parse_success_response(
 ) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
     parser_used = _infer_parser_used(outcome.blocks)
+    qs = evaluate_parse_quality(outcome.blocks)
     metadata: dict[str, Any] = {
         "parser": parser_used,
+        "schema_version": PAYLOAD_SCHEMA_VERSION,
     }
     if (mime_type or "").lower() == "application/pdf":
         metadata["ocr_enabled"] = enable_ocr
+        # C1: expose aggregated stage timings for PDF.
+        timings = _aggregate_stage_timings(outcome.blocks)
+        if timings:
+            metadata["stage_timings"] = timings
+        # A3: expose the effective OCR strategy from the title block.
+        ocr_strategy = _read_first_metadata(outcome.blocks, "ocr_strategy")
+        if ocr_strategy:
+            metadata["ocr_strategy"] = ocr_strategy
+    # B3: expose fidelity_profile when it was set by the caller.
+    fidelity_profile = _read_first_metadata(outcome.blocks, "fidelity_profile")
+    if fidelity_profile:
+        metadata["fidelity_profile"] = fidelity_profile
     return {
         "file_name": file_name,
         "mime_type": mime_type or "application/octet-stream",
         "total_pages": len(pages),
         "pages": pages,
         "metadata": metadata,
+        "quality": _quality_payload(qs),
     }
+
+
+def _read_first_metadata(blocks: tuple[Block, ...], key: str) -> Any:
+    """Return the first non-None value for ``key`` in any block's metadata."""
+    for block in blocks:
+        value = block.metadata.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _aggregate_stage_timings(blocks: tuple[Block, ...]) -> dict[str, float] | None:
+    """Sum per-page timing fields from block metadata into doc-level totals.
+
+    Returns None when no timing data is present (e.g. pypdf-only path).
+    """
+    total_layout = 0.0
+    total_ocr_render = 0.0
+    total_ocr_provider = 0.0
+    has_any = False
+    for block in blocks:
+        m = block.metadata
+        v = m.get("layout_elapsed_s")
+        if isinstance(v, (int, float)):
+            total_layout += float(v)
+            has_any = True
+        v = m.get("ocr_render_elapsed_s")
+        if isinstance(v, (int, float)):
+            total_ocr_render += float(v)
+        v = m.get("ocr_provider_elapsed_s")
+        if isinstance(v, (int, float)):
+            total_ocr_provider += float(v)
+    if not has_any:
+        return None
+    result: dict[str, float] = {"layout_s": round(total_layout, 4)}
+    if total_ocr_render > 0:
+        result["ocr_render_s"] = round(total_ocr_render, 4)
+    if total_ocr_provider > 0:
+        result["ocr_provider_s"] = round(total_ocr_provider, 4)
+    return result
 
 
 def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
     pages: dict[int, dict[str, Any]] = {}
     page_signals: dict[int, dict[str, Any]] = {}
+    # logical_page tracking for DOCX (always physical page==1, split by headings/breaks)
+    logical_page_map: dict[int, set[int]] = {}  # logical_page_index -> {position indices}
+    logical_page_texts: dict[int, list[str]] = {}
+    has_logical_pages = False
     for block in blocks:
         page_number = int(block.metadata.get("page", 1))
+        # Collect logical_page info for DOCX (physical page is always 1).
+        lp = block.metadata.get("logical_page")
+        if isinstance(lp, int):
+            has_logical_pages = True
+            if block.content.strip() and block.type != BlockType.TITLE:
+                logical_page_texts.setdefault(lp, []).append(block.content)
         signal = page_signals.setdefault(
             page_number,
             {
@@ -70,6 +159,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "all_text": [],
                 "has_title": False,
                 "page_types": [],
+                "cid_token_counts": [],
             },
         )
         role = str(block.metadata.get("semantic_role") or "paragraph")
@@ -81,6 +171,9 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
             signal["all_text"].append(block.content)
         if block.type == BlockType.TITLE:
             signal["has_title"] = True
+        cid_count = block.metadata.get("cid_token_count")
+        if isinstance(cid_count, int) and cid_count > 0:
+            signal["cid_token_counts"].append(cid_count)
 
         if block.type == BlockType.TITLE:
             continue
@@ -92,6 +185,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": "body",
                 "text_parts": [],
                 "tables_markdown": [],
+                "tables": [],
                 "artifacts": [],
                 "confidence_parts": [],
             },
@@ -101,6 +195,14 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         elif block.type == BlockType.TABLE:
             if block.content.strip():
                 entry["tables_markdown"].append(block.content)
+                # B2: dual output – include raw cells alongside markdown.
+                raw_cells = block.metadata.get("cells")
+                table_entry: dict[str, Any] = {"markdown": block.content}
+                if raw_cells:
+                    table_entry["raw"] = raw_cells
+                    table_entry["rows"] = block.metadata.get("rows", 0)
+                    table_entry["cols"] = block.metadata.get("cols", 0)
+                entry["tables"].append(table_entry)
         elif block.content.strip():
             entry["text_parts"].append(block.content)
 
@@ -108,6 +210,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         if isinstance(confidence, (int, float)):
             entry["confidence_parts"].append(float(confidence))
 
+    total_pages = len(set(page_signals) | set(pages))
     ordered: list[dict[str, Any]] = []
     for page_number in sorted(set(page_signals) | set(pages)):
         entry = pages.get(
@@ -123,31 +226,119 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         )
         text = "\n\n".join(item for item in entry.pop("text_parts") if item.strip())
         confidences = entry.pop("confidence_parts")
-        page_types = [
-            item
-            for item in page_signals.get(page_number, {}).get("page_types", [])
-            if item and item != "body"
-        ]
-        page_type = page_types[0] if page_types else _infer_page_type(
-            page_number=page_number,
-            roles=page_signals.get(page_number, {}).get("roles", []),
-            full_text="\n\n".join(page_signals.get(page_number, {}).get("all_text", [])),
-            has_title=bool(page_signals.get(page_number, {}).get("has_title")),
-            body_text=text,
-        )
-        ordered.append(
-            {
-                "page_number": page_number,
-                "page_type": page_type,
-                "text": text,
-                "tables_markdown": entry["tables_markdown"],
-                "artifacts": entry["artifacts"],
-                "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 1.0,
-            }
-        )
+        sig = page_signals.get(page_number, {})
+        full_text = "\n\n".join(sig.get("all_text", []))
+
+        # Parser-emitted page_types take priority; accumulate votes for
+        # the remaining pages where the parser did not emit a type.
+        explicit_types = [t for t in sig.get("page_types", []) if t and t != "body"]
+        if explicit_types:
+            page_type = explicit_types[0]
+            page_type_confidence = "high"
+        else:
+            page_type, page_type_confidence = _infer_page_type_with_confidence(
+                page_number=page_number,
+                total_pages=total_pages,
+                roles=sig.get("roles", []),
+                full_text=full_text,
+                has_title=bool(sig.get("has_title")),
+                body_text=text,
+            )
+
+        page_entry: dict[str, Any] = {
+            "page_number": page_number,
+            "page_type": page_type,
+            "page_type_confidence": page_type_confidence,
+            "text": text,
+            "tables_markdown": entry["tables_markdown"],
+            "tables": entry["tables"],
+            "artifacts": entry["artifacts"],
+            "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 1.0,
+        }
+        cid_total = sum(sig.get("cid_token_counts", []))
+        if cid_total > 0:
+            page_entry["cid_token_count"] = cid_total
+        ordered.append(page_entry)
+
+    # For DOCX documents, attach a logical_pages summary alongside the physical pages.
+    if has_logical_pages and logical_page_texts:
+        for page_entry in ordered:
+            logical_pages_list = [
+                {
+                    "logical_page_number": lp_idx,
+                    "text": "\n\n".join(texts),
+                }
+                for lp_idx, texts in sorted(logical_page_texts.items())
+            ]
+            page_entry["logical_pages"] = logical_pages_list
+            break  # only attach to the first (and only physical) page entry
+
     return ordered
 
 
+# Strong token sets for page-type classification.
+# Only fire signature if the page contains a dedicated signature block header
+# (not a single mention of "签字" mid-paragraph).
+_SIGNATURE_STRONG_TOKENS = frozenset(
+    [
+        "signature page",
+        "signed by:",
+        "approved by:",
+        "审批人：",
+        "审批人:",
+        "签字栏",
+        "signature block",
+        "authorized signature",
+    ]
+)
+# Minimum fraction of blocks whose role must be non-body for the page to be
+# classified as a special type.  This prevents a single stray role from
+# overriding the whole page.
+_PAGE_TYPE_ROLE_THRESHOLD = 0.4
+
+
+def _infer_page_type_with_confidence(
+    *,
+    page_number: int,
+    total_pages: int,
+    roles: list[str],
+    full_text: str,
+    has_title: bool,
+    body_text: str,
+) -> tuple[str, str]:
+    """Return (page_type, confidence) where confidence is 'high'/'medium'/'low'."""
+    role_set = set(roles)
+    n_blocks = max(len(roles), 1)
+    normalized_text = full_text.lower()
+
+    # --- TOC / LEP  (role-based, high confidence) ---
+    toc_count = sum(1 for r in roles if r in ("toc_entry", "lep_entry"))
+    if toc_count / n_blocks >= _PAGE_TYPE_ROLE_THRESHOLD:
+        confidence = "high" if toc_count / n_blocks >= 0.7 else "medium"
+        return "toc", confidence
+
+    # --- Front matter (role-based, high confidence) ---
+    fm_count = sum(1 for r in roles if r in ("front_matter", "revision_record", "distribution_list"))
+    if fm_count / n_blocks >= _PAGE_TYPE_ROLE_THRESHOLD:
+        confidence = "high" if fm_count / n_blocks >= 0.7 else "medium"
+        return "front_matter", confidence
+
+    # --- Signature: require a strong dedicated header, not casual keyword mention ---
+    if any(token in normalized_text for token in _SIGNATURE_STRONG_TOKENS):
+        return "signature", "high"
+
+    # --- Appendix ---
+    if any(token in normalized_text for token in ("appendix", "annex", "附录")):
+        return "appendix", "medium"
+
+    # --- Cover page (first page, title only, no body text) ---
+    if page_number == 1 and has_title and not body_text.strip():
+        return "cover", "high"
+
+    return "body", "high"
+
+
+# Kept for backwards compatibility with any direct callers in tests.
 def _infer_page_type(
     *,
     page_number: int,
@@ -156,20 +347,15 @@ def _infer_page_type(
     has_title: bool,
     body_text: str,
 ) -> str:
-    role_set = set(roles)
-    normalized_text = full_text.lower()
-    if "toc_entry" in role_set or "lep_entry" in role_set:
-        return "toc"
-    if any(role in role_set for role in ("front_matter", "revision_record", "distribution_list")):
-        return "front_matter"
-    if any(token in normalized_text for token in ("signature", "signed by", "approved by", "签字", "签名", "审批")):
-        return "signature"
-    if any(token in normalized_text for token in ("appendix", "annex", "附录")):
-        return "appendix"
-    stripped_body = body_text.strip()
-    if page_number == 1 and has_title and not stripped_body:
-        return "cover"
-    return "body"
+    page_type, _ = _infer_page_type_with_confidence(
+        page_number=page_number,
+        total_pages=1,
+        roles=roles,
+        full_text=full_text,
+        has_title=has_title,
+        body_text=body_text,
+    )
+    return page_type
 
 
 def _infer_parser_used(blocks: tuple[Block, ...]) -> str:

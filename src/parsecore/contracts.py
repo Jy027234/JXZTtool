@@ -58,6 +58,32 @@ class TranslationAdapter(Protocol):
 
 
 @runtime_checkable
+class BoundaryRefiner(Protocol):
+    """Optional LLM-driven boundary refiner for low-confidence paragraphs.
+
+    Hosts that want LLM-based boundary repair inject an implementation; the
+    parsecore library never instantiates LLM clients itself.
+    """
+
+    def refine(self, *, paragraph: str, context: Mapping[str, Any] | None = None) -> str: ...
+
+
+@runtime_checkable
+class SemanticRefiner(Protocol):
+    """Optional vector-based semantic refiner for paragraph boundary decisions.
+
+    Hosts inject a callable that, given two adjacent paragraph candidates,
+    returns a similarity score in [0, 1].  Parsecore uses the score to decide
+    whether to merge or split without ever loading a vector model directly.
+
+    This keeps parsecore embeddable: the host product owns model loading,
+    GPU/CPU placement, batching, and credential management.
+    """
+
+    def similarity(self, *, left: str, right: str) -> float: ...
+
+
+@runtime_checkable
 class ProductAdapter(Protocol):
     def before_parse(self, *, request: ParseRequest, job: ParseJob) -> None: ...
 

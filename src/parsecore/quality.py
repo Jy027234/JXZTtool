@@ -15,6 +15,7 @@ field. Pages with no page number are bucketed under page 0.
 
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass, field
 from math import sqrt
@@ -27,6 +28,13 @@ _HEADER_FOOTER_MAX_LEN = 80
 _VERY_SHORT_LEN = 10
 _NUMERIC_HEAVY_RATIO = 0.6
 _LONG_BLOCK_LEN = 2000
+
+# CID-garble gate thresholds
+_CID_TOTAL_WARN_TOKENS = 50        # ≥50 cid tokens doc-wide → warn
+_CID_TOTAL_GATE_TOKENS = 200       # ≥200 cid tokens doc-wide → flag cid_garble
+_CID_PAGE_RATIO_GATE = 0.12        # page-level char ratio already used by parser
+
+_CID_TOKEN_RE = re.compile(r"\(cid:\d+\)")
 
 
 @dataclass(slots=True)
@@ -444,12 +452,152 @@ __all__ = [
     "LayoutSignalsReport",
     "OcrPageSignal",
     "PageQuality",
+    "ParseQualitySummary",
     "StructuralQualityReport",
     "evaluate_blocks",
     "evaluate_chunk_embeddings",
     "evaluate_layout_signals",
+    "evaluate_parse_quality",
     "diff_reports",
 ]
+
+
+@dataclass(slots=True)
+class ParseQualitySummary:
+    """High-level quality summary surfaced in API responses.
+
+    ``score``  – float in [0, 1]; 1.0 means no detected quality issues.
+    ``flags``  – set of short issue codes (e.g. ``cid_garble``, ``ocr_failed``).
+    ``warnings`` – human-readable list, safe to return to API consumers.
+    ``recommended_action`` – optional hint such as ``retry_with_ocr``.
+    ``total_cid_tokens`` – raw count of ``(cid:N)`` tokens across all blocks.
+    """
+
+    score: float
+    flags: frozenset[str]
+    warnings: tuple[str, ...]
+    recommended_action: str | None
+    total_cid_tokens: int
+    ocr_failed_pages: int
+    suspect_signature_pages: int
+
+
+def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
+    """Derive a ``ParseQualitySummary`` from raw block output."""
+
+    blocks_list = list(blocks)
+    total_chars = 0
+    total_cid_tokens = 0
+    ocr_failed_pages: set[int] = set()
+    ocr_fallback_pages: set[int] = set()
+    page_signature_votes: dict[int, int] = {}
+    page_block_counts: dict[int, int] = {}
+
+    for block in blocks_list:
+        content = block.content or ""
+        total_chars += len(content)
+        cid_matches = _CID_TOKEN_RE.findall(content)
+        total_cid_tokens += len(cid_matches)
+
+        meta = block.metadata or {}
+        page_number = int(meta.get("page", 1))
+        page_block_counts[page_number] = page_block_counts.get(page_number, 0) + 1
+
+        if meta.get("ocr_error_reason"):
+            ocr_failed_pages.add(page_number)
+        if meta.get("ocr_fallback_used"):
+            ocr_fallback_pages.add(page_number)
+
+        role = str(meta.get("semantic_role") or "")
+        page_type = str(meta.get("page_type") or "")
+        if role == "signature" or page_type == "signature":
+            page_signature_votes[page_number] = page_signature_votes.get(page_number, 0) + 1
+
+    # Signature-overload: pages where every (or almost every) block is signature
+    suspect_signature_pages = sum(
+        1 for pn, votes in page_signature_votes.items()
+        if page_block_counts.get(pn, 1) > 0
+        and votes / page_block_counts[pn] >= 0.5
+    )
+
+    flags: set[str] = set()
+    warnings: list[str] = []
+    penalty = 0.0
+
+    # CID garble gate
+    if total_cid_tokens >= _CID_TOTAL_GATE_TOKENS:
+        flags.add("cid_garble")
+        warnings.append(
+            f"Document contains {total_cid_tokens} CID tokens (≥{_CID_TOTAL_GATE_TOKENS}); "
+            "text extraction is likely incomplete or garbled."
+        )
+        penalty += 0.35
+    elif total_cid_tokens >= _CID_TOTAL_WARN_TOKENS:
+        flags.add("cid_warn")
+        warnings.append(
+            f"Document contains {total_cid_tokens} CID tokens; "
+            "some text may be garbled."
+        )
+        penalty += 0.15
+
+    # OCR failed pages
+    if ocr_failed_pages:
+        flags.add("ocr_failed")
+        warnings.append(
+            f"OCR failed on {len(ocr_failed_pages)} page(s); "
+            "affected pages may have missing text."
+        )
+        penalty += 0.1 * min(len(ocr_failed_pages), 3)
+
+    # Signature overload
+    if suspect_signature_pages >= 5:
+        flags.add("suspect_signature_overload")
+        warnings.append(
+            f"{suspect_signature_pages} pages classified as signature, which is unusually high. "
+            "Review page-type classification."
+        )
+        penalty += 0.1
+
+    # No blocks at all
+    if not blocks_list:
+        flags.add("empty_output")
+        warnings.append("Parser produced no content blocks.")
+        penalty += 0.5
+
+    # DOCX single-page
+    if len(page_block_counts) == 1 and 1 in page_block_counts and page_block_counts[1] > 20:
+        flags.add("docx_single_page")
+        warnings.append(
+            "Document was collapsed into a single page; "
+            "logical section/page splitting may be needed."
+        )
+        penalty += 0.05
+
+    score = max(0.0, round(1.0 - penalty, 4))
+
+    recommended_action: str | None = None
+    if "cid_garble" in flags and "ocr_failed" not in flags and not ocr_fallback_pages:
+        recommended_action = "retry_with_ocr"
+    elif "docx_single_page" in flags:
+        # Boundary fidelity is poor: paragraphs were not segmented into logical
+        # pages.  A vector-similarity pass over adjacent paragraphs is the
+        # cheapest next step; hosts that have not injected a SemanticRefiner
+        # can read this signal and decide whether to escalate.
+        recommended_action = "retry_with_vector_refine"
+    elif "suspect_signature_overload" in flags:
+        # Heuristic boundaries failed to separate signature/legal blocks; an
+        # LLM boundary refiner is typically required to repair these.
+        recommended_action = "retry_with_llm_refine"
+
+    return ParseQualitySummary(
+        score=score,
+        flags=frozenset(flags),
+        warnings=tuple(warnings),
+        recommended_action=recommended_action,
+        total_cid_tokens=total_cid_tokens,
+        ocr_failed_pages=len(ocr_failed_pages),
+        suspect_signature_pages=suspect_signature_pages,
+    )
 
 
 def _summarize_pages(pages: Sequence[PageQuality]) -> list[dict[str, float | int]]:

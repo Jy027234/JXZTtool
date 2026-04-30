@@ -12,6 +12,7 @@ from .config import OcrProviderSettings
 from .contracts import ParserAdapter
 from .models import Block, BlockType, ParseRequest, SemanticRole
 from .ocr import OcrConfigurationError, OcrRequestError, build_ocr_engine
+from .ocr_cache import PageOcrCache, get_default_cache
 from .stubs import StubParser
 
 
@@ -97,6 +98,7 @@ class _DocxParagraphInfo:
     text: str
     style: str | None = None
     outline_level: int | None = None
+    has_page_break: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -125,6 +127,7 @@ def _docx_paragraph_info(
     namespaces: Mapping[str, str],
 ) -> _DocxParagraphInfo:
     parts: list[str] = []
+    has_page_break = False
     for node in paragraph.iter():
         local_name = _xml_local_name(node.tag)
         if local_name == "t" and node.text:
@@ -133,6 +136,12 @@ def _docx_paragraph_info(
             parts.append(" ")
         elif local_name in {"br", "cr"}:
             parts.append("\n")
+            if local_name == "br":
+                br_type = node.get(f"{{{namespaces['w']}}}type") or node.get("type", "")
+                if br_type in {"page", "column"}:
+                    has_page_break = True
+        elif local_name == "lastRenderedPageBreak":
+            has_page_break = True
     lines = [_normalize_inline_whitespace(item) for item in "".join(parts).splitlines()]
     text = "\n".join(item for item in lines if item).strip()
 
@@ -148,7 +157,7 @@ def _docx_paragraph_info(
             outline_level = int(raw_level) + 1 if raw_level is not None else None
         except (TypeError, ValueError):
             outline_level = None
-    return _DocxParagraphInfo(text=text, style=style, outline_level=outline_level)
+    return _DocxParagraphInfo(text=text, style=style, outline_level=outline_level, has_page_break=has_page_break)
 
 
 def _docx_extract_page_label(text: str) -> str | None:
@@ -537,10 +546,21 @@ class DocxParser(ParserAdapter):
 
         state = _DocxParseState()
         position = 1
+        logical_page_index = 1
         for child in list(body):
             local_name = _xml_local_name(child.tag)
             if local_name == "p":
                 info = _docx_paragraph_info(child, namespaces=namespaces)
+                # Advance logical page on explicit page/column breaks or
+                # top-level headings (outline level 1 or 2).
+                if info.has_page_break:
+                    logical_page_index += 1
+                elif (
+                    info.outline_level is not None
+                    and info.outline_level <= 2
+                    and logical_page_index > 1
+                ):
+                    logical_page_index += 1
                 if not info.text:
                     continue
                 classified = _classify_docx_paragraph(info, state=state)
@@ -548,6 +568,7 @@ class DocxParser(ParserAdapter):
                     continue
                 metadata = {
                     "page": 1,
+                    "logical_page": logical_page_index,
                     "page_type": classified.page_type,
                     "parser": self.name,
                     "position": position,
@@ -596,6 +617,7 @@ class DocxParser(ParserAdapter):
                 continue
             metadata = {
                 "page": 1,
+                "logical_page": logical_page_index,
                 "page_type": page_type,
                 "parser": self.name,
                 "position": position,
@@ -684,6 +706,7 @@ class PdfTextParser(ParserAdapter):
         options: Mapping[str, Any] | None = None,
         ocr_provider_settings: OcrProviderSettings | None = None,
         boundary_refiner: Any = None,
+        semantic_refiner: Any = None,
     ) -> None:
         self._media_types = {item.lower() for item in media_types}
         self._extensions = {item.lower() for item in extensions}
@@ -692,6 +715,13 @@ class PdfTextParser(ParserAdapter):
             raw = options.get("post_process")
             if isinstance(raw, Mapping):
                 post_process = dict(raw)
+
+        # B3: fidelity_profile coarse knob.  Applies before individual flags.
+        # "full_fidelity" – preserve everything, disable noise filters.
+        # "balanced"      – default config-driven behaviour (no override).
+        # "rag_clean"     – aggressively strip headers/footers and dedup lines.
+        _fidelity_profile = str(options.get("fidelity_profile", "balanced") if options else "balanced").lower()
+        self._fidelity_profile = _fidelity_profile
         # A3+.1 (opt-in, default False): strip repeated header/footer lines
         # detected via cross-page text similarity. Off by default so the full
         # rendered page content remains visible to downstream consumers; flip
@@ -768,12 +798,47 @@ class PdfTextParser(ParserAdapter):
         # A4 LLM hookup: optional boundary refiner invoked on low-confidence
         # paragraphs only. None == feature disabled (default).
         self._boundary_refiner = boundary_refiner
+        # Vector hookup: optional semantic refiner injected by host product.
+        # ParseCore never loads vector models itself; the host owns model
+        # lifecycle and credentials.  When provided, the refiner exposes
+        # ``similarity(left, right) -> float`` and is consulted before LLM
+        # boundary repair to merge/split adjacent paragraphs cheaply.
+        self._semantic_refiner = semantic_refiner
+        self._semantic_merge_threshold = float(
+            post_process.get("semantic_merge_threshold", 0.86)
+        )
+        self._semantic_split_threshold = float(
+            post_process.get("semantic_split_threshold", 0.35)
+        )
         self._llm_min_length = int(
             post_process.get("llm_refine_min_length", 600)
         )
         self._llm_min_markers = int(
             post_process.get("llm_refine_min_markers", 2)
         )
+        # C2: page-level OCR cache.  Enabled by default when ocr_bad_pages is
+        # active; can be opted out via ``ocr_cache = false`` in post_process.
+        _ocr_cache_enabled = bool(post_process.get("ocr_cache", self._ocr_bad_pages_enabled))
+        _ocr_cache_ttl = int(post_process.get("ocr_cache_ttl_days", 7)) * 86400
+        self._ocr_cache: PageOcrCache = (
+            get_default_cache()
+            if _ocr_cache_enabled
+            else PageOcrCache(cache_dir=None)
+        )
+        # B3 override: apply fidelity_profile coarse flags after all individual
+        # flag reads so it acts as a final override when explicitly set.
+        if _fidelity_profile == "rag_clean":
+            self._strip_hf_enabled = True
+            self._merge_short_enabled = True
+        elif _fidelity_profile == "full_fidelity":
+            self._strip_hf_enabled = False
+            self._merge_short_enabled = False
+            self._split_structural_enabled = False
+            self._split_inline_structural_enabled = False
+            self._split_toc_enabled = False
+            self._merge_table_enabled = False
+            self._merge_figure_caption_enabled = False
+            self._merge_highlights_enabled = False
 
     def supports(self, *, media_type: str | None, suffix: str) -> bool:
         normalized_type = (media_type or "").lower()
@@ -853,6 +918,16 @@ class PdfTextParser(ParserAdapter):
             if request_enable_ocr is None
             else request_enable_ocr
         )
+        # Resolve the effective OCR strategy label for observability.
+        # "force"  – caller explicitly requested full-document OCR.
+        # "auto"   – bad-page detector is active (either from config or caller).
+        # "off"    – OCR is disabled.
+        if request_enable_ocr is True:
+            ocr_strategy = "force"
+        elif effective_ocr_bad_pages_enabled:
+            ocr_strategy = "auto"
+        else:
+            ocr_strategy = "off"
         effective_layout_reading_order_enabled = (
             self._layout_reading_order_enabled
             if request_layout_reading_order is None
@@ -880,6 +955,7 @@ class PdfTextParser(ParserAdapter):
                 min_cols=self._dual_table_min_cols,
                 layout_reading_order_enabled=effective_layout_reading_order_enabled,
                 ocr_page_text_fn=ocr_page_text_fn,
+                ocr_cache=self._ocr_cache,
             )
             # Replace per-page text with the table-stripped pdfplumber text so
             # the existing splitters do not see table contents twice.
@@ -913,6 +989,7 @@ class PdfTextParser(ParserAdapter):
                     "page_type": "body",
                     "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
+                    "ocr_strategy": ocr_strategy,
                 },
             )
         ]
@@ -947,6 +1024,13 @@ class PdfTextParser(ParserAdapter):
                 paragraphs = _merge_table_continuations(paragraphs)
             if self._merge_highlights_enabled:
                 paragraphs = _merge_highlights_entries(paragraphs)
+            if self._semantic_refiner is not None:
+                paragraphs = _refine_with_semantic_similarity(
+                    paragraphs,
+                    refiner=self._semantic_refiner,
+                    merge_threshold=self._semantic_merge_threshold,
+                    split_threshold=self._semantic_split_threshold,
+                )
             if self._boundary_refiner is not None:
                 paragraphs = _refine_low_confidence_paragraphs(
                     paragraphs,
@@ -1252,6 +1336,14 @@ def _infer_page_type(
 
 
 def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
+    """Return the request-level OCR override.
+
+    Three values are possible:
+    - ``True``  – caller requested full-document OCR (``enable_ocr=true``).
+    - ``False`` – caller explicitly disabled OCR (``enable_ocr=false``).
+    - ``None``  – no override; use the parser's built-in bad-page detection
+                  (equivalent to ``enable_ocr="auto"`` or omitted).
+    """
     if "enable_ocr" not in request.options:
         return None
     value = request.options.get("enable_ocr")
@@ -1262,6 +1354,9 @@ def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
+    # "auto" or any unrecognised string → defer to config-level bad-page detection
+    if normalized == "auto":
+        return None
     return bool(value)
 
 
@@ -1885,6 +1980,7 @@ def _extract_pdfplumber_layout(
         [Any, Sequence[tuple[float, float, float, float]], int, str | None],
         tuple[str | None, str | None, str | None, _OcrStageTimings],
     ] | None = None,
+    ocr_cache: "PageOcrCache | None" = None,
 ) -> list[_PageLayout]:
     """Extract per-page layout (tables + table-stripped text) using pdfplumber.
 
@@ -1952,15 +2048,38 @@ def _extract_pdfplumber_layout(
             layout_elapsed_s = round(time.monotonic() - page_started, 6)
 
             if ocr_page_text_fn is not None:
-                recovered_text, ocr_attempt_reason, ocr_error_reason, ocr_timings = ocr_page_text_fn(
-                    page,
-                    table_bboxes,
-                    column_count_hint,
-                    text_without_tables,
-                )
-                if recovered_text:
-                    text_without_tables = recovered_text
-                    ocr_fallback_reason = ocr_attempt_reason
+                # Check page-level OCR cache before running expensive OCR.
+                _cache_hit_text: str | None = None
+                if ocr_cache is not None and ocr_cache.enabled:
+                    _cache_hit_text = ocr_cache.get(
+                        file_path=file_path,
+                        page_number=index,
+                        provider_tag="rapidocr",
+                        options_repr="",
+                    )
+                if _cache_hit_text is not None:
+                    text_without_tables = _cache_hit_text
+                    ocr_attempt_reason = "cid_dense"
+                    ocr_fallback_reason = "cid_dense"
+                else:
+                    recovered_text, ocr_attempt_reason, ocr_error_reason, ocr_timings = ocr_page_text_fn(
+                        page,
+                        table_bboxes,
+                        column_count_hint,
+                        text_without_tables,
+                    )
+                    if recovered_text:
+                        text_without_tables = recovered_text
+                        ocr_fallback_reason = ocr_attempt_reason
+                        # Persist to cache for future runs.
+                        if ocr_cache is not None and ocr_cache.enabled:
+                            ocr_cache.put(
+                                file_path=file_path,
+                                page_number=index,
+                                provider_tag="rapidocr",
+                                text=recovered_text,
+                                options_repr="",
+                            )
 
             layouts.append(
                 _PageLayout(
@@ -2531,6 +2650,49 @@ def _is_low_confidence_paragraph(
     return True
 
 
+def _refine_with_semantic_similarity(
+    paragraphs: list[str],
+    *,
+    refiner: Any,
+    merge_threshold: float,
+    split_threshold: float,
+) -> list[str]:
+    """Apply host-injected vector similarity to merge adjacent paragraphs.
+
+    The host-supplied refiner exposes ``similarity(left, right) -> float``.
+    When two adjacent paragraphs score above ``merge_threshold`` and the join
+    would not exceed a hard length cap, they are merged.  Below
+    ``split_threshold`` the paragraphs are kept separate (default behaviour).
+
+    Any exception raised by the host refiner is swallowed to preserve the
+    parse pipeline; ParseCore never owns the model lifecycle.
+    """
+
+    if not paragraphs or len(paragraphs) < 2:
+        return paragraphs
+    similarity = getattr(refiner, "similarity", None)
+    if not callable(similarity):
+        return paragraphs
+    merged: list[str] = [paragraphs[0]]
+    for current in paragraphs[1:]:
+        previous = merged[-1]
+        # Skip very short fragments and tabular markers; merging those would
+        # create false joins.
+        if len(previous) + len(current) > 4000:
+            merged.append(current)
+            continue
+        try:
+            score = float(similarity(left=previous, right=current))
+        except Exception:
+            merged.append(current)
+            continue
+        if score >= merge_threshold:
+            merged[-1] = previous.rstrip() + "\n" + current.lstrip()
+        else:
+            merged.append(current)
+    return merged
+
+
 def _refine_low_confidence_paragraphs(
     paragraphs: list[str],
     *,
@@ -2570,6 +2732,7 @@ def build_parser(
     options: Mapping[str, Any] | None = None,
     ocr_provider_settings: OcrProviderSettings | None = None,
     boundary_refiner: Any = None,
+    semantic_refiner: Any = None,
 ) -> ParserAdapter:
     normalized = name.strip().lower()
     if normalized == "docx-native":
@@ -2583,6 +2746,7 @@ def build_parser(
             options=options,
             ocr_provider_settings=ocr_provider_settings,
             boundary_refiner=boundary_refiner,
+            semantic_refiner=semantic_refiner,
         )
     if normalized == "image-ocr":
         return ImageOcrParser(

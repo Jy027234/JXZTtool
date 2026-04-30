@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .config import load_settings
 from .embeddings import EmbeddingConfigurationError, build_embedding_provider
@@ -35,7 +36,11 @@ def _build_index(database_url: str, index_mode: str):
     return NullIndex()
 
 
-def build_runtime(config_path: str | Path) -> ParseRuntime:
+def build_runtime(
+    config_path: str | Path,
+    *,
+    semantic_refiner: Any = None,
+) -> ParseRuntime:
     settings = load_settings(config_path)
 
     boundary_refiner = None
@@ -60,6 +65,7 @@ def build_runtime(config_path: str | Path) -> ParseRuntime:
             options=item.options,
             ocr_provider_settings=settings.providers.ocr,
             boundary_refiner=boundary_refiner if item.name == "pdf-text" else None,
+            semantic_refiner=semantic_refiner if item.name == "pdf-text" else None,
         )
         for item in settings.parsers
     ]
