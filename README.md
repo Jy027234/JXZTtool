@@ -206,6 +206,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 
 说明：该报告会扫描 `.xls/.xlsx/.xlsm` 样本，输出每个文件的 `tables / titled_tables / merged_cell_tables / empty_tables / truncated_tables / issues`，用于在真实表格文档上固定解析质量口径。
 
+运行轻量解析性能基线：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
+```
+
+说明：该基线输出每个样本的 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables`，默认只扫表格扩展名；需要覆盖 PDF/DOCX 时可显式传 `--extensions .pdf,.docx,.xls,.xlsx,.xlsm`。
+
 只重算 chunk / embedding（跳过重新解析源文件）：
 
 ```powershell
