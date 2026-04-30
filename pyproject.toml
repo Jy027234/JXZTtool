@@ -26,6 +26,7 @@ storage = [
     "pgvector>=0.3,<1",
 ]
 parsers = [
+    "openpyxl>=3.1,<4",
     "pypdf>=5,<6",
     "rapidocr_onnxruntime>=1.2,<2",
 ]

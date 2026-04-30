@@ -27,6 +27,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 可挂载的 ASGI API
 - SQLite 持久化 JobStore 与查询接口
 - 真实 DOCX 解析器与文本解析器
+- Excel `.xlsx/.xlsm` 原生表格解析器
 - PDF / OCR 结构块 `semantic_role` 标注（如 `toc_entry`、`highlights_entry`、`warning`）
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可切换的 `inline` / `queue-worker` 执行模式
@@ -205,7 +206,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 显式 API 路由：
 
-- `GET /health`：parser-service 兼容健康检查，返回 `status / version / services`，其中 `services` 当前包含 `pdfplumber / python_docx / paddleocr`
+- `GET /health`：parser-service 兼容健康检查，返回 `status / version / services`，其中 `services` 当前包含 `pdfplumber / python_docx / openpyxl / paddleocr`
 - `POST /parse`：parser-service 兼容上传入口，使用 multipart `file` 字段上传文档，返回 `file_name / mime_type / total_pages / pages / metadata`
 - `POST /parse/batch`：parser-service 兼容根路径，可直接对接现有企业产品客户端
 - `POST /v1/parse`：与 `/parse` 等价的版本化上传入口，支持 `enable_ocr`、`tenant_id`、`quota_key`、`quota_units`
@@ -225,13 +226,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
 - `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
 - `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退
-- `services`：健康检查中的能力矩阵会结合当前注册 parser 与实际 OCR runtime 可用性返回；兼容字段名仍为 `paddleocr`，但在 ParseCore 中代表 RapidOCR 驱动的 OCR 能力可用性
+- `services`：健康检查中的能力矩阵会结合当前注册 parser 与实际 runtime 可用性返回；`openpyxl` 代表 Excel parser 可用性，兼容字段名 `paddleocr` 在 ParseCore 中代表 RapidOCR 驱动的 OCR 能力可用性
 - `x-trace-id`：所有 HTTP 响应都会回传该请求头；若调用方未传入，ParseCore 会自动生成，便于宿主系统串联日志与事件
 - 错误包：除 batch 兼容字段外，其余错误响应统一包含 `error / code / message / trace_id`，需要附加上下文时再补 `detail`
 
 API 依赖说明：
 
 - `api` 可选依赖现已包含 `python-multipart`，用于支持 `/parse` 与 `/v1/parse` 的 multipart 文件上传
+- `parsers` 可选依赖现已包含 `openpyxl`，用于支持 `excel-native` 解析 `.xlsx/.xlsm`
 - `parsers` 可选依赖现已包含 `rapidocr_onnxruntime`，用于支撑 `image-ocr` parser 与 PDF 坏页 OCR 回退
 
 背压与并发说明：

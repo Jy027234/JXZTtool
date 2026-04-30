@@ -436,6 +436,47 @@ def _render_docx_table_markdown(rows: Sequence[Sequence[str]], *, header_rows: i
     return "\n".join(rendered)
 
 
+def _normalize_excel_cell_value(value: Any) -> str:
+    if value is None:
+        return ""
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value).strip()
+
+
+def _trim_excel_rows(rows: Sequence[Sequence[str]]) -> tuple[list[list[str]], int, int]:
+    non_empty_row_indexes = [
+        index for index, row in enumerate(rows) if any(str(cell or "").strip() for cell in row)
+    ]
+    if not non_empty_row_indexes:
+        return [], 0, 0
+    first_row = non_empty_row_indexes[0]
+    last_row = non_empty_row_indexes[-1]
+    width = max((len(row) for row in rows), default=0)
+    non_empty_col_indexes = [
+        index
+        for index in range(width)
+        if any(
+            index < len(row) and str(row[index] or "").strip()
+            for row in rows[first_row : last_row + 1]
+        )
+    ]
+    if not non_empty_col_indexes:
+        return [], 0, 0
+    first_col = non_empty_col_indexes[0]
+    last_col = non_empty_col_indexes[-1]
+    trimmed = [
+        list(row[first_col : last_col + 1])
+        for row in rows[first_row : last_row + 1]
+    ]
+    return trimmed, first_row + 1, first_col + 1
+
+
+def _render_excel_table_markdown(rows: Sequence[Sequence[str]]) -> str:
+    return _render_docx_table_markdown(rows)
+
+
 def _classify_docx_table(
     cells: Sequence[Sequence[str]],
     *,
@@ -644,6 +685,143 @@ class DocxParser(ParserAdapter):
                 )
             )
             position += 1
+        return tuple(blocks)
+
+
+class ExcelParser(ParserAdapter):
+    name = "excel-native"
+
+    def __init__(
+        self,
+        *,
+        media_types: Sequence[str],
+        extensions: Sequence[str],
+        options: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._media_types = {item.lower() for item in media_types}
+        self._extensions = {item.lower() for item in extensions}
+        self._options = dict(options or {})
+        self._data_only = bool(self._options.get("data_only", False))
+        self._include_hidden_sheets = bool(self._options.get("include_hidden_sheets", True))
+        self._max_rows_per_sheet = max(1, int(self._options.get("max_rows_per_sheet", 5000)))
+        self._max_cols_per_sheet = max(1, int(self._options.get("max_cols_per_sheet", 100)))
+
+    def supports(self, *, media_type: str | None, suffix: str) -> bool:
+        normalized_type = (media_type or "").lower()
+        normalized_suffix = suffix.lower()
+        return normalized_type in self._media_types or normalized_suffix in self._extensions
+
+    def parse(self, request: ParseRequest) -> Sequence[Block]:
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.utils import get_column_letter
+        except ImportError as exc:
+            raise RuntimeError(
+                "excel-native parser requires openpyxl; install parsecore-starter[parsers]"
+            ) from exc
+
+        document_path = Path(request.file_path)
+        workbook = load_workbook(
+            filename=document_path,
+            read_only=True,
+            data_only=self._data_only,
+        )
+        blocks: list[Block] = [
+            Block(
+                block_id=f"{request.doc_id}-title",
+                doc_id=request.doc_id,
+                type=BlockType.TITLE,
+                content=document_path.stem,
+                metadata={
+                    "page": 1,
+                    "page_type": "body",
+                    "parser": self.name,
+                    "kind": BlockType.TITLE.value,
+                    "semantic_role": SemanticRole.TITLE.value,
+                },
+            )
+        ]
+        try:
+            position = 1
+            for sheet_index, worksheet in enumerate(workbook.worksheets, start=1):
+                hidden_sheet = str(getattr(worksheet, "sheet_state", "visible")) != "visible"
+                if hidden_sheet and not self._include_hidden_sheets:
+                    continue
+
+                sheet_max_row = min(int(worksheet.max_row or 1), self._max_rows_per_sheet)
+                sheet_max_col = min(int(worksheet.max_column or 1), self._max_cols_per_sheet)
+                raw_rows: list[list[str]] = []
+                has_formula = False
+                formula_count = 0
+                for row in worksheet.iter_rows(
+                    min_row=1,
+                    max_row=sheet_max_row,
+                    min_col=1,
+                    max_col=sheet_max_col,
+                ):
+                    values: list[str] = []
+                    for cell in row:
+                        value = getattr(cell, "value", None)
+                        is_formula = getattr(cell, "data_type", None) == "f" or (
+                            isinstance(value, str) and value.startswith("=")
+                        )
+                        if is_formula:
+                            has_formula = True
+                            formula_count += 1
+                        values.append(_normalize_excel_cell_value(value))
+                    raw_rows.append(values)
+
+                rows, start_row, start_col = _trim_excel_rows(raw_rows)
+                if not rows:
+                    continue
+                content = _render_excel_table_markdown(rows)
+                if not content:
+                    continue
+                end_row = start_row + len(rows) - 1
+                end_col = start_col + max((len(row) for row in rows), default=1) - 1
+                metadata = {
+                    "page": sheet_index,
+                    "logical_page": sheet_index,
+                    "page_type": "body",
+                    "parser": self.name,
+                    "position": position,
+                    "semantic_role": SemanticRole.TABLE.value,
+                    "kind": BlockType.TABLE.value,
+                    "table_type": "spreadsheet",
+                    "sheet_name": str(worksheet.title),
+                    "sheet_index": sheet_index,
+                    "hidden_sheet": hidden_sheet,
+                    "row_range": f"{start_row}:{end_row}",
+                    "column_range": f"{get_column_letter(start_col)}:{get_column_letter(end_col)}",
+                    "cell_range": (
+                        f"{get_column_letter(start_col)}{start_row}:"
+                        f"{get_column_letter(end_col)}{end_row}"
+                    ),
+                    "rows": len(rows),
+                    "cols": max((len(row) for row in rows), default=0),
+                    "header_rows": 1,
+                    "has_formula": has_formula,
+                    "formula_count": formula_count,
+                    "truncated": (
+                        int(worksheet.max_row or 0) > self._max_rows_per_sheet
+                        or int(worksheet.max_column or 0) > self._max_cols_per_sheet
+                    ),
+                    "cells": [list(row) for row in rows],
+                }
+                blocks.append(
+                    Block(
+                        block_id=f"{request.doc_id}-sheet-{sheet_index}",
+                        doc_id=request.doc_id,
+                        type=BlockType.TABLE,
+                        content=content,
+                        metadata=metadata,
+                    )
+                )
+                position += 1
+        finally:
+            close = getattr(workbook, "close", None)
+            if callable(close):
+                close()
         return tuple(blocks)
 
 
@@ -2737,6 +2915,8 @@ def build_parser(
     normalized = name.strip().lower()
     if normalized == "docx-native":
         return DocxParser(media_types=media_types, extensions=extensions)
+    if normalized == "excel-native":
+        return ExcelParser(media_types=media_types, extensions=extensions, options=options)
     if normalized == "text-native":
         return TextParser(media_types=media_types, extensions=extensions)
     if normalized == "pdf-text":

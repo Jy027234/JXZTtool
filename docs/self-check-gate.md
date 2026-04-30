@@ -75,7 +75,7 @@ CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。base
 
 - 快速自检已通过。
 - 本轮等价验证已通过：全量 `unittest discover -s tests` 通过，`baseline.json` 与 `baseline.table-structure.primary.json` 的真实 `check` 均通过，并已将 layout/table 两类专项继续收口到同一回归工具路径。
-- 单测结果：`173 passed, 5 skipped`。
+- 单测结果：`209 passed, 5 skipped`。
 - 性能与稳定性补强：已新增分层 CI、同步上传大小保护和 OCR benchmark 专项工具。
 - 布局专项新增混排页顺序校验：正文与表格块不再按“先表后文”固定顺序输出，已改为按页面垂直锚点交错输出并由 `tests.test_pdf_parser_options` 覆盖。
 - 布局专项新增图注邻接校验：当 `Figure/Fig./Illustration` 标签被单独切段时，parser 会将其与下一段 caption 说明自动合并，已由 `tests.test_pdf_parser_figure_caption` 覆盖。

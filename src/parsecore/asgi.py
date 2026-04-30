@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
+from importlib.util import find_spec
 import mimetypes
 import os
 from pathlib import Path
@@ -964,6 +965,7 @@ def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
     return {
         "pdfplumber": "pdf-text" in parser_names,
         "python_docx": "docx-native" in parser_names,
+        "openpyxl": "excel-native" in parser_names and find_spec("openpyxl") is not None,
         "paddleocr": "image-ocr" in parser_names and _is_ocr_service_available(runtime),
     }
 

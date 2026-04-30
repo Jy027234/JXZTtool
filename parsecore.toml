@@ -113,6 +113,17 @@ media_types = ["image/png", "image/jpeg"]
 extensions = [".png", ".jpg", ".jpeg"]
 
 [[parsers]]
+name = "excel-native"
+media_types = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.macroEnabled.12",
+]
+extensions = [".xlsx", ".xlsm"]
+# options.max_rows_per_sheet = 5000
+# options.max_cols_per_sheet = 100
+# options.include_hidden_sheets = true
+
+[[parsers]]
 name = "text-native"
 media_types = ["text/plain"]
 extensions = [".txt", ".md"]
