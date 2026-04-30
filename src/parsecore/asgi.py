@@ -4,7 +4,6 @@ import base64
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
-from importlib.util import find_spec
 import mimetypes
 import os
 from pathlib import Path
@@ -16,7 +15,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from .api_health import health_services as _base_health_services
+from .api_health import is_ocr_service_available as _is_ocr_service_available
 from .api_payloads import _batch_success_response, _parse_success_response, _project_pages, _to_payload
+from .api_responses import batch_error_response as _batch_error_response
+from .api_responses import error_response as _error_response
 from .api_support import (
     ApiKeyMiddleware,
     TraceIdMiddleware,
@@ -29,7 +32,6 @@ from .api_support import (
 )
 from .bootstrap import build_runtime
 from .models import ParseJob, ParseOutcome, ParseRequest
-from .ocr import is_ocr_provider_available
 from .runtime import ParseRuntime, QuotaExceededError
 
 
@@ -894,52 +896,6 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     return app
 
 
-def _batch_error_response(
-    request: Request,
-    *,
-    code: str,
-    message: str,
-    status_code: int,
-    parser_used: str = "none",
-    detail: Any = None,
-) -> JSONResponse:
-    payload = {
-        "success": False,
-        "total_pages": 0,
-        "pages": [],
-        "parser_used": parser_used,
-        "error": message,
-        "code": code,
-        "message": message,
-        "trace_id": _trace_id_for_request(request),
-    }
-    if detail is not None:
-        payload["detail"] = detail
-    return JSONResponse(payload, status_code=status_code)
-
-
-def _error_response(
-    request: Request,
-    *,
-    code: str,
-    message: str,
-    status_code: int,
-    detail: Any = None,
-    extra: dict[str, Any] | None = None,
-) -> JSONResponse:
-    payload: dict[str, Any] = {
-        "error": code,
-        "code": code,
-        "message": message,
-        "trace_id": _trace_id_for_request(request),
-    }
-    if detail is not None:
-        payload["detail"] = detail
-    if extra:
-        payload.update(extra)
-    return JSONResponse(payload, status_code=status_code)
-
-
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -961,18 +917,7 @@ def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
 
 
 def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
-    parser_names = {parser.name for parser in runtime.parsers}
-    return {
-        "pdfplumber": "pdf-text" in parser_names,
-        "python_docx": "docx-native" in parser_names,
-        "openpyxl": "excel-native" in parser_names and find_spec("openpyxl") is not None,
-        "xlrd": "excel-native" in parser_names and find_spec("xlrd") is not None,
-        "paddleocr": "image-ocr" in parser_names and _is_ocr_service_available(runtime),
-    }
-
-
-def _is_ocr_service_available(runtime: ParseRuntime) -> bool:
-    return is_ocr_provider_available(runtime.settings.providers.ocr)
+    return _base_health_services(runtime, ocr_probe=_is_ocr_service_available)
 
 
 def _record_quota_exceeded_event(request: Request, runtime_obj: ParseRuntime, exc: QuotaExceededError) -> None:
