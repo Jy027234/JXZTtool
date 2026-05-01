@@ -228,7 +228,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `POST /parse`：parser-service 兼容上传入口，使用 multipart `file` 字段上传文档，返回 `file_name / mime_type / total_pages / pages / metadata`
 - `POST /parse/batch`：parser-service 兼容根路径，可直接对接现有企业产品客户端
 - `POST /v1/parse`：与 `/parse` 等价的版本化上传入口，支持 `enable_ocr`、`tenant_id`、`quota_key`、`quota_units`
-- `POST /v1/parse/batch`：与 `/parse/batch` 等价的版本化同步入口，接收 `file_base64`、`file_name`，同步返回 `success / total_pages / pages[] / parser_used / error`
+- `POST /v1/parse/batch`：与 `/parse/batch` 等价的版本化同步入口，接收 `file_base64`、`file_name`，同步返回 `success / total_pages / pages[] / parser_used / quality / raw_quality / output_quality / ocr_decision_trace / error`
 - `POST /v1/parse/documents/{doc_id}/reparse`：重新执行完整解析
 - `POST /v1/parse/documents/{doc_id}/rechunk`：复用已存 blocks，重算 chunk / embedding / index
 - `POST /v1/parse/documents/{doc_id}/re-embed`：复用已存 blocks + chunks，仅重算 embedding / index
@@ -236,12 +236,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `GET /v1/parse/jobs?tenant_id=...&quota_key=...`：按租户与配额键过滤任务列表
 - `GET /v1/parse/quotas/usage?tenant_id=...&since_hours=...`：查看租户/配额维度的作业计数与 quota_units 聚合（支持时间窗口）
 - `GET /v1/parse/metrics?tenant_id=...&sample_size=200`：查看租户维度轻量运行指标（失败率、活跃任务数、耗时 p50/p90/p99）
-- `GET /v1/parse/events?event_type=ocr_failed&tenant_id=...`：查看最近观测事件；除 quota / inflight / embedding 外，现已包含 OCR 摘要事件 `ocr_attempted / ocr_fallback / ocr_failed`
-- `GET /v1/parse/prometheus`：Prometheus 文本指标出口；除 quota / inflight / embedding 外，现已包含 `parse_ocr_attempt_total / parse_ocr_fallback_total / parse_ocr_failed_total`
+- `GET /v1/parse/events?event_type=ocr_failed&tenant_id=...`：查看最近观测事件；除 quota / inflight / embedding 外，现已包含 OCR 摘要事件 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_failed`
+- `GET /v1/parse/prometheus`：Prometheus 文本指标出口；除 quota / inflight / embedding 外，现已包含 `parse_ocr_attempt_total / parse_ocr_fallback_total / parse_ocr_rejected_total / parse_ocr_failed_total`
 - `GET /v1/parse/dashboard?tenant_id=...&sample_size=200&recent_limit=5`：单请求聚合租户 usage + metrics + recent_jobs
 - `since_hours`：可选时间窗口（小时），用于 `quotas/usage`、`metrics`、`dashboard` 仅统计最近 N 小时任务
 - `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
-- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
+- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / tables / artifacts / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
+- `pages[] OCR 字段`：当页面触发 OCR 决策时会附带 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_attempt_reasons / ocr_acceptance_reasons / ocr_rejection_reasons / ocr_error_reasons / native_text_token_count / final_text_token_count`
+- `ocr_decision_trace`：batch 顶层 OCR 决策汇总，包含 `ocr_attempted_pages / ocr_fallback_pages / ocr_rejected_pages / ocr_failed_pages / native_text_token_count / final_text_token_count` 以及可选原因列表字段
 - `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
 - `excel-native`：`.xls/.xlsx/.xlsm` 会按 worksheet 内的空行与标题行分隔识别多个表格区域，输出 `TABLE` block，并在 metadata 中携带 `sheet_name / cell_range / source_cell_range / sheet_table_index / table_title / header_row / header_values / merged_cells / has_formula / hidden_sheet`；大型表格的完整 `cells` 元数据会按 `max_metadata_cells` 限制降级为 `cells_preview`
 - `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退

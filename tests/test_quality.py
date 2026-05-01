@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import unittest
 
+from parsecore.garble import detect_page_garble_reason
 from parsecore.models import Block, BlockType, Chunk
-from parsecore.quality import evaluate_chunk_embeddings, evaluate_layout_signals
+from parsecore.quality import (
+    evaluate_chunk_embeddings,
+    evaluate_layout_signals,
+    evaluate_parse_quality,
+    evaluate_projected_parse_quality,
+)
 
 
 class EvaluateChunkEmbeddingsTests(unittest.TestCase):
@@ -182,6 +188,60 @@ class EvaluateLayoutSignalsTests(unittest.TestCase):
         sparse_page = report.ocr_sparse_cls_pages(top=1)[0]
         self.assertEqual(sparse_page.page_number, 2)
         self.assertAlmostEqual(sparse_page.cls_rotate_high_ratio, 0.0)
+
+
+class ParseQualityDualMetricsTests(unittest.TestCase):
+    def test_raw_quality_can_flag_cid_but_output_quality_can_be_clean(self) -> None:
+        cid_text = " ".join("(cid:12)" for _ in range(240))
+        blocks = [
+            Block(
+                block_id="blk-raw-cid",
+                doc_id="doc-quality",
+                type=BlockType.PARAGRAPH,
+                content=cid_text,
+                metadata={"page": 1},
+            )
+        ]
+
+        raw_quality = evaluate_parse_quality(blocks)
+        output_quality = evaluate_projected_parse_quality(
+            [
+                {
+                    "page_number": 1,
+                    "text": "Recovered readable OCR text.",
+                }
+            ]
+        )
+
+        self.assertIn("cid_garble", raw_quality.flags)
+        self.assertEqual(raw_quality.recommended_action, "retry_with_ocr")
+        self.assertNotIn("cid_garble", output_quality.flags)
+        self.assertIsNone(output_quality.recommended_action)
+
+    def test_detects_pdf_name_dense_reason(self) -> None:
+        noisy = " /0 /1 /2 /i255 /i128 /9 /8 /7 /6 " * 8
+        reason = detect_page_garble_reason(
+            noisy,
+            min_cid_tokens=5,
+            min_cid_char_ratio=0.12,
+        )
+        self.assertEqual(reason, "pdf_name_dense")
+
+    def test_parse_quality_exposes_pdf_name_token_count(self) -> None:
+        noisy = " /0 /1 /2 /i255 /i128 /9 /8 /7 /6 " * 16
+        blocks = [
+            Block(
+                block_id="blk-pdf-name",
+                doc_id="doc-pdf-name",
+                type=BlockType.PARAGRAPH,
+                content=noisy,
+                metadata={"page": 1},
+            )
+        ]
+
+        quality = evaluate_parse_quality(blocks)
+        self.assertGreater(quality.total_pdf_name_tokens, 0)
+        self.assertIn("pdf_name_garble", quality.flags)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
-from .quality import ParseQualitySummary, evaluate_parse_quality
+from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
+from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -36,6 +37,8 @@ def _quality_payload(qs: ParseQualitySummary) -> dict[str, Any]:
         "warnings": list(qs.warnings),
         "total_cid_tokens": qs.total_cid_tokens,
     }
+    if qs.total_pdf_name_tokens:
+        payload["total_pdf_name_tokens"] = qs.total_pdf_name_tokens
     if qs.recommended_action:
         payload["recommended_action"] = qs.recommended_action
     if qs.ocr_failed_pages:
@@ -47,14 +50,20 @@ def _quality_payload(qs: ParseQualitySummary) -> dict[str, Any]:
 
 def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
-    qs = evaluate_parse_quality(outcome.blocks)
+    raw_qs = evaluate_parse_quality(outcome.blocks)
+    output_qs = evaluate_projected_parse_quality(pages)
+    ocr_trace = build_ocr_decision_trace(outcome.blocks)
+    trace_payload = ocr_decision_trace_payload(ocr_trace)
     return {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "success": True,
         "total_pages": len(pages),
         "pages": pages,
         "parser_used": _infer_parser_used(outcome.blocks),
-        "quality": _quality_payload(qs),
+        "quality": _quality_payload(output_qs),
+        "raw_quality": _quality_payload(raw_qs),
+        "output_quality": _quality_payload(output_qs),
+        "ocr_decision_trace": trace_payload,
         "error": None,
     }
 
@@ -68,7 +77,9 @@ def _parse_success_response(
 ) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
     parser_used = _infer_parser_used(outcome.blocks)
-    qs = evaluate_parse_quality(outcome.blocks)
+    raw_qs = evaluate_parse_quality(outcome.blocks)
+    output_qs = evaluate_projected_parse_quality(pages)
+    ocr_trace = build_ocr_decision_trace(outcome.blocks)
     metadata: dict[str, Any] = {
         "parser": parser_used,
         "schema_version": PAYLOAD_SCHEMA_VERSION,
@@ -83,6 +94,9 @@ def _parse_success_response(
         ocr_strategy = _read_first_metadata(outcome.blocks, "ocr_strategy")
         if ocr_strategy:
             metadata["ocr_strategy"] = ocr_strategy
+        trace_payload = ocr_decision_trace_payload(ocr_trace)
+        if trace_payload.get("ocr_attempted_pages", 0) > 0:
+            metadata["ocr_decision_trace"] = trace_payload
     # B3: expose fidelity_profile when it was set by the caller.
     fidelity_profile = _read_first_metadata(outcome.blocks, "fidelity_profile")
     if fidelity_profile:
@@ -93,7 +107,9 @@ def _parse_success_response(
         "total_pages": len(pages),
         "pages": pages,
         "metadata": metadata,
-        "quality": _quality_payload(qs),
+        "quality": _quality_payload(output_qs),
+        "raw_quality": _quality_payload(raw_qs),
+        "output_quality": _quality_payload(output_qs),
     }
 
 
@@ -160,6 +176,15 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "has_title": False,
                 "page_types": [],
                 "cid_token_counts": [],
+                "ocr_attempted": False,
+                "ocr_fallback": False,
+                "ocr_rejected": False,
+                "ocr_attempt_reasons": set(),
+                "ocr_acceptance_reasons": set(),
+                "ocr_rejection_reasons": set(),
+                "ocr_error_reasons": set(),
+                "native_text_token_count": 0,
+                "final_text_token_count": 0,
             },
         )
         role = str(block.metadata.get("semantic_role") or "paragraph")
@@ -174,6 +199,30 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         cid_count = block.metadata.get("cid_token_count")
         if isinstance(cid_count, int) and cid_count > 0:
             signal["cid_token_counts"].append(cid_count)
+        if bool(block.metadata.get("ocr_attempted")):
+            signal["ocr_attempted"] = True
+        if bool(block.metadata.get("ocr_fallback_used")):
+            signal["ocr_fallback"] = True
+        if bool(block.metadata.get("ocr_rejected")):
+            signal["ocr_rejected"] = True
+        attempt_reason = block.metadata.get("ocr_attempt_reason")
+        if isinstance(attempt_reason, str) and attempt_reason:
+            signal["ocr_attempt_reasons"].add(attempt_reason)
+        acceptance_reason = block.metadata.get("ocr_acceptance_reason")
+        if isinstance(acceptance_reason, str) and acceptance_reason:
+            signal["ocr_acceptance_reasons"].add(acceptance_reason)
+        rejection_reason = block.metadata.get("ocr_rejection_reason")
+        if isinstance(rejection_reason, str) and rejection_reason:
+            signal["ocr_rejection_reasons"].add(rejection_reason)
+        error_reason = block.metadata.get("ocr_error_reason")
+        if isinstance(error_reason, str) and error_reason:
+            signal["ocr_error_reasons"].add(error_reason)
+        native_tokens = block.metadata.get("native_text_token_count")
+        if isinstance(native_tokens, int) and native_tokens >= 0:
+            signal["native_text_token_count"] = max(int(signal["native_text_token_count"]), native_tokens)
+        final_tokens = block.metadata.get("final_text_token_count")
+        if isinstance(final_tokens, int) and final_tokens >= 0:
+            signal["final_text_token_count"] = max(int(signal["final_text_token_count"]), final_tokens)
 
         if block.type == BlockType.TITLE:
             continue
@@ -220,6 +269,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": "body",
                 "text_parts": [],
                 "tables_markdown": [],
+                "tables": [],
                 "artifacts": [],
                 "confidence_parts": [],
             },
@@ -258,6 +308,30 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         cid_total = sum(sig.get("cid_token_counts", []))
         if cid_total > 0:
             page_entry["cid_token_count"] = cid_total
+        if bool(sig.get("ocr_attempted")):
+            page_entry["ocr_attempted"] = True
+        if bool(sig.get("ocr_fallback")):
+            page_entry["ocr_fallback"] = True
+        if bool(sig.get("ocr_rejected")):
+            page_entry["ocr_rejected"] = True
+        attempt_reasons = sorted(sig.get("ocr_attempt_reasons", set()))
+        if attempt_reasons:
+            page_entry["ocr_attempt_reasons"] = attempt_reasons
+        acceptance_reasons = sorted(sig.get("ocr_acceptance_reasons", set()))
+        if acceptance_reasons:
+            page_entry["ocr_acceptance_reasons"] = acceptance_reasons
+        rejection_reasons = sorted(sig.get("ocr_rejection_reasons", set()))
+        if rejection_reasons:
+            page_entry["ocr_rejection_reasons"] = rejection_reasons
+        error_reasons = sorted(sig.get("ocr_error_reasons", set()))
+        if error_reasons:
+            page_entry["ocr_error_reasons"] = error_reasons
+        native_tokens = int(sig.get("native_text_token_count", 0) or 0)
+        final_tokens = int(sig.get("final_text_token_count", 0) or 0)
+        if native_tokens > 0:
+            page_entry["native_text_token_count"] = native_tokens
+        if final_tokens > 0:
+            page_entry["final_text_token_count"] = final_tokens
         ordered.append(page_entry)
 
     # For DOCX documents, attach a logical_pages summary alongside the physical pages.

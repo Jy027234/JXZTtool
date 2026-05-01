@@ -6,6 +6,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from starlette.applications import Starlette
 
+from .api_health import health_service_details as _base_health_service_details
 from .api_health import health_services as _base_health_services
 from .api_health import is_ocr_service_available as _is_ocr_service_available
 from .api_payloads import _project_pages
@@ -137,7 +138,11 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     app = Starlette(
         debug=False,
         lifespan=lifespan,
-        routes=ApiRoutes(api_version=API_VERSION, health_services=_health_services).routes(),
+        routes=ApiRoutes(
+            api_version=API_VERSION,
+            health_services=_health_services,
+            health_service_details=_health_service_details,
+        ).routes(),
     )
 
     app.add_middleware(TraceIdMiddleware)
@@ -148,3 +153,7 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
 
 def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
     return _base_health_services(runtime, ocr_probe=_is_ocr_service_available)
+
+
+def _health_service_details(runtime: ParseRuntime) -> dict[str, dict[str, object]]:
+    return _base_health_service_details(runtime, ocr_probe=_is_ocr_service_available)

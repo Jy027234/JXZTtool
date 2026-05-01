@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from parsecore.bootstrap import build_runtime  # noqa: E402
 from parsecore.models import ParseRequest  # noqa: E402
+from parsecore.ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload  # noqa: E402
 from parsecore.quality import evaluate_blocks, evaluate_layout_signals  # noqa: E402
 
 
@@ -81,6 +82,7 @@ def _run_one(
 
     elapsed_s = _round(time.monotonic() - started)
     layout = evaluate_layout_signals(outcome.blocks)
+    ocr_trace = build_ocr_decision_trace(outcome.blocks)
     layout_payload = asdict(layout)
     layout_payload["ocr_hot_pages"] = [
         asdict(page) for page in layout.ocr_hot_pages(top=top_pages)
@@ -96,6 +98,7 @@ def _run_one(
         "chunks": len(outcome.chunks),
         "structural_quality": _structural_summary(outcome.blocks),
         "layout_signals": layout_payload,
+        "ocr_decision_trace": ocr_decision_trace_payload(ocr_trace),
     }
 
 
@@ -105,13 +108,33 @@ def _summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         for item in results
         if isinstance(item.get("layout_signals"), dict)
     ]
+    trace_items = [
+        item.get("ocr_decision_trace", {})
+        for item in results
+        if isinstance(item.get("ocr_decision_trace"), dict)
+    ]
     return {
         "documents": len(results),
         "failed_documents": sum(1 for item in results if item.get("status") == "failed"),
         "elapsed_s": _round(sum(float(item.get("elapsed_s", 0.0)) for item in results)),
-        "ocr_attempted_pages": sum(int(item.get("ocr_attempted_pages", 0)) for item in layout_items),
-        "ocr_fallback_pages": sum(int(item.get("ocr_fallback_pages", 0)) for item in layout_items),
-        "ocr_failed_pages": sum(int(item.get("ocr_failed_pages", 0)) for item in layout_items),
+        "ocr_attempted_pages": (
+            sum(int(item.get("ocr_attempted_pages", 0)) for item in trace_items)
+            if trace_items
+            else sum(int(item.get("ocr_attempted_pages", 0)) for item in layout_items)
+        ),
+        "ocr_fallback_pages": (
+            sum(int(item.get("ocr_fallback_pages", 0)) for item in trace_items)
+            if trace_items
+            else sum(int(item.get("ocr_fallback_pages", 0)) for item in layout_items)
+        ),
+        "ocr_rejected_pages": sum(int(item.get("ocr_rejected_pages", 0)) for item in trace_items),
+        "ocr_failed_pages": (
+            sum(int(item.get("ocr_failed_pages", 0)) for item in trace_items)
+            if trace_items
+            else sum(int(item.get("ocr_failed_pages", 0)) for item in layout_items)
+        ),
+        "native_text_token_count": sum(int(item.get("native_text_token_count", 0)) for item in trace_items),
+        "final_text_token_count": sum(int(item.get("final_text_token_count", 0)) for item in trace_items),
         "ocr_total_elapsed_s": _round(
             sum(float(item.get("ocr_total_elapsed_s", 0.0)) for item in layout_items)
         ),

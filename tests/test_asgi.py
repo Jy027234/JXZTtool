@@ -646,6 +646,10 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["metadata"]["parser"], "python-docx")
             self.assertEqual(body["pages"][0]["page_type"], "front_matter")
             self.assertIn("Maintenance Manual", body["pages"][0]["text"])
+            self.assertIn("quality", body)
+            self.assertIn("raw_quality", body)
+            self.assertIn("output_quality", body)
+            self.assertEqual(body["quality"]["score"], body["output_quality"]["score"])
 
     def test_health_reports_pdf_service_when_pdf_parser_registered(self) -> None:
         with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
@@ -658,6 +662,9 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["services"]["pdfplumber"], True)
             self.assertEqual(body["services"]["python_docx"], False)
             self.assertEqual(body["services"]["paddleocr"], False)
+            self.assertIn("service_details", body)
+            self.assertEqual(body["service_details"]["pdfplumber"]["registered"], True)
+            self.assertEqual(body["service_details"]["pdfplumber"]["reason"], "ok")
 
     def test_health_reports_ocr_service_when_image_parser_registered_and_engine_available(self) -> None:
         with TemporaryWorkspace(OCR_API_CONFIG) as workspace, patch(
@@ -925,6 +932,116 @@ class ParseApiTests(unittest.TestCase):
         self.assertEqual(pages[0]["text"], "1. Scope .......... 1")
         self.assertEqual(pages[1]["tables_markdown"], ["| col | value |"])
         self.assertEqual(pages[1]["text"], "")
+
+    def test_project_pages_title_only_page_keeps_tables_schema(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-title-only",
+                    doc_id="doc-title-only",
+                    type=BlockType.TITLE,
+                    content="Maintenance Overview",
+                    metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["page_type"], "cover")
+        self.assertEqual(pages[0]["tables_markdown"], [])
+        self.assertEqual(pages[0]["tables"], [])
+        self.assertEqual(pages[0]["text"], "")
+
+    def test_project_pages_includes_ocr_decision_fields(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-ocr-1",
+                    doc_id="doc-ocr-page",
+                    type=BlockType.PARAGRAPH,
+                    content="Recovered OCR text",
+                    metadata={
+                        "page": 1,
+                        "semantic_role": "paragraph",
+                        "ocr_attempted": True,
+                        "ocr_fallback_used": True,
+                        "ocr_attempt_reason": "cid_dense",
+                        "ocr_acceptance_reason": "fallback_applied",
+                        "native_text_token_count": 4,
+                        "final_text_token_count": 12,
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 1)
+        self.assertTrue(pages[0]["ocr_attempted"])
+        self.assertTrue(pages[0]["ocr_fallback"])
+        self.assertEqual(pages[0]["ocr_attempt_reasons"], ["cid_dense"])
+        self.assertEqual(pages[0]["ocr_acceptance_reasons"], ["fallback_applied"])
+        self.assertEqual(pages[0]["native_text_token_count"], 4)
+        self.assertEqual(pages[0]["final_text_token_count"], 12)
+
+    def test_project_pages_schema_contract_for_mixed_page_variants(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-p1-title",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.TITLE,
+                    content="Cover",
+                    metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+                ),
+                Block(
+                    block_id="blk-p2-table",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.TABLE,
+                    content="| col | value |",
+                    metadata={"page": 2, "semantic_role": "table", "parser": "pdf-text"},
+                ),
+                Block(
+                    block_id="blk-p3-ocr-rejected",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.PARAGRAPH,
+                    content="native unreadable text",
+                    metadata={
+                        "page": 3,
+                        "semantic_role": "paragraph",
+                        "ocr_attempted": True,
+                        "ocr_rejected": True,
+                        "ocr_attempt_reason": "cid_dense",
+                        "ocr_rejection_reason": "provider_request_failed",
+                        "ocr_error_reason": "provider_request_failed",
+                        "native_text_token_count": 2,
+                        "final_text_token_count": 2,
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 3)
+        for page in pages:
+            self.assertIn("page_number", page)
+            self.assertIn("page_type", page)
+            self.assertIn("text", page)
+            self.assertIn("tables_markdown", page)
+            self.assertIn("tables", page)
+            self.assertIn("artifacts", page)
+            self.assertIn("confidence", page)
+
+        self.assertEqual(pages[0]["page_number"], 1)
+        self.assertEqual(pages[0]["tables"], [])
+        self.assertEqual(pages[0]["text"], "")
+
+        self.assertEqual(pages[1]["page_number"], 2)
+        self.assertEqual(pages[1]["tables_markdown"], ["| col | value |"])
+        self.assertEqual(len(pages[1]["tables"]), 1)
+
+        self.assertEqual(pages[2]["page_number"], 3)
+        self.assertTrue(pages[2]["ocr_attempted"])
+        self.assertTrue(pages[2]["ocr_rejected"])
+        self.assertEqual(pages[2]["ocr_attempt_reasons"], ["cid_dense"])
+        self.assertEqual(pages[2]["ocr_rejection_reasons"], ["provider_request_failed"])
 
     def test_trace_id_header_is_echoed_and_error_payload_is_unified(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1239,7 +1356,10 @@ class ParseQueueApiTests(unittest.TestCase):
                             "page": 1,
                             "ocr_attempted": True,
                             "ocr_attempt_reason": "empty_text",
+                            "ocr_rejection_reason": "provider_request_failed",
                             "ocr_error_reason": "provider_request_failed",
+                            "native_text_token_count": 0,
+                            "final_text_token_count": 0,
                         },
                     ),
                     Block(
@@ -1253,6 +1373,9 @@ class ParseQueueApiTests(unittest.TestCase):
                             "ocr_attempt_reason": "cid_dense",
                             "ocr_fallback_used": True,
                             "ocr_fallback_reason": "cid_dense",
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 8,
+                            "final_text_token_count": 26,
                         },
                     ),
                 )
@@ -1301,6 +1424,16 @@ class ParseQueueApiTests(unittest.TestCase):
                         ["cid_dense", "empty_text"],
                     )
                     self.assertEqual(
+                        attempt_data["events"][0]["acceptance_reasons"],
+                        ["fallback_applied"],
+                    )
+                    self.assertEqual(
+                        attempt_data["events"][0]["rejection_reasons"],
+                        ["provider_request_failed"],
+                    )
+                    self.assertEqual(attempt_data["events"][0]["native_text_token_count"], 8)
+                    self.assertEqual(attempt_data["events"][0]["final_text_token_count"], 26)
+                    self.assertEqual(
                         attempt_data["counters"]["ocr-tenant:ocr-plan:ocr_attempted"],
                         2,
                     )
@@ -1323,6 +1456,23 @@ class ParseQueueApiTests(unittest.TestCase):
                         1,
                     )
 
+                    rejected_response = client.get(
+                        "/v1/parse/events",
+                        params={"event_type": "ocr_rejected", "tenant_id": "ocr-tenant"},
+                    )
+                    self.assertEqual(rejected_response.status_code, 200)
+                    rejected_data = rejected_response.json()
+                    self.assertEqual(len(rejected_data["events"]), 1)
+                    self.assertEqual(rejected_data["events"][0]["page_count"], 1)
+                    self.assertEqual(
+                        rejected_data["events"][0]["rejection_reasons"],
+                        ["provider_request_failed"],
+                    )
+                    self.assertEqual(
+                        rejected_data["counters"]["ocr-tenant:ocr-plan:ocr_rejected"],
+                        1,
+                    )
+
                     metrics_response = client.get("/v1/parse/prometheus")
                     self.assertEqual(metrics_response.status_code, 200)
                     metrics_text = metrics_response.text
@@ -1338,6 +1488,161 @@ class ParseQueueApiTests(unittest.TestCase):
                         'parse_ocr_failed_total{tenant_id="ocr-tenant",quota_key="ocr-plan"} 1',
                         metrics_text,
                     )
+                    self.assertIn(
+                        'parse_ocr_rejected_total{tenant_id="ocr-tenant",quota_key="ocr-plan"} 1',
+                        metrics_text,
+                    )
+
+    def test_parse_batch_response_includes_ocr_decision_trace(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            app = create_app(config_path=workspace.config_path)
+            with TestClient(app) as client:
+                runtime_obj = app.state.runtime
+                doc = workspace.create_docx("ocr-trace-batch.docx", ["content"])
+                blocks = (
+                    Block(
+                        block_id="blk-ocr-trace-1",
+                        doc_id="doc-ocr-trace",
+                        type=BlockType.PARAGRAPH,
+                        content="(cid:12) (cid:34)",
+                        metadata={
+                            "page": 1,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_fallback_used": True,
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 2,
+                            "final_text_token_count": 10,
+                        },
+                    ),
+                )
+                with patch.object(runtime_obj, "_load_blocks_for_request", return_value=blocks), patch.object(
+                    runtime_obj,
+                    "_load_chunks_for_request",
+                    return_value=(),
+                ):
+                    payload = {
+                        "file_base64": base64.b64encode(doc.read_bytes()).decode("ascii"),
+                        "file_name": doc.name,
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "tenant_id": "ocr-trace-tenant",
+                        "quota_key": "ocr-trace-plan",
+                    }
+                    response = client.post("/v1/parse/batch", json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertIn("ocr_decision_trace", body)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_attempted_pages"], 1)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_fallback_pages"], 1)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_rejected_pages"], 0)
+                self.assertEqual(body["ocr_decision_trace"]["native_text_token_count"], 2)
+                self.assertEqual(body["ocr_decision_trace"]["final_text_token_count"], 10)
+
+    def test_parse_batch_payload_schema_snapshot_for_ocr_trace(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            app = create_app(config_path=workspace.config_path)
+            with TestClient(app) as client:
+                runtime_obj = app.state.runtime
+                doc = workspace.create_docx("ocr-trace-schema.docx", ["content"])
+                blocks = (
+                    Block(
+                        block_id="blk-snapshot-1",
+                        doc_id="doc-ocr-schema",
+                        type=BlockType.PARAGRAPH,
+                        content="native unreadable",
+                        metadata={
+                            "page": 1,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_rejected": True,
+                            "ocr_rejection_reason": "provider_request_failed",
+                            "ocr_error_reason": "provider_request_failed",
+                            "native_text_token_count": 2,
+                            "final_text_token_count": 2,
+                        },
+                    ),
+                    Block(
+                        block_id="blk-snapshot-2",
+                        doc_id="doc-ocr-schema",
+                        type=BlockType.PARAGRAPH,
+                        content="Recovered readable OCR text",
+                        metadata={
+                            "page": 2,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_fallback_used": True,
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 1,
+                            "final_text_token_count": 5,
+                        },
+                    ),
+                )
+                with patch.object(runtime_obj, "_load_blocks_for_request", return_value=blocks), patch.object(
+                    runtime_obj,
+                    "_load_chunks_for_request",
+                    return_value=(),
+                ):
+                    payload = {
+                        "file_base64": base64.b64encode(doc.read_bytes()).decode("ascii"),
+                        "file_name": doc.name,
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "tenant_id": "ocr-schema-tenant",
+                        "quota_key": "ocr-schema-plan",
+                    }
+                    response = client.post("/v1/parse/batch", json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+
+                self.assertTrue(
+                    {
+                        "success",
+                        "total_pages",
+                        "pages",
+                        "parser_used",
+                        "quality",
+                        "raw_quality",
+                        "output_quality",
+                        "ocr_decision_trace",
+                        "error",
+                    }.issubset(set(body.keys()))
+                )
+
+                trace = body["ocr_decision_trace"]
+                self.assertEqual(
+                    set(trace.keys()),
+                    {
+                        "ocr_attempted_pages",
+                        "ocr_fallback_pages",
+                        "ocr_rejected_pages",
+                        "ocr_failed_pages",
+                        "native_text_token_count",
+                        "final_text_token_count",
+                        "ocr_attempt_reasons",
+                        "ocr_acceptance_reasons",
+                        "ocr_rejection_reasons",
+                        "ocr_error_reasons",
+                    },
+                )
+                self.assertEqual(trace["ocr_attempted_pages"], 2)
+                self.assertEqual(trace["ocr_fallback_pages"], 1)
+                self.assertEqual(trace["ocr_rejected_pages"], 1)
+                self.assertEqual(trace["ocr_failed_pages"], 1)
+                self.assertEqual(trace["native_text_token_count"], 3)
+                self.assertEqual(trace["final_text_token_count"], 7)
+
+                page_required_keys = {
+                    "page_number",
+                    "page_type",
+                    "text",
+                    "tables_markdown",
+                    "tables",
+                    "artifacts",
+                    "confidence",
+                }
+                for page in body["pages"]:
+                    self.assertTrue(page_required_keys.issubset(set(page.keys())))
 
     def test_dashboard_includes_observability_data(self) -> None:
         """Verify tenant_dashboard includes observability events and counters."""

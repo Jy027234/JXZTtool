@@ -15,12 +15,12 @@ field. Pages with no page number are bucketed under page 0.
 
 from __future__ import annotations
 
-import re
 import statistics
 from dataclasses import dataclass, field
 from math import sqrt
 from typing import Iterable, Sequence
 
+from .garble import analyze_text_fragments_garble
 from .models import Block, Chunk
 
 
@@ -33,9 +33,11 @@ _LONG_BLOCK_LEN = 2000
 _CID_TOTAL_WARN_TOKENS = 50        # ≥50 cid tokens doc-wide → warn
 _CID_TOTAL_GATE_TOKENS = 200       # ≥200 cid tokens doc-wide → flag cid_garble
 _CID_PAGE_RATIO_GATE = 0.12        # page-level char ratio already used by parser
-
-_CID_TOKEN_RE = re.compile(r"\(cid:\d+\)")
-
+_PDF_NAME_TOTAL_WARN_TOKENS = 40
+_PDF_NAME_TOTAL_GATE_TOKENS = 120
+_MAX_CONTROL_CHAR_RATIO = 0.03
+_MIN_PRINTABLE_RATIO = 0.75
+_SHORT_TOKEN_REPEAT_GATE = 0.35
 
 @dataclass(slots=True)
 class PageQuality:
@@ -458,6 +460,7 @@ __all__ = [
     "evaluate_chunk_embeddings",
     "evaluate_layout_signals",
     "evaluate_parse_quality",
+    "evaluate_projected_parse_quality",
     "diff_reports",
 ]
 
@@ -478,26 +481,144 @@ class ParseQualitySummary:
     warnings: tuple[str, ...]
     recommended_action: str | None
     total_cid_tokens: int
+    total_pdf_name_tokens: int
     ocr_failed_pages: int
     suspect_signature_pages: int
+
+
+def _evaluate_text_quality(
+    texts: Iterable[str],
+    *,
+    ocr_failed_pages: int,
+    ocr_fallback_detected: bool,
+    suspect_signature_pages: int,
+    empty_output: bool,
+    docx_single_page: bool,
+) -> ParseQualitySummary:
+    signals = analyze_text_fragments_garble(texts)
+
+    flags: set[str] = set()
+    warnings: list[str] = []
+    penalty = 0.0
+
+    if signals.total_cid_tokens >= _CID_TOTAL_GATE_TOKENS:
+        flags.add("cid_garble")
+        warnings.append(
+            f"Document contains {signals.total_cid_tokens} CID tokens (≥{_CID_TOTAL_GATE_TOKENS}); "
+            "text extraction is likely incomplete or garbled."
+        )
+        penalty += 0.35
+    elif signals.total_cid_tokens >= _CID_TOTAL_WARN_TOKENS:
+        flags.add("cid_warn")
+        warnings.append(
+            f"Document contains {signals.total_cid_tokens} CID tokens; "
+            "some text may be garbled."
+        )
+        penalty += 0.15
+
+    if signals.total_pdf_name_tokens >= _PDF_NAME_TOTAL_GATE_TOKENS:
+        flags.add("pdf_name_garble")
+        warnings.append(
+            f"Document contains {signals.total_pdf_name_tokens} PDF name-map tokens (≥{_PDF_NAME_TOTAL_GATE_TOKENS}); "
+            "text may be parser-encoded garbage."
+        )
+        penalty += 0.25
+    elif signals.total_pdf_name_tokens >= _PDF_NAME_TOTAL_WARN_TOKENS:
+        flags.add("pdf_name_warn")
+        warnings.append(
+            f"Document contains {signals.total_pdf_name_tokens} PDF name-map tokens; "
+            "some text may be parser-encoded garbage."
+        )
+        penalty += 0.1
+
+    control_char_ratio = (
+        signals.control_char_count / max(signals.total_chars, 1)
+        if signals.total_chars > 0
+        else 0.0
+    )
+    if control_char_ratio >= _MAX_CONTROL_CHAR_RATIO:
+        flags.add("control_char_dense")
+        warnings.append("Document contains dense control characters; text stream may be corrupted.")
+        penalty += 0.1
+
+    if signals.total_chars > 0 and signals.printable_ratio < _MIN_PRINTABLE_RATIO:
+        flags.add("low_printable_ratio")
+        warnings.append("Document has a low printable-character ratio; text may be partially unreadable.")
+        penalty += 0.1
+
+    if signals.repeated_short_token_ratio >= _SHORT_TOKEN_REPEAT_GATE:
+        flags.add("repeated_short_tokens")
+        warnings.append("Document has repeated short tokens; likely OCR or encoding artifacts.")
+        penalty += 0.05
+
+    if ocr_failed_pages > 0:
+        flags.add("ocr_failed")
+        warnings.append(
+            f"OCR failed on {ocr_failed_pages} page(s); "
+            "affected pages may have missing text."
+        )
+        penalty += 0.1 * min(ocr_failed_pages, 3)
+
+    if suspect_signature_pages >= 5:
+        flags.add("suspect_signature_overload")
+        warnings.append(
+            f"{suspect_signature_pages} pages classified as signature, which is unusually high. "
+            "Review page-type classification."
+        )
+        penalty += 0.1
+
+    if empty_output:
+        flags.add("empty_output")
+        warnings.append("Parser produced no content blocks.")
+        penalty += 0.5
+
+    if docx_single_page:
+        flags.add("docx_single_page")
+        warnings.append(
+            "Document was collapsed into a single page; "
+            "logical section/page splitting may be needed."
+        )
+        penalty += 0.05
+
+    score = max(0.0, round(1.0 - penalty, 4))
+
+    severe_output_garble = bool(
+        {"cid_garble", "pdf_name_garble", "control_char_dense", "low_printable_ratio"}.intersection(flags)
+    )
+
+    recommended_action: str | None = None
+    if severe_output_garble and "ocr_failed" not in flags and not ocr_fallback_detected:
+        recommended_action = "retry_with_ocr"
+    elif "docx_single_page" in flags:
+        recommended_action = "retry_with_vector_refine"
+    elif "suspect_signature_overload" in flags:
+        recommended_action = "retry_with_llm_refine"
+
+    return ParseQualitySummary(
+        score=score,
+        flags=frozenset(flags),
+        warnings=tuple(warnings),
+        recommended_action=recommended_action,
+        total_cid_tokens=signals.total_cid_tokens,
+        total_pdf_name_tokens=signals.total_pdf_name_tokens,
+        ocr_failed_pages=ocr_failed_pages,
+        suspect_signature_pages=suspect_signature_pages,
+    )
 
 
 def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
     """Derive a ``ParseQualitySummary`` from raw block output."""
 
     blocks_list = list(blocks)
-    total_chars = 0
-    total_cid_tokens = 0
     ocr_failed_pages: set[int] = set()
     ocr_fallback_pages: set[int] = set()
     page_signature_votes: dict[int, int] = {}
     page_block_counts: dict[int, int] = {}
+    texts: list[str] = []
 
     for block in blocks_list:
         content = block.content or ""
-        total_chars += len(content)
-        cid_matches = _CID_TOKEN_RE.findall(content)
-        total_cid_tokens += len(cid_matches)
+        texts.append(content)
 
         meta = block.metadata or {}
         page_number = int(meta.get("page", 1))
@@ -520,83 +641,25 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
         and votes / page_block_counts[pn] >= 0.5
     )
 
-    flags: set[str] = set()
-    warnings: list[str] = []
-    penalty = 0.0
-
-    # CID garble gate
-    if total_cid_tokens >= _CID_TOTAL_GATE_TOKENS:
-        flags.add("cid_garble")
-        warnings.append(
-            f"Document contains {total_cid_tokens} CID tokens (≥{_CID_TOTAL_GATE_TOKENS}); "
-            "text extraction is likely incomplete or garbled."
-        )
-        penalty += 0.35
-    elif total_cid_tokens >= _CID_TOTAL_WARN_TOKENS:
-        flags.add("cid_warn")
-        warnings.append(
-            f"Document contains {total_cid_tokens} CID tokens; "
-            "some text may be garbled."
-        )
-        penalty += 0.15
-
-    # OCR failed pages
-    if ocr_failed_pages:
-        flags.add("ocr_failed")
-        warnings.append(
-            f"OCR failed on {len(ocr_failed_pages)} page(s); "
-            "affected pages may have missing text."
-        )
-        penalty += 0.1 * min(len(ocr_failed_pages), 3)
-
-    # Signature overload
-    if suspect_signature_pages >= 5:
-        flags.add("suspect_signature_overload")
-        warnings.append(
-            f"{suspect_signature_pages} pages classified as signature, which is unusually high. "
-            "Review page-type classification."
-        )
-        penalty += 0.1
-
-    # No blocks at all
-    if not blocks_list:
-        flags.add("empty_output")
-        warnings.append("Parser produced no content blocks.")
-        penalty += 0.5
-
-    # DOCX single-page
-    if len(page_block_counts) == 1 and 1 in page_block_counts and page_block_counts[1] > 20:
-        flags.add("docx_single_page")
-        warnings.append(
-            "Document was collapsed into a single page; "
-            "logical section/page splitting may be needed."
-        )
-        penalty += 0.05
-
-    score = max(0.0, round(1.0 - penalty, 4))
-
-    recommended_action: str | None = None
-    if "cid_garble" in flags and "ocr_failed" not in flags and not ocr_fallback_pages:
-        recommended_action = "retry_with_ocr"
-    elif "docx_single_page" in flags:
-        # Boundary fidelity is poor: paragraphs were not segmented into logical
-        # pages.  A vector-similarity pass over adjacent paragraphs is the
-        # cheapest next step; hosts that have not injected a SemanticRefiner
-        # can read this signal and decide whether to escalate.
-        recommended_action = "retry_with_vector_refine"
-    elif "suspect_signature_overload" in flags:
-        # Heuristic boundaries failed to separate signature/legal blocks; an
-        # LLM boundary refiner is typically required to repair these.
-        recommended_action = "retry_with_llm_refine"
-
-    return ParseQualitySummary(
-        score=score,
-        flags=frozenset(flags),
-        warnings=tuple(warnings),
-        recommended_action=recommended_action,
-        total_cid_tokens=total_cid_tokens,
+    return _evaluate_text_quality(
+        texts,
         ocr_failed_pages=len(ocr_failed_pages),
+        ocr_fallback_detected=bool(ocr_fallback_pages),
         suspect_signature_pages=suspect_signature_pages,
+        empty_output=not blocks_list,
+        docx_single_page=(len(page_block_counts) == 1 and 1 in page_block_counts and page_block_counts[1] > 20),
+    )
+
+
+def evaluate_projected_parse_quality(pages: Sequence[dict[str, object]]) -> ParseQualitySummary:
+    texts = [str(page.get("text") or "") for page in pages]
+    return _evaluate_text_quality(
+        texts,
+        ocr_failed_pages=0,
+        ocr_fallback_detected=False,
+        suspect_signature_pages=0,
+        empty_output=(len(pages) == 0),
+        docx_single_page=False,
     )
 
 

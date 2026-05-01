@@ -32,9 +32,11 @@ class ApiRoutes:
         *,
         api_version: str,
         health_services: Callable[[ParseRuntime], dict[str, bool]],
+        health_service_details: Callable[[ParseRuntime], dict[str, dict[str, Any]]] | None = None,
     ) -> None:
         self.api_version = api_version
         self.health_services = health_services
+        self.health_service_details = health_service_details
 
     def routes(self) -> list[Route]:
         return [
@@ -88,12 +90,16 @@ class ApiRoutes:
 
     async def health(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
+        services = self.health_services(runtime_obj)
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "version": self.api_version,
+            "services": services,
+        }
+        if self.health_service_details is not None:
+            payload["service_details"] = self.health_service_details(runtime_obj)
         return JSONResponse(
-            {
-                "status": "ok",
-                "version": self.api_version,
-                "services": self.health_services(runtime_obj),
-            }
+            payload
         )
 
     async def describe(self, request: Request) -> JSONResponse:

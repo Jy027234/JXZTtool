@@ -11,6 +11,7 @@ from .config import ParseCoreSettings
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
 from .events import JobEventLogger
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
+from .ocr_trace import build_ocr_decision_trace
 from .pipelines import ParsedDocumentArtifact, PipelineRegistry
 
 
@@ -212,6 +213,16 @@ class EventAggregator:
             if event_type == "ocr_failed":
                 lines.append(
                     f'parse_ocr_failed_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_ocr_rejected_total Total pages where OCR was attempted but not accepted",
+            "# TYPE parse_ocr_rejected_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "ocr_rejected":
+                lines.append(
+                    f'parse_ocr_rejected_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
                 )
 
         lines.extend([
@@ -1398,40 +1409,13 @@ class ParseRuntime:
         request: ParseRequest,
         blocks: Sequence[Any],
     ) -> None:
-        attempted_pages: set[int] = set()
-        fallback_pages: set[int] = set()
-        failed_pages: set[int] = set()
-        attempted_blocks = 0
-        fallback_blocks = 0
-        failed_blocks = 0
-        attempt_reasons: set[str] = set()
-        error_reasons: set[str] = set()
+        trace = build_ocr_decision_trace(blocks)
 
-        for block in blocks:
-            metadata = getattr(block, "metadata", {}) or {}
-            try:
-                page_number = int(metadata.get("page", 0) or 0)
-            except (TypeError, ValueError):
-                page_number = 0
+        attempted_blocks = sum(1 for block in blocks if bool((getattr(block, "metadata", {}) or {}).get("ocr_attempted")))
+        fallback_blocks = sum(1 for block in blocks if bool((getattr(block, "metadata", {}) or {}).get("ocr_fallback_used")))
+        failed_blocks = sum(1 for block in blocks if bool((getattr(block, "metadata", {}) or {}).get("ocr_error_reason")))
 
-            if bool(metadata.get("ocr_attempted")):
-                attempted_pages.add(page_number)
-                attempted_blocks += 1
-                attempt_reason = metadata.get("ocr_attempt_reason")
-                if attempt_reason:
-                    attempt_reasons.add(str(attempt_reason))
-
-            if bool(metadata.get("ocr_fallback_used")):
-                fallback_pages.add(page_number)
-                fallback_blocks += 1
-
-            error_reason = metadata.get("ocr_error_reason")
-            if error_reason:
-                failed_pages.add(page_number)
-                failed_blocks += 1
-                error_reasons.add(str(error_reason))
-
-        if attempted_pages:
+        if trace.attempted_pages:
             self.event_aggregator.record_event(
                 "ocr_attempted",
                 tenant_id=request.tenant_id,
@@ -1439,14 +1423,18 @@ class ParseRuntime:
                 doc_id=request.doc_id,
                 details={
                     "provider": self.settings.providers.ocr.provider,
-                    "page_count": len(attempted_pages),
+                    "page_count": trace.attempted_pages,
                     "block_count": attempted_blocks,
-                    "attempt_reasons": sorted(attempt_reasons),
+                    "attempt_reasons": list(trace.attempt_reasons),
+                    "acceptance_reasons": list(trace.acceptance_reasons),
+                    "rejection_reasons": list(trace.rejection_reasons),
+                    "native_text_token_count": trace.native_text_token_count,
+                    "final_text_token_count": trace.final_text_token_count,
                 },
-                count=len(attempted_pages),
+                count=trace.attempted_pages,
             )
 
-        if fallback_pages:
+        if trace.fallback_pages:
             self.event_aggregator.record_event(
                 "ocr_fallback",
                 tenant_id=request.tenant_id,
@@ -1454,13 +1442,14 @@ class ParseRuntime:
                 doc_id=request.doc_id,
                 details={
                     "provider": self.settings.providers.ocr.provider,
-                    "page_count": len(fallback_pages),
+                    "page_count": trace.fallback_pages,
                     "block_count": fallback_blocks,
+                    "acceptance_reasons": list(trace.acceptance_reasons),
                 },
-                count=len(fallback_pages),
+                count=trace.fallback_pages,
             )
 
-        if failed_pages:
+        if trace.failed_pages:
             self.event_aggregator.record_event(
                 "ocr_failed",
                 tenant_id=request.tenant_id,
@@ -1468,11 +1457,25 @@ class ParseRuntime:
                 doc_id=request.doc_id,
                 details={
                     "provider": self.settings.providers.ocr.provider,
-                    "page_count": len(failed_pages),
+                    "page_count": trace.failed_pages,
                     "block_count": failed_blocks,
-                    "error_reasons": sorted(error_reasons),
+                    "error_reasons": list(trace.error_reasons),
                 },
-                count=len(failed_pages),
+                count=trace.failed_pages,
+            )
+
+        if trace.rejected_pages:
+            self.event_aggregator.record_event(
+                "ocr_rejected",
+                tenant_id=request.tenant_id,
+                quota_key=request.quota_key,
+                doc_id=request.doc_id,
+                details={
+                    "provider": self.settings.providers.ocr.provider,
+                    "page_count": trace.rejected_pages,
+                    "rejection_reasons": list(trace.rejection_reasons),
+                },
+                count=trace.rejected_pages,
             )
 
     def _embed_chunks(self, *, doc_id: str, chunks: Sequence[Any]) -> Sequence[Any]:
