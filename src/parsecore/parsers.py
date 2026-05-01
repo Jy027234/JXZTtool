@@ -2611,6 +2611,7 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
 
 
 _CID_TOKEN_PATTERN = re.compile(r"\(cid:\d+\)")
+_PDF_NAME_TOKEN_PATTERN = re.compile(r"/(?:i?\d+)(?=\s|/|$)")
 
 
 def _ocr_fallback_reason_for_page(
@@ -2623,11 +2624,13 @@ def _ocr_fallback_reason_for_page(
     if not stripped:
         return "empty_text"
     matches = list(_CID_TOKEN_PATTERN.finditer(stripped))
-    if len(matches) < min_cid_tokens:
-        return None
     cid_chars = sum(match.end() - match.start() for match in matches)
-    if cid_chars / max(len(stripped), 1) >= min_cid_char_ratio:
+    if len(matches) >= min_cid_tokens and cid_chars / max(len(stripped), 1) >= min_cid_char_ratio:
         return "cid_dense"
+    pdf_name_matches = list(_PDF_NAME_TOKEN_PATTERN.finditer(stripped))
+    pdf_name_chars = sum(match.end() - match.start() for match in pdf_name_matches)
+    if len(pdf_name_matches) >= min_cid_tokens and pdf_name_chars / max(len(stripped), 1) >= min_cid_char_ratio:
+        return "pdf_name_dense"
     return None
 
 

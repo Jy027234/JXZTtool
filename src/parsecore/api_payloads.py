@@ -4,7 +4,11 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
-from .quality import ParseQualitySummary, evaluate_parse_quality
+from .quality import (
+    ParseQualitySummary,
+    evaluate_parse_quality,
+    reconcile_quality_with_projected_pages,
+)
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -47,7 +51,7 @@ def _quality_payload(qs: ParseQualitySummary) -> dict[str, Any]:
 
 def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
-    qs = evaluate_parse_quality(outcome.blocks)
+    qs = reconcile_quality_with_projected_pages(evaluate_parse_quality(outcome.blocks), pages)
     return {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "success": True,
@@ -68,7 +72,7 @@ def _parse_success_response(
 ) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
     parser_used = _infer_parser_used(outcome.blocks)
-    qs = evaluate_parse_quality(outcome.blocks)
+    qs = reconcile_quality_with_projected_pages(evaluate_parse_quality(outcome.blocks), pages)
     metadata: dict[str, Any] = {
         "parser": parser_used,
         "schema_version": PAYLOAD_SCHEMA_VERSION,
@@ -220,6 +224,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "page_type": "body",
                 "text_parts": [],
                 "tables_markdown": [],
+                "tables": [],
                 "artifacts": [],
                 "confidence_parts": [],
             },

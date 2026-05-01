@@ -6,6 +6,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      libgl1 \
+      libglib2.0-0 \
+      libsm6 \
+      libxext6 \
+      libxrender1 \
+      libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml README.md parsecore.toml parsecore.queue.toml parsecore.remote-http.toml.example parsecore.pgvector.toml.example parsecore.pgvector.fake-embedding.toml.example ./
 COPY src ./src
 

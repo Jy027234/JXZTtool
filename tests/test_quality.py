@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 
 from parsecore.models import Block, BlockType, Chunk
-from parsecore.quality import evaluate_chunk_embeddings, evaluate_layout_signals
+from parsecore.api_payloads import _project_pages
+from parsecore.quality import (
+    evaluate_chunk_embeddings,
+    evaluate_layout_signals,
+    evaluate_parse_quality,
+    reconcile_quality_with_projected_pages,
+)
 
 
 class EvaluateChunkEmbeddingsTests(unittest.TestCase):
@@ -31,6 +37,69 @@ class EvaluateChunkEmbeddingsTests(unittest.TestCase):
         self.assertEqual(report.embedded_chunks, 1)
         self.assertAlmostEqual(report.embedded_chunk_ratio, 0.5)
         self.assertAlmostEqual(report.mean_embedding_dim_norm, 5.0)
+
+
+class EvaluateParseQualityTests(unittest.TestCase):
+    def test_flags_pdf_name_map_garble(self) -> None:
+        garbled = " ".join(f"/{index % 40}" for index in range(240))
+        blocks = [
+            Block(
+                block_id="blk-1",
+                doc_id="doc-1",
+                type=BlockType.PARAGRAPH,
+                content=garbled,
+                metadata={"page": 1},
+            )
+        ]
+
+        report = evaluate_parse_quality(blocks)
+
+        self.assertIn("pdf_name_garble", report.flags)
+        self.assertEqual(report.recommended_action, "retry_with_ocr")
+        self.assertLess(report.score, 1.0)
+
+    def test_reconciles_quality_against_ocr_projected_text(self) -> None:
+        garbled = "".join(f"(cid:{index % 80})" for index in range(260))
+        blocks = [
+            Block(
+                block_id="blk-1",
+                doc_id="doc-1",
+                type=BlockType.PARAGRAPH,
+                content=garbled,
+                metadata={"page": 1},
+            )
+        ]
+        raw_report = evaluate_parse_quality(blocks)
+
+        report = reconcile_quality_with_projected_pages(
+            raw_report,
+            [{"page_number": 1, "text": "Recovered OCR text with readable maintenance manual content."}],
+        )
+
+        self.assertIn("cid_garble", raw_report.flags)
+        self.assertNotIn("cid_garble", report.flags)
+        self.assertIsNone(report.recommended_action)
+        self.assertEqual(report.total_cid_tokens, 0)
+        self.assertGreater(report.score, raw_report.score)
+
+
+class ApiPayloadProjectionTests(unittest.TestCase):
+    def test_title_only_page_defaults_to_empty_tables(self) -> None:
+        blocks = [
+            Block(
+                block_id="blk-title",
+                doc_id="doc-1",
+                type=BlockType.TITLE,
+                content="Manual title",
+                metadata={"page": 1},
+            )
+        ]
+
+        pages = _project_pages(tuple(blocks))
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["tables"], [])
+        self.assertEqual(pages[0]["tables_markdown"], [])
 
 
 class EvaluateLayoutSignalsTests(unittest.TestCase):

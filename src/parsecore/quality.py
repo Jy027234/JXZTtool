@@ -33,8 +33,12 @@ _LONG_BLOCK_LEN = 2000
 _CID_TOTAL_WARN_TOKENS = 50        # ≥50 cid tokens doc-wide → warn
 _CID_TOTAL_GATE_TOKENS = 200       # ≥200 cid tokens doc-wide → flag cid_garble
 _CID_PAGE_RATIO_GATE = 0.12        # page-level char ratio already used by parser
+_PDF_NAME_TOTAL_WARN_TOKENS = 50
+_PDF_NAME_TOTAL_GATE_TOKENS = 200
+_PDF_NAME_CHAR_RATIO_GATE = 0.12
 
 _CID_TOKEN_RE = re.compile(r"\(cid:\d+\)")
+_PDF_NAME_TOKEN_RE = re.compile(r"/(?:i?\d+)(?=\s|/|$)")
 
 
 @dataclass(slots=True)
@@ -458,6 +462,7 @@ __all__ = [
     "evaluate_chunk_embeddings",
     "evaluate_layout_signals",
     "evaluate_parse_quality",
+    "reconcile_quality_with_projected_pages",
     "diff_reports",
 ]
 
@@ -488,6 +493,8 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
     blocks_list = list(blocks)
     total_chars = 0
     total_cid_tokens = 0
+    total_pdf_name_tokens = 0
+    total_pdf_name_chars = 0
     ocr_failed_pages: set[int] = set()
     ocr_fallback_pages: set[int] = set()
     page_signature_votes: dict[int, int] = {}
@@ -498,6 +505,9 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
         total_chars += len(content)
         cid_matches = _CID_TOKEN_RE.findall(content)
         total_cid_tokens += len(cid_matches)
+        pdf_name_matches = _PDF_NAME_TOKEN_RE.findall(content)
+        total_pdf_name_tokens += len(pdf_name_matches)
+        total_pdf_name_chars += sum(len(match) for match in pdf_name_matches)
 
         meta = block.metadata or {}
         page_number = int(meta.get("page", 1))
@@ -540,6 +550,25 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
         )
         penalty += 0.15
 
+    pdf_name_char_ratio = total_pdf_name_chars / max(total_chars, 1)
+    if (
+        total_pdf_name_tokens >= _PDF_NAME_TOTAL_GATE_TOKENS
+        and pdf_name_char_ratio >= _PDF_NAME_CHAR_RATIO_GATE
+    ):
+        flags.add("pdf_name_garble")
+        warnings.append(
+            f"Document contains {total_pdf_name_tokens} PDF name-map tokens; "
+            "text extraction is likely incomplete or garbled."
+        )
+        penalty += 0.35
+    elif total_pdf_name_tokens >= _PDF_NAME_TOTAL_WARN_TOKENS:
+        flags.add("pdf_name_warn")
+        warnings.append(
+            f"Document contains {total_pdf_name_tokens} PDF name-map tokens; "
+            "some text may be garbled."
+        )
+        penalty += 0.15
+
     # OCR failed pages
     if ocr_failed_pages:
         flags.add("ocr_failed")
@@ -576,7 +605,7 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
     score = max(0.0, round(1.0 - penalty, 4))
 
     recommended_action: str | None = None
-    if "cid_garble" in flags and "ocr_failed" not in flags and not ocr_fallback_pages:
+    if ({"cid_garble", "pdf_name_garble"} & flags) and "ocr_failed" not in flags and not ocr_fallback_pages:
         recommended_action = "retry_with_ocr"
     elif "docx_single_page" in flags:
         # Boundary fidelity is poor: paragraphs were not segmented into logical
@@ -597,6 +626,96 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
         total_cid_tokens=total_cid_tokens,
         ocr_failed_pages=len(ocr_failed_pages),
         suspect_signature_pages=suspect_signature_pages,
+    )
+
+
+def reconcile_quality_with_projected_pages(
+    summary: ParseQualitySummary,
+    pages: Iterable[dict[str, object]],
+) -> ParseQualitySummary:
+    """Align garble signals with the final text returned to API consumers.
+
+    Raw blocks may contain native PDF text that triggered an OCR fallback, while
+    the projected ``pages[].text`` already contains cleaner OCR text.  Product
+    callers need the quality payload to describe the final visible text, not the
+    discarded native text.
+    """
+
+    final_text = "\n\n".join(str(page.get("text") or "") for page in pages)
+    if not final_text.strip():
+        return summary
+
+    cid_tokens = len(_CID_TOKEN_RE.findall(final_text))
+    pdf_name_matches = _PDF_NAME_TOKEN_RE.findall(final_text)
+    pdf_name_tokens = len(pdf_name_matches)
+    pdf_name_chars = sum(len(match) for match in pdf_name_matches)
+    pdf_name_ratio = pdf_name_chars / max(len(final_text), 1)
+
+    flags = set(summary.flags)
+    warnings = [
+        warning for warning in summary.warnings
+        if "CID tokens" not in warning and "PDF name-map tokens" not in warning
+    ]
+    removed_penalty = 0.0
+    if "cid_garble" in flags:
+        flags.remove("cid_garble")
+        removed_penalty += 0.35
+    if "cid_warn" in flags:
+        flags.remove("cid_warn")
+        removed_penalty += 0.15
+    if "pdf_name_garble" in flags:
+        flags.remove("pdf_name_garble")
+        removed_penalty += 0.35
+    if "pdf_name_warn" in flags:
+        flags.remove("pdf_name_warn")
+        removed_penalty += 0.15
+
+    added_penalty = 0.0
+    if cid_tokens >= _CID_TOTAL_GATE_TOKENS:
+        flags.add("cid_garble")
+        warnings.append(
+            f"Final projected text contains {cid_tokens} CID tokens (≥{_CID_TOTAL_GATE_TOKENS}); "
+            "text extraction is likely incomplete or garbled."
+        )
+        added_penalty += 0.35
+    elif cid_tokens >= _CID_TOTAL_WARN_TOKENS:
+        flags.add("cid_warn")
+        warnings.append(
+            f"Final projected text contains {cid_tokens} CID tokens; "
+            "some text may be garbled."
+        )
+        added_penalty += 0.15
+
+    if pdf_name_tokens >= _PDF_NAME_TOTAL_GATE_TOKENS and pdf_name_ratio >= _PDF_NAME_CHAR_RATIO_GATE:
+        flags.add("pdf_name_garble")
+        warnings.append(
+            f"Final projected text contains {pdf_name_tokens} PDF name-map tokens; "
+            "text extraction is likely incomplete or garbled."
+        )
+        added_penalty += 0.35
+    elif pdf_name_tokens >= _PDF_NAME_TOTAL_WARN_TOKENS:
+        flags.add("pdf_name_warn")
+        warnings.append(
+            f"Final projected text contains {pdf_name_tokens} PDF name-map tokens; "
+            "some text may be garbled."
+        )
+        added_penalty += 0.15
+
+    score = min(1.0, max(0.0, round(summary.score + removed_penalty - added_penalty, 4)))
+    recommended_action = summary.recommended_action
+    if not ({"cid_garble", "pdf_name_garble"} & flags) and recommended_action == "retry_with_ocr":
+        recommended_action = None
+    elif {"cid_garble", "pdf_name_garble"} & flags and "ocr_failed" not in flags:
+        recommended_action = "retry_with_ocr"
+
+    return ParseQualitySummary(
+        score=score,
+        flags=frozenset(flags),
+        warnings=tuple(warnings),
+        recommended_action=recommended_action,
+        total_cid_tokens=cid_tokens,
+        ocr_failed_pages=summary.ocr_failed_pages,
+        suspect_signature_pages=summary.suspect_signature_pages,
     )
 
 
