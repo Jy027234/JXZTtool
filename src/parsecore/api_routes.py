@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
+from uuid import uuid4
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -232,15 +233,19 @@ class ApiRoutes:
         media_type = payload.get("media_type")
         options = dict(payload.get("options") or {})
         options["enable_ocr"] = enable_ocr
-        tmp_path: str | None = None
+        submission_path: str | None = None
+        delete_after_submit = False
         try:
-            with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-                handle.write(file_bytes)
-                tmp_path = handle.name
+            submission_path, delete_after_submit = _persist_upload_file(
+                runtime_obj,
+                content=file_bytes,
+                file_name=file_name,
+                doc_id=str(payload.get("doc_id") or Path(file_name).stem or "batch-doc"),
+            )
             outcome = runtime_obj.submit(
                 ParseRequest(
                     doc_id=str(payload.get("doc_id") or Path(file_name).stem or "batch-doc"),
-                    file_path=tmp_path,
+                    file_path=submission_path,
                     media_type=str(media_type) if media_type is not None else None,
                     options=options,
                     tenant_id=tenant_id,
@@ -275,9 +280,9 @@ class ApiRoutes:
                 status_code=400 if isinstance(exc, RuntimeError) else 500,
             )
         finally:
-            if tmp_path is not None:
+            if delete_after_submit and submission_path is not None:
                 try:
-                    os.unlink(tmp_path)
+                    os.unlink(submission_path)
                 except FileNotFoundError:
                     pass
 
@@ -345,15 +350,19 @@ class ApiRoutes:
             quota_key = str(form.get("quota_key") or "default")
             doc_id = str(form.get("doc_id") or Path(file_name).stem or "upload-doc")
             options = {"enable_ocr": enable_ocr}
-            tmp_path: str | None = None
+            submission_path: str | None = None
+            delete_after_submit = False
             try:
-                with NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix or ".bin") as handle:
-                    handle.write(content)
-                    tmp_path = handle.name
+                submission_path, delete_after_submit = _persist_upload_file(
+                    runtime_obj,
+                    content=content,
+                    file_name=file_name,
+                    doc_id=doc_id,
+                )
                 outcome = runtime_obj.submit(
                     ParseRequest(
                         doc_id=doc_id,
-                        file_path=tmp_path,
+                        file_path=submission_path,
                         media_type=media_type,
                         options=options,
                         tenant_id=tenant_id,
@@ -372,9 +381,9 @@ class ApiRoutes:
                     status_code=400 if isinstance(exc, RuntimeError) else 500,
                 )
             finally:
-                if tmp_path is not None:
+                if delete_after_submit and submission_path is not None:
                     try:
-                        os.unlink(tmp_path)
+                        os.unlink(submission_path)
                     except FileNotFoundError:
                         pass
         finally:
@@ -801,6 +810,36 @@ def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
         return provided
     guessed, _ = mimetypes.guess_type(file_name)
     return guessed
+
+
+def _persist_upload_file(
+    runtime_obj: ParseRuntime,
+    *,
+    content: bytes,
+    file_name: str,
+    doc_id: str,
+) -> tuple[str, bool]:
+    suffix = Path(file_name).suffix or ".bin"
+    if runtime_obj.settings.runtime.execution_mode != "queue-worker":
+        with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+            handle.write(content)
+            return handle.name, True
+
+    object_store = str(runtime_obj.settings.object_store or "")
+    if object_store.startswith("local://"):
+        root = Path(object_store[len("local://"):])
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        upload_dir = root / "_api_uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        safe_doc_id = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in doc_id).strip("._") or "upload-doc"
+        file_path = upload_dir / f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}"
+        file_path.write_bytes(content)
+        return str(file_path), False
+
+    with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+        handle.write(content)
+        return handle.name, True
 
 
 def _record_quota_exceeded_event(request: Request, runtime_obj: ParseRuntime, exc: QuotaExceededError) -> None:
