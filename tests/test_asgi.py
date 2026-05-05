@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 from concurrent.futures import Future
 import os
+from pathlib import Path
+import time
 import unittest
 
 from starlette.testclient import TestClient
@@ -244,6 +246,102 @@ extensions = [".pdf"]
 """.strip()
 
 
+TEXT_API_CONFIG = """
+[project]
+name = "test-api-text"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+UPLOAD_BRIDGE_HARDENED_CONFIG = """
+[project]
+name = "test-api-upload-bridge-hardened"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+staged_upload_retention_seconds = 60
+staged_upload_api_key_env = "PARSECORE_UPLOAD_BRIDGE_API_KEY"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+UPLOAD_BRIDGE_RETENTION_CONFIG = """
+[project]
+name = "test-api-upload-bridge-retention"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+staged_upload_retention_seconds = 1
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
 API_KEY_PROTECTED_CONFIG = """
 [project]
 name = "test-api-protected"
@@ -277,6 +375,150 @@ extensions = [".docx"]
 
 
 class ParseApiTests(unittest.TestCase):
+    def test_upload_bridge_stages_file_for_later_job_submission(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                staged = client.post(
+                    "/v1/parse/uploads",
+                    data={
+                        "doc_id": "doc-bridge-001",
+                        "tenant_id": "tenant-alpha",
+                        "quota_key": "default-plan",
+                        "quota_units": "2",
+                    },
+                    files={"file": ("manual.txt", b"alpha\nbeta", "text/plain")},
+                )
+                self.assertEqual(staged.status_code, 201)
+                staged_payload = staged.json()
+                self.assertEqual(staged_payload["doc_id"], "doc-bridge-001")
+                self.assertEqual(staged_payload["state"], "staged")
+                self.assertIn("parsecore_server_file_path", staged_payload)
+                self.assertTrue(Path(staged_payload["parsecore_server_file_path"]).exists())
+
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-bridge-001",
+                        "file_path": staged_payload["parsecore_server_file_path"],
+                        "media_type": "text/plain",
+                        "tenant_id": "tenant-alpha",
+                        "quota_key": "default-plan",
+                        "quota_units": 2,
+                        "options": {"enable_ocr": False, "file_name": "manual.txt"},
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                created_payload = created.json()
+                self.assertEqual(created_payload["doc_id"], "doc-bridge-001")
+                self.assertEqual(created_payload["tenant_id"], "tenant-alpha")
+                self.assertEqual(created_payload["quota_units"], 2)
+
+                final_job = None
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{created_payload['job_id']}")
+                    self.assertEqual(current.status_code, 200)
+                    final_job = current.json()
+                    if final_job["state"] == ParseJobState.DONE.value:
+                        break
+
+                self.assertIsNotNone(final_job)
+                assert final_job is not None
+                self.assertEqual(final_job["state"], ParseJobState.DONE.value)
+
+    def test_upload_bridge_can_create_job_immediately(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/uploads",
+                    data={
+                        "doc_id": "doc-bridge-002",
+                        "tenant_id": "tenant-beta",
+                        "quota_key": "default-plan",
+                        "quota_units": "1",
+                        "create_job": "true",
+                    },
+                    files={"file": ("manual.txt", b"bridge upload text", "text/plain")},
+                )
+                self.assertEqual(created.status_code, 202)
+                payload = created.json()
+                self.assertEqual(payload["doc_id"], "doc-bridge-002")
+                self.assertEqual(payload["tenant_id"], "tenant-beta")
+                self.assertEqual(payload["quota_units"], 1)
+                self.assertTrue(payload["create_job"])
+                self.assertIn("job_id", payload)
+                self.assertIn("parsecore_server_file_path", payload)
+                self.assertTrue(Path(payload["parsecore_server_file_path"]).exists())
+
+                current = client.get(f"/v1/parse/jobs/{payload['job_id']}")
+                self.assertEqual(current.status_code, 200)
+                current_payload = current.json()
+                self.assertEqual(current_payload["doc_id"], "doc-bridge-002")
+                self.assertIn(current_payload["state"], {ParseJobState.PENDING.value, ParseJobState.PARSING.value, ParseJobState.STRUCTURING.value, ParseJobState.DONE.value})
+
+    def test_upload_bridge_requires_dedicated_api_key_when_configured(self) -> None:
+        with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
+            with patch.dict(os.environ, {"PARSECORE_UPLOAD_BRIDGE_API_KEY": "bridge-secret"}, clear=False):
+                app = create_app(workspace.config_path)
+                with TestClient(app) as client:
+                    unauthorized = client.post(
+                        "/v1/parse/uploads",
+                        data={"doc_id": "doc-bridge-protected"},
+                        files={"file": ("manual.txt", b"protected", "text/plain")},
+                    )
+                    self.assertEqual(unauthorized.status_code, 401)
+                    self.assertEqual(unauthorized.json()["code"], "upload_bridge_unauthorized")
+                    self.assertEqual(unauthorized.headers.get("www-authenticate"), "Bearer")
+
+                    authorized = client.post(
+                        "/v1/parse/uploads",
+                        data={"doc_id": "doc-bridge-protected"},
+                        files={"file": ("manual.txt", b"protected", "text/plain")},
+                        headers={"x-api-key": "bridge-secret"},
+                    )
+                    self.assertEqual(authorized.status_code, 201)
+                    self.assertTrue(Path(authorized.json()["parsecore_server_file_path"]).exists())
+
+                    runtime_endpoint = client.get("/v1/runtime")
+                    self.assertEqual(runtime_endpoint.status_code, 200)
+
+    def test_create_app_fails_fast_when_upload_bridge_api_key_env_is_empty(self) -> None:
+        with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
+            with patch.dict(os.environ, {"PARSECORE_UPLOAD_BRIDGE_API_KEY": ""}, clear=False):
+                with self.assertRaisesRegex(ValueError, "PARSECORE_UPLOAD_BRIDGE_API_KEY"):
+                    create_app(workspace.config_path)
+
+    def test_upload_bridge_cleans_expired_staged_files(self) -> None:
+        with TemporaryWorkspace(UPLOAD_BRIDGE_RETENTION_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                first = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-bridge-cleanup-1"},
+                    files={"file": ("manual.txt", b"cleanup-one", "text/plain")},
+                )
+                self.assertEqual(first.status_code, 201)
+                upload_dir = Path(first.json()["parsecore_server_file_path"]).parent
+
+                expired = upload_dir / "expired-sentinel.txt"
+                expired.write_text("old", encoding="utf-8")
+                expired_timestamp = time.time() - 120
+                os.utime(expired, (expired_timestamp, expired_timestamp))
+
+                fresh = upload_dir / "fresh-sentinel.txt"
+                fresh.write_text("new", encoding="utf-8")
+
+                second = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-bridge-cleanup-2"},
+                    files={"file": ("manual.txt", b"cleanup-two", "text/plain")},
+                )
+                self.assertEqual(second.status_code, 201)
+                self.assertFalse(expired.exists())
+                self.assertTrue(fresh.exists())
+                self.assertTrue(Path(second.json()["parsecore_server_file_path"]).exists())
+
     def test_api_key_protects_runtime_endpoint_but_not_health(self) -> None:
         with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
             with patch.dict(os.environ, {"PARSECORE_API_KEY": "test-secret"}, clear=False):

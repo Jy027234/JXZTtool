@@ -15,6 +15,7 @@ from .api_support import (
     ApiKeyMiddleware,
     TraceIdMiddleware,
     _resolve_required_api_key,
+    _resolve_staged_upload_api_key,
 )
 from .bootstrap import build_runtime
 from .models import ParseJob, ParseOutcome, ParseRequest
@@ -112,6 +113,7 @@ class QueueSubmissionRunner:
 def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     runtime = build_runtime(config_path)
     required_api_key = _resolve_required_api_key(runtime)
+    staged_upload_api_key = _resolve_staged_upload_api_key(runtime)
 
     if runtime.settings.runtime.execution_mode == "queue-worker":
         runner: BackgroundParseRunner | QueueSubmissionRunner = QueueSubmissionRunner(runtime)
@@ -148,6 +150,7 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     app.add_middleware(TraceIdMiddleware)
     if required_api_key is not None:
         app.add_middleware(ApiKeyMiddleware, api_key=required_api_key)
+    app.state.upload_bridge_api_key = staged_upload_api_key
     return app
 
 

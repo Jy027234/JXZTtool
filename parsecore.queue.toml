@@ -10,6 +10,10 @@ max_inflight_jobs = 0
 poll_interval_ms = 500
 # 50 MiB request file guard for /parse and /parse/batch; set 0 to disable.
 max_upload_bytes = 52428800
+# Auto-delete staged bridge uploads older than 24h; set 0 to disable cleanup.
+staged_upload_retention_seconds = 86400
+# Optional dedicated API key for /parse/uploads and /v1/parse/uploads only.
+# staged_upload_api_key_env = "PARSECORE_UPLOAD_BRIDGE_API_KEY"
 quota_enforce = false
 quota_window_hours = 24
 quota_default_limit_units = 0

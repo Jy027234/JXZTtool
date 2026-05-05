@@ -27,18 +27,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.public_paths:
             return await call_next(request)
         if _extract_api_key(request) != self.api_key:
-            response = JSONResponse(
-                {
-                    "error": "unauthorized",
-                    "code": "unauthorized",
-                    "message": "Missing or invalid API key",
-                    "trace_id": _trace_id_for_request(request),
-                },
-                status_code=401,
-            )
-            response.headers.setdefault("WWW-Authenticate", "Bearer")
-            response.headers.setdefault("x-trace-id", _trace_id_for_request(request))
-            return response
+            return _api_key_unauthorized_response(request)
         return await call_next(request)
 
 
@@ -65,16 +54,50 @@ def _extract_api_key(request: Request) -> str | None:
     return token or None
 
 
-def _resolve_required_api_key(runtime: Any) -> str | None:
-    env_name = str(getattr(runtime.settings.runtime, "api_key_env", "") or "").strip()
-    if not env_name:
+def _api_key_unauthorized_response(
+    request: Request,
+    *,
+    code: str = "unauthorized",
+    message: str = "Missing or invalid API key",
+) -> JSONResponse:
+    response = JSONResponse(
+        {
+            "error": code,
+            "code": code,
+            "message": message,
+            "trace_id": _trace_id_for_request(request),
+        },
+        status_code=401,
+    )
+    response.headers.setdefault("WWW-Authenticate", "Bearer")
+    response.headers.setdefault("x-trace-id", _trace_id_for_request(request))
+    return response
+
+
+def _resolve_api_key_from_env(*, env_name: str, setting_name: str) -> str | None:
+    normalized_env_name = str(env_name or "").strip()
+    if not normalized_env_name:
         return None
-    api_key = str(os.environ.get(env_name) or "").strip()
+    api_key = str(os.environ.get(normalized_env_name) or "").strip()
     if not api_key:
         raise ValueError(
-            f"runtime.api_key_env is set to {env_name}, but the environment variable is empty"
+            f"{setting_name} is set to {normalized_env_name}, but the environment variable is empty"
         )
     return api_key
+
+
+def _resolve_required_api_key(runtime: Any) -> str | None:
+    return _resolve_api_key_from_env(
+        env_name=str(getattr(runtime.settings.runtime, "api_key_env", "") or ""),
+        setting_name="runtime.api_key_env",
+    )
+
+
+def _resolve_staged_upload_api_key(runtime: Any) -> str | None:
+    return _resolve_api_key_from_env(
+        env_name=str(getattr(runtime.settings.runtime, "staged_upload_api_key_env", "") or ""),
+        setting_name="runtime.staged_upload_api_key_env",
+    )
 
 
 def _max_upload_bytes(runtime: Any) -> int:
