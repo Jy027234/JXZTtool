@@ -140,6 +140,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 docker compose up -d --build
 ```
 
+启用桥接专用鉴权的容器示例：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.queue.bridge-auth.toml.example"
+$env:PARSECORE_UPLOAD_BRIDGE_API_KEY = "bridge-secret"
+docker compose up -d --build --force-recreate parsecore-api parsecore-worker
+```
+
 用 Postgres + pgvector profile 启动容器：
 
 ```powershell
@@ -159,6 +167,7 @@ docker compose --profile pgvector up -d --build
 - `parsecore-api` / `parsecore-worker` 现在统一挂载 `PARSECORE_RUNTIME_CONFIG` 指向的配置文件；不设置时仍默认使用 `parsecore.queue.toml`
 - `parsecore-postgres` 通过 `pgvector` profile 提供，适合本地联调、自检和持久化验证
 - 若只想切 OCR provider，不改存储，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.remote-http.toml.example` 或你自己的配置文件
+- 若要只给 `/parse/uploads` / `/v1/parse/uploads` 打开专用鉴权，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.queue.bridge-auth.toml.example`，再设置 `PARSECORE_UPLOAD_BRIDGE_API_KEY`
 - 若只想把 `chunk_embeddings` 与 hybrid search 路径在本地跑通，不依赖外部 key，可使用 `parsecore.pgvector.fake-embedding.toml.example`
 - 示例配置默认启用 `max_upload_bytes = 52428800`，同步上传超过 50 MiB 时返回 `413 file_too_large`
 - 示例配置默认启用 `staged_upload_retention_seconds = 86400`，桥接上传目录 `_api_uploads` 会在新上传到达时顺手清理 24 小时前的旧暂存文件；如果需要对 `/parse/uploads` 单独加保护，可配置 `staged_upload_api_key_env`
