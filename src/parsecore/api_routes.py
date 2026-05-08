@@ -114,6 +114,41 @@ class ApiRoutes:
 
     async def create_job(self, request: Request) -> JSONResponse:
         payload = await request.json()
+        doc_id = str(payload.get("doc_id") or "").strip()
+        if not doc_id:
+            return _error_response(
+                request,
+                code="missing_doc_id",
+                message="Missing doc_id",
+                status_code=400,
+            )
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        try:
+            file_path = _resolve_api_file_path(runtime_obj, payload.get("file_path"))
+        except ValueError as exc:
+            code = str(exc) or "invalid_file_path"
+            if code == "missing_file_path":
+                message = "Missing file_path"
+            else:
+                code = "invalid_file_path"
+                message = "Invalid file_path"
+            return _error_response(
+                request,
+                code=code,
+                message=message,
+                status_code=400,
+            )
+        except PermissionError:
+            return _error_response(
+                request,
+                code="file_path_not_allowed",
+                message="file_path must be inside the configured local object_store",
+                status_code=403,
+                detail={
+                    "allow_external_file_paths": False,
+                    "object_store": runtime_obj.settings.object_store,
+                },
+            )
         quota_units_raw = payload.get("quota_units", 1)
         try:
             quota_units = max(1, int(quota_units_raw))
@@ -125,8 +160,8 @@ class ApiRoutes:
                 status_code=400,
             )
         parse_request = ParseRequest(
-            doc_id=str(payload["doc_id"]),
-            file_path=str(payload["file_path"]),
+            doc_id=doc_id,
+            file_path=file_path,
             media_type=payload.get("media_type"),
             options=dict(payload.get("options") or {}),
             tenant_id=str(payload.get("tenant_id") or "default"),
@@ -477,12 +512,23 @@ class ApiRoutes:
             tenant_id = str(form.get("tenant_id") or "default")
             quota_key = str(form.get("quota_key") or "default")
             doc_id = str(form.get("doc_id") or Path(file_name).stem or "upload-doc")
-            submission_path = _persist_staged_upload_file(
-                runtime_obj,
-                content=content,
-                file_name=file_name,
-                doc_id=doc_id,
-            )
+            try:
+                submission_path = _persist_staged_upload_file(
+                    runtime_obj,
+                    content=content,
+                    file_name=file_name,
+                    doc_id=doc_id,
+                )
+            except RuntimeError as exc:
+                if str(exc) == "staged_upload_requires_local_object_store":
+                    return _error_response(
+                        request,
+                        code="staged_upload_requires_local_object_store",
+                        message="Staged uploads require a local:// object_store",
+                        status_code=500,
+                        detail={"object_store": runtime_obj.settings.object_store},
+                    )
+                raise
             job_payload = None
             if create_job:
                 parse_request = ParseRequest(
@@ -954,6 +1000,50 @@ def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
     return guessed
 
 
+def _resolve_api_file_path(runtime_obj: ParseRuntime, value: Any) -> str:
+    file_path = str(value or "").strip()
+    if not file_path:
+        raise ValueError("missing_file_path")
+
+    candidate = Path(file_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        resolved_candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("invalid_file_path") from exc
+    if not resolved_candidate.is_file():
+        raise ValueError("invalid_file_path")
+    if runtime_obj.settings.runtime.allow_external_file_paths:
+        return str(resolved_candidate)
+
+    object_store_root = _resolve_local_object_store_root(runtime_obj)
+    if object_store_root is None or not _path_is_relative_to(
+        resolved_candidate,
+        object_store_root,
+    ):
+        raise PermissionError("file_path_not_allowed")
+    return str(resolved_candidate)
+
+
+def _resolve_local_object_store_root(runtime_obj: ParseRuntime) -> Path | None:
+    object_store = str(runtime_obj.settings.object_store or "")
+    if not object_store.startswith("local://"):
+        return None
+    root = Path(object_store[len("local://"):])
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    return root.resolve(strict=False)
+
+
+def _path_is_relative_to(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _persist_upload_file(
     runtime_obj: ParseRuntime,
     *,
@@ -1002,9 +1092,7 @@ def _persist_staged_upload_file(
         file_path.write_bytes(content)
         return str(file_path)
 
-    with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-        handle.write(content)
-        return handle.name
+    raise RuntimeError("staged_upload_requires_local_object_store")
 
 
 def _resolve_staged_upload_dir(runtime_obj: ParseRuntime) -> Path | None:

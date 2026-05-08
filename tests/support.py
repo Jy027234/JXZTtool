@@ -113,11 +113,21 @@ class TemporaryWorkspace:
         self.root = Path(self._tempdir.name)
         database_path = self.root / "parsecore.db"
         database_url = f"sqlite:///{database_path.as_posix()}"
-        self.config_path = self.root / "parsecore.toml"
-        self.config_path.write_text(
-            self.config_template.replace("__DB_URL__", database_url),
-            encoding="utf-8",
+        object_store_path = self.root / "object-store"
+        object_store_path.mkdir(parents=True, exist_ok=True)
+        config_text = (
+            self.config_template
+            .replace("__DB_URL__", database_url)
+            .replace("__OBJECT_STORE__", object_store_path.as_posix())
         )
+        if "allow_external_file_paths" not in config_text and "[runtime]" in config_text:
+            config_text = config_text.replace(
+                "[runtime]\n",
+                "[runtime]\nallow_external_file_paths = true\n",
+                1,
+            )
+        self.config_path = self.root / "parsecore.toml"
+        self.config_path.write_text(config_text, encoding="utf-8")
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -127,6 +137,7 @@ class TemporaryWorkspace:
     def create_docx(self, name: str, paragraphs: list[str]) -> Path:
         assert self.root is not None
         target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         document_xml = DOCX_XML.format(paragraphs="".join(build_docx_paragraph(item) for item in paragraphs))
         with zipfile.ZipFile(target, "w") as archive:
             archive.writestr("word/document.xml", document_xml)
@@ -135,6 +146,7 @@ class TemporaryWorkspace:
     def create_docx_with_body(self, name: str, body_xml: str) -> Path:
         assert self.root is not None
         target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         document_xml = DOCX_XML.format(paragraphs=body_xml)
         with zipfile.ZipFile(target, "w") as archive:
             archive.writestr("word/document.xml", document_xml)
@@ -143,11 +155,13 @@ class TemporaryWorkspace:
     def create_text_file(self, name: str, content: str) -> Path:
         assert self.root is not None
         target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return target
 
     def create_pdf(self, name: str, pages: list[list[str]]) -> Path:
         assert self.root is not None
         target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(build_simple_pdf_bytes(pages))
         return target

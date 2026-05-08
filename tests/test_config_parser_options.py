@@ -88,6 +88,7 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.providers.ocr.timeout_seconds, 9.5)
         self.assertEqual(settings.providers.ocr.max_retries, 4)
         self.assertEqual(settings.runtime.api_key_env, "PARSECORE_API_KEY")
+        self.assertFalse(settings.runtime.allow_external_file_paths)
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},

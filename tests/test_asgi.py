@@ -277,6 +277,69 @@ extensions = [".txt"]
 """.strip()
 
 
+STRICT_TEXT_API_CONFIG = """
+[project]
+name = "test-api-text-strict-paths"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+allow_external_file_paths = false
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://__OBJECT_STORE__"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+REMOTE_OBJECT_STORE_UPLOAD_CONFIG = """
+[project]
+name = "test-api-upload-non-local-store"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "s3://parsecore-test/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
 UPLOAD_BRIDGE_HARDENED_CONFIG = """
 [project]
 name = "test-api-upload-bridge-hardened"
@@ -426,6 +489,43 @@ class ParseApiTests(unittest.TestCase):
                 assert final_job is not None
                 self.assertEqual(final_job["state"], ParseJobState.DONE.value)
 
+    def test_upload_bridge_path_can_create_job_when_external_paths_disabled(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                staged = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-strict-bridge"},
+                    files={"file": ("strict.txt", b"strict alpha", "text/plain")},
+                )
+                self.assertEqual(staged.status_code, 201)
+                staged_payload = staged.json()
+
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-strict-bridge",
+                        "file_path": staged_payload["parsecore_server_file_path"],
+                        "media_type": "text/plain",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+
+    def test_upload_bridge_rejects_non_local_object_store(self) -> None:
+        with TemporaryWorkspace(REMOTE_OBJECT_STORE_UPLOAD_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-non-local-store"},
+                    files={"file": ("remote.txt", b"alpha", "text/plain")},
+                )
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertEqual(payload["code"], "staged_upload_requires_local_object_store")
+        self.assertEqual(payload["detail"]["object_store"], "s3://parsecore-test/uploads")
+
     def test_upload_bridge_can_create_job_immediately(self) -> None:
         with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
             app = create_app(workspace.config_path)
@@ -555,6 +655,124 @@ class ParseApiTests(unittest.TestCase):
             with patch.dict(os.environ, {"PARSECORE_API_KEY": ""}, clear=False):
                 with self.assertRaisesRegex(ValueError, "PARSECORE_API_KEY"):
                     create_app(workspace.config_path)
+
+    def test_create_job_rejects_external_file_path_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("outside.txt", "blocked")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-blocked-001",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["code"], "file_path_not_allowed")
+        self.assertEqual(payload["detail"]["allow_external_file_paths"], False)
+
+    def test_create_job_accepts_object_store_file_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("object-store/allowed.txt", "alpha")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-allowed-001",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                job_id = created.json()["job_id"]
+
+                final_job = None
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    final_job = current.json()
+                    if final_job["state"] == ParseJobState.DONE.value:
+                        break
+
+        self.assertIsNotNone(final_job)
+        assert final_job is not None
+        self.assertEqual(final_job["state"], ParseJobState.DONE.value)
+
+    def test_create_job_validates_required_path_payload(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                missing_doc_id = client.post(
+                    "/v1/parse/jobs",
+                    json={"file_path": str(workspace.root / "object-store" / "x.txt")},
+                )
+                missing_file_path = client.post(
+                    "/v1/parse/jobs",
+                    json={"doc_id": "doc-missing-file"},
+                )
+
+        self.assertEqual(missing_doc_id.status_code, 400)
+        self.assertEqual(missing_doc_id.json()["code"], "missing_doc_id")
+        self.assertEqual(missing_file_path.status_code, 400)
+        self.assertEqual(missing_file_path.json()["code"], "missing_file_path")
+
+    def test_create_job_rejects_invalid_path_payloads(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            directory_path = workspace.root / "object-store"
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                missing_file = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-missing-path",
+                        "file_path": str(directory_path / "missing.txt"),
+                        "media_type": "text/plain",
+                    },
+                )
+                directory = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-directory-path",
+                        "file_path": str(directory_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(missing_file.status_code, 400)
+        self.assertEqual(missing_file.json()["code"], "invalid_file_path")
+        self.assertEqual(directory.status_code, 400)
+        self.assertEqual(directory.json()["code"], "invalid_file_path")
+
+    def test_create_job_rejects_resolved_path_traversal_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            outside_path = workspace.create_text_file("outside-traversal.txt", "blocked")
+            (workspace.root / "object-store" / "_api_uploads").mkdir(parents=True, exist_ok=True)
+            traversal_path = (
+                workspace.root
+                / "object-store"
+                / "_api_uploads"
+                / ".."
+                / ".."
+                / outside_path.name
+            )
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-traversal-001",
+                        "file_path": str(traversal_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "file_path_not_allowed")
 
     def test_job_lifecycle_endpoints(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
