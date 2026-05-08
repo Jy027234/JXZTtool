@@ -17,13 +17,6 @@ api = [
     "httpx>=0.28,<1",
     "python-multipart>=0.0.20,<1",
 ]
-test = [
-    "pytest>=8,<9",
-    "httpx>=0.28,<1",
-    "numpy>=2,<3",
-    "Pillow>=11,<13",
-    "starlette>=1,<2",
-]
 worker = [
     "celery>=5.5,<6",
 ]
@@ -38,6 +31,13 @@ parsers = [
     "pypdf>=5,<6",
     "rapidocr_onnxruntime>=1.2,<2",
     "xlrd>=2,<3",
+]
+test = [
+    "pytest>=8,<9",
+    "httpx>=0.28,<1",
+    "numpy>=2.1,<3",
+    "Pillow>=11,<12",
+    "starlette>=1,<2",
 ]
 
 [project.scripts]

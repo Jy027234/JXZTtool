@@ -5,11 +5,7 @@ from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
 from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
-from .quality import (
-    ParseQualitySummary,
-    evaluate_parse_quality,
-    evaluate_projected_parse_quality,
-)
+from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -56,7 +52,8 @@ def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
     pages = _project_pages(outcome.blocks)
     raw_qs = evaluate_parse_quality(outcome.blocks)
     output_qs = evaluate_projected_parse_quality(pages)
-    trace_payload = ocr_decision_trace_payload(build_ocr_decision_trace(outcome.blocks))
+    ocr_trace = build_ocr_decision_trace(outcome.blocks)
+    trace_payload = ocr_decision_trace_payload(ocr_trace)
     return {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "success": True,

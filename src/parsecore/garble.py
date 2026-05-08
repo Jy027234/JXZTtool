@@ -107,6 +107,7 @@ def detect_page_garble_reason(
     if signals.repeated_short_token_ratio >= min_repeated_short_ratio:
         return "repeated_short_tokens"
 
+    # Mixed-script anomaly where one script dominates while the other is sparse.
     if signals.cjk_ratio > 0.15 and 0 < signals.latin_ratio < 0.02:
         return "script_distribution_anomaly"
 

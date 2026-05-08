@@ -110,6 +110,12 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip 
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[api]"
 ```
 
+如果要运行完整单测：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[test]"
+```
+
 查看当前骨架描述：
 
 ```powershell
@@ -140,6 +146,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 docker compose up -d --build
 ```
 
+启用桥接专用鉴权的容器示例：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.queue.bridge-auth.toml.example"
+$env:PARSECORE_UPLOAD_BRIDGE_API_KEY = "bridge-secret"
+docker compose up -d --build --force-recreate parsecore-api parsecore-worker
+```
+
 用 Postgres + pgvector profile 启动容器：
 
 ```powershell
@@ -159,8 +173,11 @@ docker compose --profile pgvector up -d --build
 - `parsecore-api` / `parsecore-worker` 现在统一挂载 `PARSECORE_RUNTIME_CONFIG` 指向的配置文件；不设置时仍默认使用 `parsecore.queue.toml`
 - `parsecore-postgres` 通过 `pgvector` profile 提供，适合本地联调、自检和持久化验证
 - 若只想切 OCR provider，不改存储，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.remote-http.toml.example` 或你自己的配置文件
+- 若要只给 `/parse/uploads` / `/v1/parse/uploads` 打开专用鉴权，可把 `PARSECORE_RUNTIME_CONFIG` 指到 `parsecore.queue.bridge-auth.toml.example`，再设置 `PARSECORE_UPLOAD_BRIDGE_API_KEY`
 - 若只想把 `chunk_embeddings` 与 hybrid search 路径在本地跑通，不依赖外部 key，可使用 `parsecore.pgvector.fake-embedding.toml.example`
 - 示例配置默认启用 `max_upload_bytes = 52428800`，同步上传超过 50 MiB 时返回 `413 file_too_large`
+- 示例配置默认启用 `allow_external_file_paths = false`，`/v1/parse/jobs` 只接受已存在且位于 `storage.object_store` 下的服务端文件路径；跨服务传文件推荐走 `/parse/uploads` 或 `/v1/parse/uploads`
+- 示例配置默认启用 `staged_upload_retention_seconds = 86400`，桥接上传目录 `_api_uploads` 会在新上传到达时顺手清理 24 小时前的旧暂存文件；如果需要对 `/parse/uploads` 单独加保护，可配置 `staged_upload_api_key_env`
 
 运行测试：
 
@@ -224,11 +241,14 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 显式 API 路由：
 
-- `GET /health`：parser-service 兼容健康检查，返回 `status / version / services`，其中 `services` 当前包含 `pdfplumber / python_docx / openpyxl / xlrd / paddleocr`
+- `GET /health`：parser-service 兼容健康检查，返回 `status / version / services / service_details`，其中 `services` 当前包含 `pdfplumber / python_docx / openpyxl / xlrd / paddleocr`，`service_details` 会给出注册状态、import 结果、版本和失败原因
 - `POST /parse`：parser-service 兼容上传入口，使用 multipart `file` 字段上传文档，返回 `file_name / mime_type / total_pages / pages / metadata`
+- `POST /parse/uploads`：上传桥接入口，使用 multipart `file` 字段暂存文件并返回 `parsecore_server_file_path`；表单里传 `create_job=true` 时会在同一请求里继续创建解析任务并一并返回 `job_id / state`
 - `POST /parse/batch`：parser-service 兼容根路径，可直接对接现有企业产品客户端
 - `POST /v1/parse`：与 `/parse` 等价的版本化上传入口，支持 `enable_ocr`、`tenant_id`、`quota_key`、`quota_units`
-- `POST /v1/parse/batch`：与 `/parse/batch` 等价的版本化同步入口，接收 `file_base64`、`file_name`，同步返回 `success / total_pages / pages[] / parser_used / error`
+- `POST /v1/parse/uploads`：与 `/parse/uploads` 等价的版本化上传桥接入口，适合浏览器或连接器先换取 `parsecore_server_file_path`，再续接 `/v1/parse/jobs`；若同请求传 `create_job=true`，响应会同时携带 `job_id` 与可轮询的任务状态
+- 桥接上传要求 `storage.object_store` 为 `local://...`；非本地对象目录会返回 `500 staged_upload_requires_local_object_store`，避免暂存文件落到系统临时目录后绕开路径边界
+- `POST /v1/parse/batch`：与 `/parse/batch` 等价的版本化同步入口，接收 `file_base64`、`file_name`，同步返回 `success / total_pages / pages[] / parser_used / quality / raw_quality / output_quality / ocr_decision_trace / error`
 - `POST /v1/parse/documents/{doc_id}/reparse`：重新执行完整解析
 - `POST /v1/parse/documents/{doc_id}/rechunk`：复用已存 blocks，重算 chunk / embedding / index
 - `POST /v1/parse/documents/{doc_id}/re-embed`：复用已存 blocks + chunks，仅重算 embedding / index
@@ -236,12 +256,17 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `GET /v1/parse/jobs?tenant_id=...&quota_key=...`：按租户与配额键过滤任务列表
 - `GET /v1/parse/quotas/usage?tenant_id=...&since_hours=...`：查看租户/配额维度的作业计数与 quota_units 聚合（支持时间窗口）
 - `GET /v1/parse/metrics?tenant_id=...&sample_size=200`：查看租户维度轻量运行指标（失败率、活跃任务数、耗时 p50/p90/p99）
-- `GET /v1/parse/events?event_type=ocr_failed&tenant_id=...`：查看最近观测事件；除 quota / inflight / embedding 外，现已包含 OCR 摘要事件 `ocr_attempted / ocr_fallback / ocr_failed`
-- `GET /v1/parse/prometheus`：Prometheus 文本指标出口；除 quota / inflight / embedding 外，现已包含 `parse_ocr_attempt_total / parse_ocr_fallback_total / parse_ocr_failed_total`
+- `GET /v1/parse/events?event_type=ocr_failed&tenant_id=...`：查看最近观测事件；除 quota / inflight / embedding 外，现已包含 OCR 摘要事件 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_failed`
+- `GET /v1/parse/prometheus`：Prometheus 文本指标出口；除 quota / inflight / embedding 外，现已包含 `parse_ocr_attempt_total / parse_ocr_fallback_total / parse_ocr_rejected_total / parse_ocr_failed_total`
 - `GET /v1/parse/dashboard?tenant_id=...&sample_size=200&recent_limit=5`：单请求聚合租户 usage + metrics + recent_jobs
 - `since_hours`：可选时间窗口（小时），用于 `quotas/usage`、`metrics`、`dashboard` 仅统计最近 N 小时任务
+- `POST /v1/parse/jobs`：创建异步解析 job；默认要求 `file_path` 指向 `storage.object_store` 内已存在的普通文件，越界返回 `403 file_path_not_allowed`
 - `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
-- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
+- `staged_upload_api_key_env`：仅保护 `/parse/uploads` 与 `/v1/parse/uploads`；配置后调用方需提供 `x-api-key` 或 `Authorization: Bearer ...`，不会影响 `/v1/runtime` 等其他接口
+- `staged_upload_retention_seconds`：桥接暂存文件的保留秒数；服务会在新的桥接上传请求到达时清理 `_api_uploads` 下超过该时长的旧文件
+- `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / tables / artifacts / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`
+- `pages[] OCR 字段`：当页面触发 OCR 决策时会附带 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_attempt_reasons / ocr_acceptance_reasons / ocr_rejection_reasons / ocr_error_reasons / native_text_token_count / final_text_token_count`
+- `ocr_decision_trace`：batch 顶层 OCR 决策汇总，包含 `ocr_attempted_pages / ocr_fallback_pages / ocr_rejected_pages / ocr_failed_pages / native_text_token_count / final_text_token_count` 以及可选原因列表字段
 - `metadata`：上传解析响应中包含 `parser`，PDF 额外回传 `ocr_enabled`，用于和企业产品现有 `ParseResult` 结构对齐
 - `excel-native`：`.xls/.xlsx/.xlsm` 会按 worksheet 内的空行与标题行分隔识别多个表格区域，输出 `TABLE` block，并在 metadata 中携带 `sheet_name / cell_range / source_cell_range / sheet_table_index / table_title / header_row / header_values / merged_cells / has_formula / hidden_sheet`；大型表格的完整 `cells` 元数据会按 `max_metadata_cells` 限制降级为 `cells_preview`
 - `enable_ocr`：`/parse` 与 `/v1/parse` 以及 batch 入口上的 request 级开关；显式传 `true` 时会为该请求打开 PDF OCR 回退，显式传 `false` 时会覆盖配置默认值并关闭 OCR 回退
@@ -254,6 +279,7 @@ API 依赖说明：
 - `api` 可选依赖现已包含 `python-multipart`，用于支持 `/parse` 与 `/v1/parse` 的 multipart 文件上传
 - `parsers` 可选依赖现已包含 `openpyxl` 与 `xlrd`，用于支持 `excel-native` 解析 `.xls/.xlsx/.xlsm`
 - `parsers` 可选依赖现已包含 `rapidocr_onnxruntime`，用于支撑 `image-ocr` parser 与 PDF 坏页 OCR 回退
+- `test` 可选依赖包含 `pytest / httpx / numpy / Pillow / starlette`，用于新环境快速补齐单测依赖
 
 背压与并发说明：
 

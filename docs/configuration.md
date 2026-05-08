@@ -88,6 +88,7 @@ max_workers = 2
 max_inflight_jobs = 0
 poll_interval_ms = 500
 max_upload_bytes = 52428800
+allow_external_file_paths = false
 quota_enforce = false
 quota_window_hours = 24
 quota_default_limit_units = 0
@@ -103,6 +104,7 @@ log_path = "var/logs/job_events.jsonl"
 | `max_inflight_jobs` | `0` | `0` 或正整数 | inline job 背压上限；`0` 表示自动取 `max_workers * 4`。超过时返回 `429 too_many_inflight_jobs`。 |
 | `poll_interval_ms` | `1000` | 正整数 | Worker 拉取待处理 job 的轮询间隔。 |
 | `max_upload_bytes` | `0` | 字节数 | `/parse` 与 `/parse/batch` 上传保护；`0` 表示不限制。推荐生产保留 50 MiB 或按业务调整。 |
+| `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
 | `quota_enforce` | `false` | bool | 开启后按租户和 `quota_key` 做硬限校验。 |
 | `quota_window_hours` | `24` | 正数 | quota 统计时间窗，单位小时。 |
@@ -114,6 +116,7 @@ log_path = "var/logs/job_events.jsonl"
 
 - 面向外部或跨团队调用时启用 `runtime.api_key_env`。
 - 保留 `max_upload_bytes`，避免超大文件直接压垮 API 进程。
+- 保持 `allow_external_file_paths = false`，跨服务提交文件优先使用 `/parse/uploads` 或 `/v1/parse/uploads`。
 - 大文件、并发或长耗时解析使用 `queue-worker`。
 - 灰度初期把 `max_workers` 和 `max_inflight_jobs` 设保守，再根据 `/v1/parse/metrics` 调整。
 
@@ -141,6 +144,29 @@ max_upload_bytes = 52428800
 ```
 
 超过上限时同步上传接口返回 `413 file_too_large`，响应中包含实际大小和限制大小。
+
+`/v1/parse/jobs` 本地路径边界：
+
+```toml
+[runtime]
+allow_external_file_paths = false
+
+[storage]
+object_store = "local://./var/uploads"
+```
+
+默认情况下，`POST /v1/parse/jobs` 的 `file_path` 必须指向已存在的普通文件，且解析后的绝对路径必须位于 `storage.object_store` 指定的本地目录内。推荐通过 `/parse/uploads` 或 `/v1/parse/uploads` 先把文件暂存到 `_api_uploads`，再使用返回的 `parsecore_server_file_path` 创建 job。
+
+桥接上传当前要求 `storage.object_store` 使用 `local://...`。如果配置成非本地对象存储，`/parse/uploads` 与 `/v1/parse/uploads` 会返回 `500 staged_upload_requires_local_object_store`，避免把暂存文件退回到系统临时目录后绕开路径边界。
+
+错误口径：
+
+| 场景 | HTTP | code |
+| --- | ---: | --- |
+| 缺少 `doc_id` | 400 | `missing_doc_id` |
+| 缺少 `file_path` | 400 | `missing_file_path` |
+| 路径不存在或不是普通文件 | 400 | `invalid_file_path` |
+| 路径解析后不在 object store 内 | 403 | `file_path_not_allowed` |
 
 Quota 示例：
 
@@ -423,7 +449,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli worker --config parsecore.queue.toml
 ```
 
-说明：`/v1/parse/jobs` 等异步 job 入口需要 Worker 消费；`/parse` 和 `/v1/parse/batch` 是同步解析入口。
+说明：`/v1/parse/jobs` 等异步 job 入口需要 Worker 消费；`/parse` 和 `/v1/parse/batch` 是同步解析入口。Worker 模式下跨服务传文件建议走 `/v1/parse/uploads`，确保暂存文件落在 `storage.object_store` 下。
 
 ### Postgres + pgvector 灰度
 
@@ -453,6 +479,8 @@ docker compose up -d --build
 Invoke-RestMethod http://127.0.0.1:8090/health
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/ocr_benchmark.py --config parsecore.remote-http.toml.example --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
 ```
+
+`ocr_benchmark` 结果中的 `ocr_decision_trace` 字段可用于核验 OCR 决策口径（attempted / fallback / rejected / failed）以及 `native_text_token_count / final_text_token_count` 变化。
 
 ## 验收命令
 
@@ -505,4 +533,5 @@ Invoke-RestMethod -Headers $headers http://127.0.0.1:8090/v1/runtime
 - Excel 大表场景已设置 `max_rows_per_sheet / max_cols_per_sheet / max_metadata_cells` 或完成性能基线。
 - `tools/self_check.py`、真实样本质量报告、性能基线均通过并留档。
 - 灰度时已准备 `/health`、`/v1/parse/metrics`、`/v1/parse/events`、`/v1/parse/prometheus` 的观测面板。
+- OCR 观测建议至少覆盖 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_failed` 四类事件与对应 Prometheus 计数器。
 - 已准备回滚配置：通常回到 `parsecore.queue.toml` 或关闭 OCR fallback、上传放宽/收紧等低风险开关。

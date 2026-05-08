@@ -75,13 +75,13 @@ def _api_key_unauthorized_response(
 
 
 def _resolve_api_key_from_env(*, env_name: str, setting_name: str) -> str | None:
-    env_name = str(env_name or "").strip()
-    if not env_name:
+    normalized_env_name = str(env_name or "").strip()
+    if not normalized_env_name:
         return None
-    api_key = str(os.environ.get(env_name) or "").strip()
+    api_key = str(os.environ.get(normalized_env_name) or "").strip()
     if not api_key:
         raise ValueError(
-            f"{setting_name} is set to {env_name}, but the environment variable is empty"
+            f"{setting_name} is set to {normalized_env_name}, but the environment variable is empty"
         )
     return api_key
 

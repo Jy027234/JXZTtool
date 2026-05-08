@@ -19,6 +19,16 @@ RUN apt-get update \
 COPY pyproject.toml README.md parsecore.toml parsecore.queue.toml parsecore.remote-http.toml.example parsecore.pgvector.toml.example parsecore.pgvector.fake-embedding.toml.example ./
 COPY src ./src
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir -e ".[api,parsers,storage]"
 
 EXPOSE 8090

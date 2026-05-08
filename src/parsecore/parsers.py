@@ -10,6 +10,7 @@ import zipfile
 
 from .config import OcrProviderSettings
 from .contracts import ParserAdapter
+from .garble import detect_page_garble_reason
 from .models import Block, BlockType, ParseRequest, SemanticRole
 from .ocr import OcrConfigurationError, OcrRequestError, build_ocr_engine
 from .ocr_cache import PageOcrCache, get_default_cache
@@ -80,6 +81,7 @@ _DOCX_HEADER_FOOTER_PATTERN = re.compile(
     r"^\s*(?:页码\s*[:：]\s*)?(?:第\s*\d+\s*页|Page\s+\d+|[A-Z]{2,}\s+\d+(?:\.\d+)*)\s*$",
     re.IGNORECASE,
 )
+_OCR_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
 @dataclass(slots=True)
@@ -2364,7 +2366,11 @@ class _PageLayout:
     layout_elapsed_s: float = 0.0
     ocr_attempt_reason: str | None = None
     ocr_fallback_reason: str | None = None
+    ocr_acceptance_reason: str | None = None
+    ocr_rejection_reason: str | None = None
     ocr_error_reason: str | None = None
+    native_text_token_count: int = 0
+    final_text_token_count: int = 0
     ocr_engine_init_elapsed_s: float = 0.0
     ocr_render_elapsed_s: float = 0.0
     ocr_input_prepare_elapsed_s: float = 0.0
@@ -2405,6 +2411,10 @@ class _OcrLine:
     text: str
     confidence: float
     column_index: int = 0
+
+
+def _estimate_token_count(text: str | None) -> int:
+    return len(_OCR_TOKEN_RE.findall(str(text or "")))
 
 
 def _extract_pdfplumber_layout(
@@ -2465,6 +2475,8 @@ def _extract_pdfplumber_layout(
             layout_reading_order_strategy: str | None = None
             ocr_attempt_reason: str | None = None
             ocr_fallback_reason: str | None = None
+            ocr_acceptance_reason: str | None = None
+            ocr_rejection_reason: str | None = None
             ocr_error_reason: str | None = None
             ocr_timings = _OcrStageTimings()
             try:
@@ -2483,6 +2495,8 @@ def _extract_pdfplumber_layout(
             except Exception:
                 text_without_tables = None
             layout_elapsed_s = round(time.monotonic() - page_started, 6)
+            native_text_token_count = _estimate_token_count(text_without_tables)
+            final_text_token_count = native_text_token_count
 
             if ocr_page_text_fn is not None:
                 # Check page-level OCR cache before running expensive OCR.
@@ -2498,6 +2512,7 @@ def _extract_pdfplumber_layout(
                     text_without_tables = _cache_hit_text
                     ocr_attempt_reason = "cid_dense"
                     ocr_fallback_reason = "cid_dense"
+                    ocr_acceptance_reason = "cache_hit"
                 else:
                     recovered_text, ocr_attempt_reason, ocr_error_reason, ocr_timings = ocr_page_text_fn(
                         page,
@@ -2508,6 +2523,7 @@ def _extract_pdfplumber_layout(
                     if recovered_text:
                         text_without_tables = recovered_text
                         ocr_fallback_reason = ocr_attempt_reason
+                        ocr_acceptance_reason = "fallback_applied"
                         # Persist to cache for future runs.
                         if ocr_cache is not None and ocr_cache.enabled:
                             ocr_cache.put(
@@ -2517,6 +2533,10 @@ def _extract_pdfplumber_layout(
                                 text=recovered_text,
                                 options_repr="",
                             )
+                    elif ocr_attempt_reason is not None:
+                        ocr_rejection_reason = ocr_error_reason or "quality_not_improved"
+
+            final_text_token_count = _estimate_token_count(text_without_tables)
 
             layouts.append(
                 _PageLayout(
@@ -2531,7 +2551,11 @@ def _extract_pdfplumber_layout(
                     layout_elapsed_s=layout_elapsed_s,
                     ocr_attempt_reason=ocr_attempt_reason,
                     ocr_fallback_reason=ocr_fallback_reason,
+                    ocr_acceptance_reason=ocr_acceptance_reason,
+                    ocr_rejection_reason=ocr_rejection_reason,
                     ocr_error_reason=ocr_error_reason,
+                    native_text_token_count=native_text_token_count,
+                    final_text_token_count=final_text_token_count,
                     ocr_engine_init_elapsed_s=ocr_timings.engine_init_elapsed_s,
                     ocr_render_elapsed_s=ocr_timings.render_elapsed_s,
                     ocr_input_prepare_elapsed_s=ocr_timings.input_prepare_elapsed_s,
@@ -2566,8 +2590,18 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
     if page_layout.ocr_fallback_reason is not None:
         metadata["ocr_fallback_used"] = True
         metadata["ocr_fallback_reason"] = page_layout.ocr_fallback_reason
+    _ocr_acceptance_reason = getattr(page_layout, "ocr_acceptance_reason", None)
+    if _ocr_acceptance_reason is not None:
+        metadata["ocr_acceptance_reason"] = _ocr_acceptance_reason
+    _ocr_rejection_reason = getattr(page_layout, "ocr_rejection_reason", None)
+    if _ocr_rejection_reason is not None:
+        metadata["ocr_rejection_reason"] = _ocr_rejection_reason
     if page_layout.ocr_error_reason is not None:
         metadata["ocr_error_reason"] = page_layout.ocr_error_reason
+    if page_layout.ocr_attempt_reason is not None and page_layout.ocr_fallback_reason is None:
+        metadata["ocr_rejected"] = True
+    metadata["native_text_token_count"] = int(getattr(page_layout, "native_text_token_count", 0))
+    metadata["final_text_token_count"] = int(getattr(page_layout, "final_text_token_count", 0))
     if page_layout.ocr_engine_init_elapsed_s > 0.0:
         metadata["ocr_engine_init_elapsed_s"] = page_layout.ocr_engine_init_elapsed_s
     if page_layout.ocr_render_elapsed_s > 0.0:
@@ -2610,28 +2644,17 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
         metadata["ocr_total_elapsed_s"] = page_layout.ocr_total_elapsed_s
 
 
-_CID_TOKEN_PATTERN = re.compile(r"\(cid:\d+\)")
-_PDF_NAME_TOKEN_PATTERN = re.compile(r"/(?:i?\d+)(?=\s|/|$)")
-
-
 def _ocr_fallback_reason_for_page(
     text: str,
     *,
     min_cid_tokens: int,
     min_cid_char_ratio: float,
 ) -> str | None:
-    stripped = text.strip()
-    if not stripped:
-        return "empty_text"
-    matches = list(_CID_TOKEN_PATTERN.finditer(stripped))
-    cid_chars = sum(match.end() - match.start() for match in matches)
-    if len(matches) >= min_cid_tokens and cid_chars / max(len(stripped), 1) >= min_cid_char_ratio:
-        return "cid_dense"
-    pdf_name_matches = list(_PDF_NAME_TOKEN_PATTERN.finditer(stripped))
-    pdf_name_chars = sum(match.end() - match.start() for match in pdf_name_matches)
-    if len(pdf_name_matches) >= min_cid_tokens and pdf_name_chars / max(len(stripped), 1) >= min_cid_char_ratio:
-        return "pdf_name_dense"
-    return None
+    return detect_page_garble_reason(
+        text,
+        min_cid_tokens=min_cid_tokens,
+        min_cid_char_ratio=min_cid_char_ratio,
+    )
 
 
 def _normalize_ocr_provider_timings(provider_elapsed: Any) -> tuple[float, float, float, float]:

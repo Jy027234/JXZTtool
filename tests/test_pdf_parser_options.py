@@ -9,7 +9,7 @@ from unittest.mock import patch
 from parsecore.config import OcrProviderSettings
 from parsecore.models import ParseRequest
 from parsecore.ocr import OcrRequestError
-from parsecore.parsers import ImageOcrParser, PdfTextParser, build_parser
+from parsecore.parsers import ImageOcrParser, PdfTextParser, _ocr_fallback_reason_for_page, build_parser
 
 
 class _FakePdfPage:
@@ -67,6 +67,15 @@ def _fake_page_layout(
 
 
 class PdfTextParserOptionsTests(unittest.TestCase):
+    def test_ocr_fallback_reason_supports_pdf_name_dense_tokens(self) -> None:
+        text = " /0 /1 /2 /3 /i255 /i128 /9 /8 " * 6
+        reason = _ocr_fallback_reason_for_page(
+            text,
+            min_cid_tokens=5,
+            min_cid_char_ratio=0.12,
+        )
+        self.assertEqual(reason, "pdf_name_dense")
+
     def test_defaults_keep_opt_in_features_off(self) -> None:
         parser = PdfTextParser(media_types=["application/pdf"], extensions=[".pdf"])
         self.assertFalse(parser._strip_hf_enabled)

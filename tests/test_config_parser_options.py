@@ -17,8 +17,6 @@ execution_mode = "inline"
 max_workers = 1
 poll_interval_ms = 500
 api_key_env = "PARSECORE_API_KEY"
-staged_upload_api_key_env = "PARSECORE_UPLOAD_BRIDGE_API_KEY"
-staged_upload_retention_seconds = 120
 
 [storage]
 database_url = "sqlite:///./var/x.db"
@@ -90,8 +88,7 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.providers.ocr.timeout_seconds, 9.5)
         self.assertEqual(settings.providers.ocr.max_retries, 4)
         self.assertEqual(settings.runtime.api_key_env, "PARSECORE_API_KEY")
-        self.assertEqual(settings.runtime.staged_upload_api_key_env, "PARSECORE_UPLOAD_BRIDGE_API_KEY")
-        self.assertEqual(settings.runtime.staged_upload_retention_seconds, 120)
+        self.assertFalse(settings.runtime.allow_external_file_paths)
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},

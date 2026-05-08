@@ -21,6 +21,9 @@ services:
   parsecore-api:
     build:
       context: .
+    environment:
+      PARSECORE_API_KEY: ${PARSECORE_API_KEY:-}
+      PARSECORE_UPLOAD_BRIDGE_API_KEY: ${PARSECORE_UPLOAD_BRIDGE_API_KEY:-}
     command:
       [
         "python",

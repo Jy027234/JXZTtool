@@ -6,13 +6,23 @@ httpx<1,>=0.28
 python-multipart<1,>=0.0.20
 
 [parsers]
+openpyxl<4,>=3.1
+pdfplumber<1,>=0.11
 pypdf<6,>=5
 rapidocr_onnxruntime<2,>=1.2
+xlrd<3,>=2
 
 [storage]
 psycopg[binary]<4,>=3.2
 psycopg-pool<4,>=3.2
 pgvector<1,>=0.3
+
+[test]
+pytest<9,>=8
+httpx<1,>=0.28
+numpy<3,>=2.1
+Pillow<12,>=11
+starlette<2,>=1
 
 [worker]
 celery<6,>=5.5

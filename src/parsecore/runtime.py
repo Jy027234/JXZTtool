@@ -275,6 +275,7 @@ class ParseRuntime:
                 "poll_interval_ms": self.settings.runtime.poll_interval_ms,
                 "max_upload_bytes": self.settings.runtime.max_upload_bytes,
                 "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
+                "allow_external_file_paths": self.settings.runtime.allow_external_file_paths,
                 "api_auth_enabled": bool(str(self.settings.runtime.api_key_env).strip()),
             },
             "translation": {

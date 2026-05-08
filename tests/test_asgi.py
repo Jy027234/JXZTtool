@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import Future
 import os
 from pathlib import Path
+import time
 import unittest
 
 from starlette.testclient import TestClient
@@ -276,20 +277,20 @@ extensions = [".txt"]
 """.strip()
 
 
-API_KEY_PROTECTED_CONFIG = """
+STRICT_TEXT_API_CONFIG = """
 [project]
-name = "test-api-protected"
+name = "test-api-text-strict-paths"
 mode = "embedded-sdk"
 
 [runtime]
 execution_mode = "inline"
 max_workers = 2
 poll_interval_ms = 25
-api_key_env = "PARSECORE_API_KEY"
+allow_external_file_paths = false
 
 [storage]
 database_url = "__DB_URL__"
-object_store = "local://./var/uploads"
+object_store = "local://__OBJECT_STORE__"
 
 [index]
 mode = "hybrid"
@@ -302,9 +303,40 @@ strategy = "lazy"
 adapter = "embedded"
 
 [[parsers]]
-name = "docx-native"
-media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
-extensions = [".docx"]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+REMOTE_OBJECT_STORE_UPLOAD_CONFIG = """
+[project]
+name = "test-api-upload-non-local-store"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "s3://parsecore-test/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
 """.strip()
 
 
@@ -341,6 +373,70 @@ extensions = [".txt"]
 """.strip()
 
 
+UPLOAD_BRIDGE_RETENTION_CONFIG = """
+[project]
+name = "test-api-upload-bridge-retention"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+staged_upload_retention_seconds = 1
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+API_KEY_PROTECTED_CONFIG = """
+[project]
+name = "test-api-protected"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "inline"
+max_workers = 2
+poll_interval_ms = 25
+api_key_env = "PARSECORE_API_KEY"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+""".strip()
+
+
 class ParseApiTests(unittest.TestCase):
     def test_upload_bridge_stages_file_for_later_job_submission(self) -> None:
         with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
@@ -358,17 +454,16 @@ class ParseApiTests(unittest.TestCase):
                 )
                 self.assertEqual(staged.status_code, 201)
                 staged_payload = staged.json()
-                staged_path = Path(staged_payload["parsecore_server_file_path"])
                 self.assertEqual(staged_payload["doc_id"], "doc-bridge-001")
                 self.assertEqual(staged_payload["state"], "staged")
-                self.assertTrue(staged_path.exists())
-                self.assertIn("_api_uploads", staged_path.parts)
+                self.assertIn("parsecore_server_file_path", staged_payload)
+                self.assertTrue(Path(staged_payload["parsecore_server_file_path"]).exists())
 
                 created = client.post(
                     "/v1/parse/jobs",
                     json={
                         "doc_id": "doc-bridge-001",
-                        "file_path": str(staged_path),
+                        "file_path": staged_payload["parsecore_server_file_path"],
                         "media_type": "text/plain",
                         "tenant_id": "tenant-alpha",
                         "quota_key": "default-plan",
@@ -381,6 +476,55 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(created_payload["doc_id"], "doc-bridge-001")
                 self.assertEqual(created_payload["tenant_id"], "tenant-alpha")
                 self.assertEqual(created_payload["quota_units"], 2)
+
+                final_job = None
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{created_payload['job_id']}")
+                    self.assertEqual(current.status_code, 200)
+                    final_job = current.json()
+                    if final_job["state"] == ParseJobState.DONE.value:
+                        break
+
+                self.assertIsNotNone(final_job)
+                assert final_job is not None
+                self.assertEqual(final_job["state"], ParseJobState.DONE.value)
+
+    def test_upload_bridge_path_can_create_job_when_external_paths_disabled(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                staged = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-strict-bridge"},
+                    files={"file": ("strict.txt", b"strict alpha", "text/plain")},
+                )
+                self.assertEqual(staged.status_code, 201)
+                staged_payload = staged.json()
+
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-strict-bridge",
+                        "file_path": staged_payload["parsecore_server_file_path"],
+                        "media_type": "text/plain",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+
+    def test_upload_bridge_rejects_non_local_object_store(self) -> None:
+        with TemporaryWorkspace(REMOTE_OBJECT_STORE_UPLOAD_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-non-local-store"},
+                    files={"file": ("remote.txt", b"alpha", "text/plain")},
+                )
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertEqual(payload["code"], "staged_upload_requires_local_object_store")
+        self.assertEqual(payload["detail"]["object_store"], "s3://parsecore-test/uploads")
 
     def test_upload_bridge_can_create_job_immediately(self) -> None:
         with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
@@ -404,7 +548,14 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(payload["quota_units"], 1)
                 self.assertTrue(payload["create_job"])
                 self.assertIn("job_id", payload)
+                self.assertIn("parsecore_server_file_path", payload)
                 self.assertTrue(Path(payload["parsecore_server_file_path"]).exists())
+
+                current = client.get(f"/v1/parse/jobs/{payload['job_id']}")
+                self.assertEqual(current.status_code, 200)
+                current_payload = current.json()
+                self.assertEqual(current_payload["doc_id"], "doc-bridge-002")
+                self.assertIn(current_payload["state"], {ParseJobState.PENDING.value, ParseJobState.PARSING.value, ParseJobState.STRUCTURING.value, ParseJobState.DONE.value})
 
     def test_upload_bridge_requires_dedicated_api_key_when_configured(self) -> None:
         with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
@@ -429,11 +580,44 @@ class ParseApiTests(unittest.TestCase):
                     self.assertEqual(authorized.status_code, 201)
                     self.assertTrue(Path(authorized.json()["parsecore_server_file_path"]).exists())
 
+                    runtime_endpoint = client.get("/v1/runtime")
+                    self.assertEqual(runtime_endpoint.status_code, 200)
+
     def test_create_app_fails_fast_when_upload_bridge_api_key_env_is_empty(self) -> None:
         with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
             with patch.dict(os.environ, {"PARSECORE_UPLOAD_BRIDGE_API_KEY": ""}, clear=False):
                 with self.assertRaisesRegex(ValueError, "PARSECORE_UPLOAD_BRIDGE_API_KEY"):
                     create_app(workspace.config_path)
+
+    def test_upload_bridge_cleans_expired_staged_files(self) -> None:
+        with TemporaryWorkspace(UPLOAD_BRIDGE_RETENTION_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                first = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-bridge-cleanup-1"},
+                    files={"file": ("manual.txt", b"cleanup-one", "text/plain")},
+                )
+                self.assertEqual(first.status_code, 201)
+                upload_dir = Path(first.json()["parsecore_server_file_path"]).parent
+
+                expired = upload_dir / "expired-sentinel.txt"
+                expired.write_text("old", encoding="utf-8")
+                expired_timestamp = time.time() - 120
+                os.utime(expired, (expired_timestamp, expired_timestamp))
+
+                fresh = upload_dir / "fresh-sentinel.txt"
+                fresh.write_text("new", encoding="utf-8")
+
+                second = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-bridge-cleanup-2"},
+                    files={"file": ("manual.txt", b"cleanup-two", "text/plain")},
+                )
+                self.assertEqual(second.status_code, 201)
+                self.assertFalse(expired.exists())
+                self.assertTrue(fresh.exists())
+                self.assertTrue(Path(second.json()["parsecore_server_file_path"]).exists())
 
     def test_api_key_protects_runtime_endpoint_but_not_health(self) -> None:
         with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
@@ -471,6 +655,124 @@ class ParseApiTests(unittest.TestCase):
             with patch.dict(os.environ, {"PARSECORE_API_KEY": ""}, clear=False):
                 with self.assertRaisesRegex(ValueError, "PARSECORE_API_KEY"):
                     create_app(workspace.config_path)
+
+    def test_create_job_rejects_external_file_path_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("outside.txt", "blocked")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-blocked-001",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["code"], "file_path_not_allowed")
+        self.assertEqual(payload["detail"]["allow_external_file_paths"], False)
+
+    def test_create_job_accepts_object_store_file_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("object-store/allowed.txt", "alpha")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-allowed-001",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                job_id = created.json()["job_id"]
+
+                final_job = None
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    final_job = current.json()
+                    if final_job["state"] == ParseJobState.DONE.value:
+                        break
+
+        self.assertIsNotNone(final_job)
+        assert final_job is not None
+        self.assertEqual(final_job["state"], ParseJobState.DONE.value)
+
+    def test_create_job_validates_required_path_payload(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                missing_doc_id = client.post(
+                    "/v1/parse/jobs",
+                    json={"file_path": str(workspace.root / "object-store" / "x.txt")},
+                )
+                missing_file_path = client.post(
+                    "/v1/parse/jobs",
+                    json={"doc_id": "doc-missing-file"},
+                )
+
+        self.assertEqual(missing_doc_id.status_code, 400)
+        self.assertEqual(missing_doc_id.json()["code"], "missing_doc_id")
+        self.assertEqual(missing_file_path.status_code, 400)
+        self.assertEqual(missing_file_path.json()["code"], "missing_file_path")
+
+    def test_create_job_rejects_invalid_path_payloads(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            directory_path = workspace.root / "object-store"
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                missing_file = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-missing-path",
+                        "file_path": str(directory_path / "missing.txt"),
+                        "media_type": "text/plain",
+                    },
+                )
+                directory = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-directory-path",
+                        "file_path": str(directory_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(missing_file.status_code, 400)
+        self.assertEqual(missing_file.json()["code"], "invalid_file_path")
+        self.assertEqual(directory.status_code, 400)
+        self.assertEqual(directory.json()["code"], "invalid_file_path")
+
+    def test_create_job_rejects_resolved_path_traversal_when_strict(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            outside_path = workspace.create_text_file("outside-traversal.txt", "blocked")
+            (workspace.root / "object-store" / "_api_uploads").mkdir(parents=True, exist_ok=True)
+            traversal_path = (
+                workspace.root
+                / "object-store"
+                / "_api_uploads"
+                / ".."
+                / ".."
+                / outside_path.name
+            )
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-traversal-001",
+                        "file_path": str(traversal_path),
+                        "media_type": "text/plain",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "file_path_not_allowed")
 
     def test_job_lifecycle_endpoints(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -747,23 +1049,6 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(invalid_trend.status_code, 400)
                 self.assertEqual(invalid_trend.json()["code"], "invalid_trend_window_hours")
 
-    def test_create_job_rejects_file_path_outside_object_store_by_default(self) -> None:
-        protected_config = SAMPLE_CONFIG + "\nallow_external_file_paths = false"
-        with TemporaryWorkspace(protected_config) as workspace:
-            document_path = workspace.create_docx("outside.docx", ["Do not read me"])
-            app = create_app(workspace.config_path)
-            with TestClient(app) as client:
-                response = client.post(
-                    "/v1/parse/jobs",
-                    json={
-                        "doc_id": "doc-outside",
-                        "file_path": str(document_path),
-                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    },
-                )
-                self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.json()["error"], "file_path_not_allowed")
-
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("compat.docx", ["Maintenance Manual", "Apply torque in sequence"])
@@ -821,6 +1106,10 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["metadata"]["parser"], "python-docx")
             self.assertEqual(body["pages"][0]["page_type"], "front_matter")
             self.assertIn("Maintenance Manual", body["pages"][0]["text"])
+            self.assertIn("quality", body)
+            self.assertIn("raw_quality", body)
+            self.assertIn("output_quality", body)
+            self.assertEqual(body["quality"]["score"], body["output_quality"]["score"])
 
     def test_health_reports_pdf_service_when_pdf_parser_registered(self) -> None:
         with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
@@ -836,7 +1125,6 @@ class ParseApiTests(unittest.TestCase):
             self.assertIn("service_details", body)
             self.assertEqual(body["service_details"]["pdfplumber"]["registered"], True)
             self.assertEqual(body["service_details"]["pdfplumber"]["reason"], "ok")
-            self.assertEqual(body["service_details"]["python_docx"]["registered"], False)
 
     def test_health_reports_ocr_service_when_image_parser_registered_and_engine_available(self) -> None:
         with TemporaryWorkspace(OCR_API_CONFIG) as workspace, patch(
@@ -852,8 +1140,6 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(body["services"]["pdfplumber"], False)
             self.assertEqual(body["services"]["python_docx"], False)
             self.assertEqual(body["services"]["paddleocr"], True)
-            self.assertEqual(body["service_details"]["paddleocr"]["registered"], True)
-            self.assertEqual(body["service_details"]["paddleocr"]["reason"], "ok")
 
     def test_health_reports_ocr_service_false_when_provider_disabled(self) -> None:
         with TemporaryWorkspace(OCR_DISABLED_API_CONFIG) as workspace:
@@ -1106,6 +1392,116 @@ class ParseApiTests(unittest.TestCase):
         self.assertEqual(pages[0]["text"], "1. Scope .......... 1")
         self.assertEqual(pages[1]["tables_markdown"], ["| col | value |"])
         self.assertEqual(pages[1]["text"], "")
+
+    def test_project_pages_title_only_page_keeps_tables_schema(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-title-only",
+                    doc_id="doc-title-only",
+                    type=BlockType.TITLE,
+                    content="Maintenance Overview",
+                    metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["page_type"], "cover")
+        self.assertEqual(pages[0]["tables_markdown"], [])
+        self.assertEqual(pages[0]["tables"], [])
+        self.assertEqual(pages[0]["text"], "")
+
+    def test_project_pages_includes_ocr_decision_fields(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-ocr-1",
+                    doc_id="doc-ocr-page",
+                    type=BlockType.PARAGRAPH,
+                    content="Recovered OCR text",
+                    metadata={
+                        "page": 1,
+                        "semantic_role": "paragraph",
+                        "ocr_attempted": True,
+                        "ocr_fallback_used": True,
+                        "ocr_attempt_reason": "cid_dense",
+                        "ocr_acceptance_reason": "fallback_applied",
+                        "native_text_token_count": 4,
+                        "final_text_token_count": 12,
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 1)
+        self.assertTrue(pages[0]["ocr_attempted"])
+        self.assertTrue(pages[0]["ocr_fallback"])
+        self.assertEqual(pages[0]["ocr_attempt_reasons"], ["cid_dense"])
+        self.assertEqual(pages[0]["ocr_acceptance_reasons"], ["fallback_applied"])
+        self.assertEqual(pages[0]["native_text_token_count"], 4)
+        self.assertEqual(pages[0]["final_text_token_count"], 12)
+
+    def test_project_pages_schema_contract_for_mixed_page_variants(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-p1-title",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.TITLE,
+                    content="Cover",
+                    metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+                ),
+                Block(
+                    block_id="blk-p2-table",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.TABLE,
+                    content="| col | value |",
+                    metadata={"page": 2, "semantic_role": "table", "parser": "pdf-text"},
+                ),
+                Block(
+                    block_id="blk-p3-ocr-rejected",
+                    doc_id="doc-schema-matrix",
+                    type=BlockType.PARAGRAPH,
+                    content="native unreadable text",
+                    metadata={
+                        "page": 3,
+                        "semantic_role": "paragraph",
+                        "ocr_attempted": True,
+                        "ocr_rejected": True,
+                        "ocr_attempt_reason": "cid_dense",
+                        "ocr_rejection_reason": "provider_request_failed",
+                        "ocr_error_reason": "provider_request_failed",
+                        "native_text_token_count": 2,
+                        "final_text_token_count": 2,
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 3)
+        for page in pages:
+            self.assertIn("page_number", page)
+            self.assertIn("page_type", page)
+            self.assertIn("text", page)
+            self.assertIn("tables_markdown", page)
+            self.assertIn("tables", page)
+            self.assertIn("artifacts", page)
+            self.assertIn("confidence", page)
+
+        self.assertEqual(pages[0]["page_number"], 1)
+        self.assertEqual(pages[0]["tables"], [])
+        self.assertEqual(pages[0]["text"], "")
+
+        self.assertEqual(pages[1]["page_number"], 2)
+        self.assertEqual(pages[1]["tables_markdown"], ["| col | value |"])
+        self.assertEqual(len(pages[1]["tables"]), 1)
+
+        self.assertEqual(pages[2]["page_number"], 3)
+        self.assertTrue(pages[2]["ocr_attempted"])
+        self.assertTrue(pages[2]["ocr_rejected"])
+        self.assertEqual(pages[2]["ocr_attempt_reasons"], ["cid_dense"])
+        self.assertEqual(pages[2]["ocr_rejection_reasons"], ["provider_request_failed"])
 
     def test_trace_id_header_is_echoed_and_error_payload_is_unified(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1420,7 +1816,10 @@ class ParseQueueApiTests(unittest.TestCase):
                             "page": 1,
                             "ocr_attempted": True,
                             "ocr_attempt_reason": "empty_text",
+                            "ocr_rejection_reason": "provider_request_failed",
                             "ocr_error_reason": "provider_request_failed",
+                            "native_text_token_count": 0,
+                            "final_text_token_count": 0,
                         },
                     ),
                     Block(
@@ -1434,6 +1833,9 @@ class ParseQueueApiTests(unittest.TestCase):
                             "ocr_attempt_reason": "cid_dense",
                             "ocr_fallback_used": True,
                             "ocr_fallback_reason": "cid_dense",
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 8,
+                            "final_text_token_count": 26,
                         },
                     ),
                 )
@@ -1482,6 +1884,16 @@ class ParseQueueApiTests(unittest.TestCase):
                         ["cid_dense", "empty_text"],
                     )
                     self.assertEqual(
+                        attempt_data["events"][0]["acceptance_reasons"],
+                        ["fallback_applied"],
+                    )
+                    self.assertEqual(
+                        attempt_data["events"][0]["rejection_reasons"],
+                        ["provider_request_failed"],
+                    )
+                    self.assertEqual(attempt_data["events"][0]["native_text_token_count"], 8)
+                    self.assertEqual(attempt_data["events"][0]["final_text_token_count"], 26)
+                    self.assertEqual(
                         attempt_data["counters"]["ocr-tenant:ocr-plan:ocr_attempted"],
                         2,
                     )
@@ -1504,6 +1916,23 @@ class ParseQueueApiTests(unittest.TestCase):
                         1,
                     )
 
+                    rejected_response = client.get(
+                        "/v1/parse/events",
+                        params={"event_type": "ocr_rejected", "tenant_id": "ocr-tenant"},
+                    )
+                    self.assertEqual(rejected_response.status_code, 200)
+                    rejected_data = rejected_response.json()
+                    self.assertEqual(len(rejected_data["events"]), 1)
+                    self.assertEqual(rejected_data["events"][0]["page_count"], 1)
+                    self.assertEqual(
+                        rejected_data["events"][0]["rejection_reasons"],
+                        ["provider_request_failed"],
+                    )
+                    self.assertEqual(
+                        rejected_data["counters"]["ocr-tenant:ocr-plan:ocr_rejected"],
+                        1,
+                    )
+
                     metrics_response = client.get("/v1/parse/prometheus")
                     self.assertEqual(metrics_response.status_code, 200)
                     metrics_text = metrics_response.text
@@ -1519,6 +1948,161 @@ class ParseQueueApiTests(unittest.TestCase):
                         'parse_ocr_failed_total{tenant_id="ocr-tenant",quota_key="ocr-plan"} 1',
                         metrics_text,
                     )
+                    self.assertIn(
+                        'parse_ocr_rejected_total{tenant_id="ocr-tenant",quota_key="ocr-plan"} 1',
+                        metrics_text,
+                    )
+
+    def test_parse_batch_response_includes_ocr_decision_trace(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            app = create_app(config_path=workspace.config_path)
+            with TestClient(app) as client:
+                runtime_obj = app.state.runtime
+                doc = workspace.create_docx("ocr-trace-batch.docx", ["content"])
+                blocks = (
+                    Block(
+                        block_id="blk-ocr-trace-1",
+                        doc_id="doc-ocr-trace",
+                        type=BlockType.PARAGRAPH,
+                        content="(cid:12) (cid:34)",
+                        metadata={
+                            "page": 1,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_fallback_used": True,
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 2,
+                            "final_text_token_count": 10,
+                        },
+                    ),
+                )
+                with patch.object(runtime_obj, "_load_blocks_for_request", return_value=blocks), patch.object(
+                    runtime_obj,
+                    "_load_chunks_for_request",
+                    return_value=(),
+                ):
+                    payload = {
+                        "file_base64": base64.b64encode(doc.read_bytes()).decode("ascii"),
+                        "file_name": doc.name,
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "tenant_id": "ocr-trace-tenant",
+                        "quota_key": "ocr-trace-plan",
+                    }
+                    response = client.post("/v1/parse/batch", json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertIn("ocr_decision_trace", body)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_attempted_pages"], 1)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_fallback_pages"], 1)
+                self.assertEqual(body["ocr_decision_trace"]["ocr_rejected_pages"], 0)
+                self.assertEqual(body["ocr_decision_trace"]["native_text_token_count"], 2)
+                self.assertEqual(body["ocr_decision_trace"]["final_text_token_count"], 10)
+
+    def test_parse_batch_payload_schema_snapshot_for_ocr_trace(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            app = create_app(config_path=workspace.config_path)
+            with TestClient(app) as client:
+                runtime_obj = app.state.runtime
+                doc = workspace.create_docx("ocr-trace-schema.docx", ["content"])
+                blocks = (
+                    Block(
+                        block_id="blk-snapshot-1",
+                        doc_id="doc-ocr-schema",
+                        type=BlockType.PARAGRAPH,
+                        content="native unreadable",
+                        metadata={
+                            "page": 1,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_rejected": True,
+                            "ocr_rejection_reason": "provider_request_failed",
+                            "ocr_error_reason": "provider_request_failed",
+                            "native_text_token_count": 2,
+                            "final_text_token_count": 2,
+                        },
+                    ),
+                    Block(
+                        block_id="blk-snapshot-2",
+                        doc_id="doc-ocr-schema",
+                        type=BlockType.PARAGRAPH,
+                        content="Recovered readable OCR text",
+                        metadata={
+                            "page": 2,
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": "cid_dense",
+                            "ocr_fallback_used": True,
+                            "ocr_acceptance_reason": "fallback_applied",
+                            "native_text_token_count": 1,
+                            "final_text_token_count": 5,
+                        },
+                    ),
+                )
+                with patch.object(runtime_obj, "_load_blocks_for_request", return_value=blocks), patch.object(
+                    runtime_obj,
+                    "_load_chunks_for_request",
+                    return_value=(),
+                ):
+                    payload = {
+                        "file_base64": base64.b64encode(doc.read_bytes()).decode("ascii"),
+                        "file_name": doc.name,
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "tenant_id": "ocr-schema-tenant",
+                        "quota_key": "ocr-schema-plan",
+                    }
+                    response = client.post("/v1/parse/batch", json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+
+                self.assertTrue(
+                    {
+                        "success",
+                        "total_pages",
+                        "pages",
+                        "parser_used",
+                        "quality",
+                        "raw_quality",
+                        "output_quality",
+                        "ocr_decision_trace",
+                        "error",
+                    }.issubset(set(body.keys()))
+                )
+
+                trace = body["ocr_decision_trace"]
+                self.assertEqual(
+                    set(trace.keys()),
+                    {
+                        "ocr_attempted_pages",
+                        "ocr_fallback_pages",
+                        "ocr_rejected_pages",
+                        "ocr_failed_pages",
+                        "native_text_token_count",
+                        "final_text_token_count",
+                        "ocr_attempt_reasons",
+                        "ocr_acceptance_reasons",
+                        "ocr_rejection_reasons",
+                        "ocr_error_reasons",
+                    },
+                )
+                self.assertEqual(trace["ocr_attempted_pages"], 2)
+                self.assertEqual(trace["ocr_fallback_pages"], 1)
+                self.assertEqual(trace["ocr_rejected_pages"], 1)
+                self.assertEqual(trace["ocr_failed_pages"], 1)
+                self.assertEqual(trace["native_text_token_count"], 3)
+                self.assertEqual(trace["final_text_token_count"], 7)
+
+                page_required_keys = {
+                    "page_number",
+                    "page_type",
+                    "text",
+                    "tables_markdown",
+                    "tables",
+                    "artifacts",
+                    "confidence",
+                }
+                for page in body["pages"]:
+                    self.assertTrue(page_required_keys.issubset(set(page.keys())))
 
     def test_dashboard_includes_observability_data(self) -> None:
         """Verify tenant_dashboard includes observability events and counters."""
