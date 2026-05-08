@@ -113,8 +113,10 @@ class TemporaryWorkspace:
         self.root = Path(self._tempdir.name)
         database_path = self.root / "parsecore.db"
         database_url = f"sqlite:///{database_path.as_posix()}"
+        upload_root = self.root / "var" / "uploads"
         self.config_path = self.root / "parsecore.toml"
         config = self.config_template.replace("__DB_URL__", database_url)
+        config = config.replace("local://./var/uploads", f"local://{upload_root.as_posix()}")
         if "allow_external_file_paths" not in config and "poll_interval_ms" in config:
             config = config.replace(
                 "poll_interval_ms = ",

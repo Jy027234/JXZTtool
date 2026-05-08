@@ -33,9 +33,9 @@ _LONG_BLOCK_LEN = 2000
 _CID_TOTAL_WARN_TOKENS = 50        # ≥50 cid tokens doc-wide → warn
 _CID_TOTAL_GATE_TOKENS = 200       # ≥200 cid tokens doc-wide → flag cid_garble
 _CID_PAGE_RATIO_GATE = 0.12        # page-level char ratio already used by parser
-_PDF_NAME_TOTAL_WARN_TOKENS = 50
-_PDF_NAME_TOTAL_GATE_TOKENS = 200
-_PDF_NAME_CHAR_RATIO_GATE = 0.12
+_PDF_NAME_TOTAL_WARN_TOKENS = 40
+_PDF_NAME_TOTAL_GATE_TOKENS = 120
+_PDF_NAME_CHAR_RATIO_GATE = 0.08
 
 _CID_TOKEN_RE = re.compile(r"\(cid:\d+\)")
 _PDF_NAME_TOKEN_RE = re.compile(r"/(?:i?\d+)(?=\s|/|$)")
@@ -462,6 +462,7 @@ __all__ = [
     "evaluate_chunk_embeddings",
     "evaluate_layout_signals",
     "evaluate_parse_quality",
+    "evaluate_projected_parse_quality",
     "reconcile_quality_with_projected_pages",
     "diff_reports",
 ]
@@ -476,6 +477,7 @@ class ParseQualitySummary:
     ``warnings`` – human-readable list, safe to return to API consumers.
     ``recommended_action`` – optional hint such as ``retry_with_ocr``.
     ``total_cid_tokens`` – raw count of ``(cid:N)`` tokens across all blocks.
+    ``total_pdf_name_tokens`` – raw count of PDF name-map tokens such as ``/12``.
     """
 
     score: float
@@ -483,6 +485,7 @@ class ParseQualitySummary:
     warnings: tuple[str, ...]
     recommended_action: str | None
     total_cid_tokens: int
+    total_pdf_name_tokens: int
     ocr_failed_pages: int
     suspect_signature_pages: int
 
@@ -624,9 +627,38 @@ def evaluate_parse_quality(blocks: Iterable[Block]) -> ParseQualitySummary:
         warnings=tuple(warnings),
         recommended_action=recommended_action,
         total_cid_tokens=total_cid_tokens,
+        total_pdf_name_tokens=total_pdf_name_tokens,
         ocr_failed_pages=len(ocr_failed_pages),
         suspect_signature_pages=suspect_signature_pages,
     )
+
+
+def evaluate_projected_parse_quality(pages: Sequence[dict[str, object]]) -> ParseQualitySummary:
+    """Derive quality from the final projected ``pages[].text`` payload."""
+
+    if not pages:
+        return ParseQualitySummary(
+            score=0.5,
+            flags=frozenset({"empty_output"}),
+            warnings=("Parser produced no content blocks.",),
+            recommended_action=None,
+            total_cid_tokens=0,
+            total_pdf_name_tokens=0,
+            ocr_failed_pages=0,
+            suspect_signature_pages=0,
+        )
+
+    baseline = ParseQualitySummary(
+        score=1.0,
+        flags=frozenset(),
+        warnings=(),
+        recommended_action=None,
+        total_cid_tokens=0,
+        total_pdf_name_tokens=0,
+        ocr_failed_pages=0,
+        suspect_signature_pages=0,
+    )
+    return reconcile_quality_with_projected_pages(baseline, pages)
 
 
 def reconcile_quality_with_projected_pages(
@@ -714,6 +746,7 @@ def reconcile_quality_with_projected_pages(
         warnings=tuple(warnings),
         recommended_action=recommended_action,
         total_cid_tokens=cid_tokens,
+        total_pdf_name_tokens=pdf_name_tokens,
         ocr_failed_pages=summary.ocr_failed_pages,
         suspect_signature_pages=summary.suspect_signature_pages,
     )

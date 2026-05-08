@@ -25,6 +25,7 @@ class RuntimeSettings:
     poll_interval_ms: int
     max_upload_bytes: int = 0
     max_inflight_jobs: int = 0
+    staged_upload_retention_seconds: int = 86400
     quota_enforce: bool = False
     quota_window_hours: float = 24.0
     quota_default_limit_units: int = 0
@@ -32,6 +33,7 @@ class RuntimeSettings:
     max_attempts: int = 3
     log_path: str = "var/logs/job_events.jsonl"
     api_key_env: str = ""
+    staged_upload_api_key_env: str = ""
     allow_external_file_paths: bool = False
 
 
@@ -209,6 +211,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             poll_interval_ms=int(runtime.get("poll_interval_ms", 1000)),
             max_upload_bytes=int(runtime.get("max_upload_bytes", 0)),
             max_inflight_jobs=int(runtime.get("max_inflight_jobs", 0)),
+            staged_upload_retention_seconds=int(runtime.get("staged_upload_retention_seconds", 86400)),
             quota_enforce=bool(runtime.get("quota_enforce", False)),
             quota_window_hours=float(runtime.get("quota_window_hours", 24.0)),
             quota_default_limit_units=int(runtime.get("quota_default_limit_units", 0)),
@@ -216,6 +219,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             max_attempts=int(runtime.get("max_attempts", 3)),
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
             api_key_env=str(runtime.get("api_key_env", "")),
+            staged_upload_api_key_env=str(runtime.get("staged_upload_api_key_env", "")),
             allow_external_file_paths=bool(runtime.get("allow_external_file_paths", False)),
         ),
         parsers=parser_settings,

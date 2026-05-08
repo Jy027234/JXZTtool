@@ -104,6 +104,7 @@ class TestEventAggregator(unittest.TestCase):
         agg.record_event("ocr_attempted", tenant_id="tenant-a", quota_key="default", count=3)
         agg.record_event("ocr_fallback", tenant_id="tenant-a", quota_key="default", count=2)
         agg.record_event("ocr_failed", tenant_id="tenant-b", quota_key="premium", count=1)
+        agg.record_event("ocr_rejected", tenant_id="tenant-b", quota_key="premium", count=4)
         
         prometheus = agg.get_prometheus_metrics()
         
@@ -116,6 +117,7 @@ class TestEventAggregator(unittest.TestCase):
         self.assertIn("# HELP parse_ocr_attempt_total", prometheus)
         self.assertIn("# HELP parse_ocr_fallback_total", prometheus)
         self.assertIn("# HELP parse_ocr_failed_total", prometheus)
+        self.assertIn("# HELP parse_ocr_rejected_total", prometheus)
         self.assertIn("parse_ringbuffer_size", prometheus)  # gauge type
         
         # Verify it contains metric lines with correct labels and values
@@ -126,7 +128,8 @@ class TestEventAggregator(unittest.TestCase):
         self.assertIn('parse_ocr_attempt_total{tenant_id="tenant-a",quota_key="default"} 3', prometheus)
         self.assertIn('parse_ocr_fallback_total{tenant_id="tenant-a",quota_key="default"} 2', prometheus)
         self.assertIn('parse_ocr_failed_total{tenant_id="tenant-b",quota_key="premium"} 1', prometheus)
-        self.assertIn("parse_ringbuffer_size 8", prometheus)
+        self.assertIn('parse_ocr_rejected_total{tenant_id="tenant-b",quota_key="premium"} 4', prometheus)
+        self.assertIn("parse_ringbuffer_size 9", prometheus)
 
     def test_event_aggregator_with_wildcard_dimensions(self) -> None:
         """Verify EventAggregator handles default wildcard dimensions."""

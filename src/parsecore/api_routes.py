@@ -6,7 +6,9 @@ import mimetypes
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+import time
 from typing import Any
+from uuid import uuid4
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -16,8 +18,10 @@ from .api_payloads import _batch_success_response, _parse_success_response, _to_
 from .api_responses import batch_error_response as _batch_error_response
 from .api_responses import error_response as _error_response
 from .api_support import (
+    _api_key_unauthorized_response,
     _estimated_base64_decoded_size,
     _exceeds_upload_limit,
+    _extract_api_key,
     _file_too_large_detail,
     _max_upload_bytes,
     _trace_id_for_request,
@@ -32,17 +36,21 @@ class ApiRoutes:
         *,
         api_version: str,
         health_services: Callable[[ParseRuntime], dict[str, bool]],
+        health_service_details: Callable[[ParseRuntime], dict[str, dict[str, Any]]] | None = None,
     ) -> None:
         self.api_version = api_version
         self.health_services = health_services
+        self.health_service_details = health_service_details
 
     def routes(self) -> list[Route]:
         return [
             Route("/health", self.health, methods=["GET"]),
             Route("/parse", self.parse_upload, methods=["POST"]),
+            Route("/parse/uploads", self.stage_upload, methods=["POST"]),
             Route("/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse", self.parse_upload, methods=["POST"]),
             Route("/v1/runtime", self.describe, methods=["GET"]),
+            Route("/v1/parse/uploads", self.stage_upload, methods=["POST"]),
             Route("/v1/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse/jobs", self.create_job, methods=["POST"]),
             Route("/v1/parse/jobs", self.list_jobs, methods=["GET"]),
@@ -88,13 +96,14 @@ class ApiRoutes:
 
     async def health(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        return JSONResponse(
-            {
-                "status": "ok",
-                "version": self.api_version,
-                "services": self.health_services(runtime_obj),
-            }
-        )
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "version": self.api_version,
+            "services": self.health_services(runtime_obj),
+        }
+        if self.health_service_details is not None:
+            payload["service_details"] = self.health_service_details(runtime_obj)
+        return JSONResponse(payload)
 
     async def describe(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
@@ -250,15 +259,19 @@ class ApiRoutes:
         media_type = payload.get("media_type")
         options = dict(payload.get("options") or {})
         options["enable_ocr"] = enable_ocr
-        tmp_path: str | None = None
+        submission_path: str | None = None
+        delete_after_submit = False
         try:
-            with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-                handle.write(file_bytes)
-                tmp_path = handle.name
+            submission_path, delete_after_submit = _persist_upload_file(
+                runtime_obj,
+                content=file_bytes,
+                file_name=file_name,
+                doc_id=str(payload.get("doc_id") or Path(file_name).stem or "batch-doc"),
+            )
             outcome = runtime_obj.submit(
                 ParseRequest(
                     doc_id=str(payload.get("doc_id") or Path(file_name).stem or "batch-doc"),
-                    file_path=tmp_path,
+                    file_path=submission_path,
                     media_type=str(media_type) if media_type is not None else None,
                     options=options,
                     tenant_id=tenant_id,
@@ -293,9 +306,9 @@ class ApiRoutes:
                 status_code=400 if isinstance(exc, RuntimeError) else 500,
             )
         finally:
-            if tmp_path is not None:
+            if delete_after_submit and submission_path is not None:
                 try:
-                    os.unlink(tmp_path)
+                    os.unlink(submission_path)
                 except FileNotFoundError:
                     pass
 
@@ -363,15 +376,19 @@ class ApiRoutes:
             quota_key = str(form.get("quota_key") or "default")
             doc_id = str(form.get("doc_id") or Path(file_name).stem or "upload-doc")
             options = {"enable_ocr": enable_ocr}
-            tmp_path: str | None = None
+            submission_path: str | None = None
+            delete_after_submit = False
             try:
-                with NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix or ".bin") as handle:
-                    handle.write(content)
-                    tmp_path = handle.name
+                submission_path, delete_after_submit = _persist_upload_file(
+                    runtime_obj,
+                    content=content,
+                    file_name=file_name,
+                    doc_id=doc_id,
+                )
                 outcome = runtime_obj.submit(
                     ParseRequest(
                         doc_id=doc_id,
-                        file_path=tmp_path,
+                        file_path=submission_path,
                         media_type=media_type,
                         options=options,
                         tenant_id=tenant_id,
@@ -390,9 +407,9 @@ class ApiRoutes:
                     status_code=400 if isinstance(exc, RuntimeError) else 500,
                 )
             finally:
-                if tmp_path is not None:
+                if delete_after_submit and submission_path is not None:
                     try:
-                        os.unlink(tmp_path)
+                        os.unlink(submission_path)
                     except FileNotFoundError:
                         pass
         finally:
@@ -408,6 +425,151 @@ class ApiRoutes:
                 enable_ocr=enable_ocr,
             )
         )
+
+    async def stage_upload(self, request: Request) -> JSONResponse:
+        bridge_api_key = getattr(request.app.state, "upload_bridge_api_key", None)
+        if bridge_api_key is not None and _extract_api_key(request) != bridge_api_key:
+            return _api_key_unauthorized_response(
+                request,
+                code="upload_bridge_unauthorized",
+                message="Missing or invalid upload bridge API key",
+            )
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        _cleanup_expired_staged_uploads(runtime_obj)
+
+        try:
+            form = await request.form()
+        except Exception as exc:
+            return _error_response(
+                request,
+                code="invalid_multipart",
+                message="Invalid multipart form data",
+                status_code=400,
+                detail=str(exc),
+            )
+
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return _error_response(
+                request,
+                code="file_required",
+                message="Multipart field 'file' is required",
+                status_code=400,
+            )
+
+        file_name = str(getattr(upload, "filename", None) or "unknown")
+        media_type = _resolve_media_type(file_name, getattr(upload, "content_type", None))
+        enable_ocr = _coerce_bool(form.get("enable_ocr"), default=False)
+        create_job = _coerce_bool(form.get("create_job"), default=False)
+        try:
+            content = await upload.read()
+            if not content:
+                return _error_response(
+                    request,
+                    code="empty_file",
+                    message="Empty file",
+                    status_code=400,
+                )
+            max_upload_bytes = _max_upload_bytes(runtime_obj)
+            if _exceeds_upload_limit(len(content), max_upload_bytes):
+                return _error_response(
+                    request,
+                    code="file_too_large",
+                    message="File exceeds configured upload limit",
+                    status_code=413,
+                    detail=_file_too_large_detail(
+                        actual_bytes=len(content),
+                        limit_bytes=max_upload_bytes,
+                    ),
+                )
+
+            quota_units_raw = form.get("quota_units", 1)
+            try:
+                quota_units = max(1, int(quota_units_raw))
+            except (TypeError, ValueError):
+                return _error_response(
+                    request,
+                    code="invalid_quota_units",
+                    message="Invalid quota_units",
+                    status_code=400,
+                )
+
+            tenant_id = str(form.get("tenant_id") or "default")
+            quota_key = str(form.get("quota_key") or "default")
+            doc_id = str(form.get("doc_id") or Path(file_name).stem or "upload-doc")
+            try:
+                submission_path = _persist_staged_upload_file(
+                    runtime_obj,
+                    content=content,
+                    file_name=file_name,
+                    doc_id=doc_id,
+                )
+            except RuntimeError as exc:
+                return _error_response(
+                    request,
+                    code="staged_upload_unavailable",
+                    message=str(exc),
+                    status_code=400,
+                )
+            job_payload = None
+            if create_job:
+                parse_request = ParseRequest(
+                    doc_id=doc_id,
+                    file_path=submission_path,
+                    media_type=media_type,
+                    options={"enable_ocr": enable_ocr, "file_name": file_name},
+                    tenant_id=tenant_id,
+                    quota_key=quota_key,
+                    quota_units=quota_units,
+                )
+                try:
+                    job = request.app.state.runner.submit(parse_request)
+                except QuotaExceededError as exc:
+                    _record_quota_exceeded_event(request, runtime_obj, exc)
+                    return self._quota_error_response(request, exc)
+                except RuntimeError as exc:
+                    if str(exc) == "too_many_inflight_jobs":
+                        _record_inflight_full_event(
+                            request,
+                            runtime_obj,
+                            doc_id=doc_id,
+                            tenant_id=tenant_id,
+                            quota_key=quota_key,
+                        )
+                        max_inflight = getattr(request.app.state.runner, "max_inflight_jobs", None)
+                        return _error_response(
+                            request,
+                            code="too_many_inflight_jobs",
+                            message="Too many inflight jobs",
+                            status_code=429,
+                            detail={"max_inflight_jobs": max_inflight},
+                            extra={"max_inflight_jobs": max_inflight},
+                        )
+                    raise
+                job_payload = _to_payload(job)
+        finally:
+            close_upload = getattr(upload, "close", None)
+            if callable(close_upload):
+                await close_upload()
+
+        payload: dict[str, Any] = {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "media_type": media_type,
+            "tenant_id": tenant_id,
+            "quota_key": quota_key,
+            "quota_units": quota_units,
+            "enable_ocr": enable_ocr,
+            "parsecore_server_file_path": submission_path,
+            "create_job": create_job,
+        }
+        if job_payload is not None:
+            payload.update(job_payload)
+            payload["job"] = job_payload
+            return JSONResponse(payload, status_code=202)
+        payload["state"] = "staged"
+        return JSONResponse(payload, status_code=201)
 
     async def list_jobs(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
@@ -819,6 +981,88 @@ def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
         return provided
     guessed, _ = mimetypes.guess_type(file_name)
     return guessed
+
+
+def _persist_upload_file(
+    runtime_obj: ParseRuntime,
+    *,
+    content: bytes,
+    file_name: str,
+    doc_id: str,
+) -> tuple[str, bool]:
+    suffix = Path(file_name).suffix or ".bin"
+    if runtime_obj.settings.runtime.execution_mode != "queue-worker":
+        with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+            handle.write(content)
+            return handle.name, True
+
+    upload_dir = _resolve_staged_upload_dir(runtime_obj)
+    if upload_dir is not None:
+        safe_doc_id = _safe_staged_doc_id(doc_id)
+        file_path = upload_dir / f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}"
+        file_path.write_bytes(content)
+        return str(file_path), False
+
+    with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+        handle.write(content)
+        return handle.name, False
+
+
+def _persist_staged_upload_file(
+    runtime_obj: ParseRuntime,
+    *,
+    content: bytes,
+    file_name: str,
+    doc_id: str,
+) -> str:
+    suffix = Path(file_name).suffix or ".bin"
+    upload_dir = _resolve_staged_upload_dir(runtime_obj)
+    if upload_dir is not None:
+        safe_doc_id = _safe_staged_doc_id(doc_id)
+        file_path = upload_dir / f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}"
+        file_path.write_bytes(content)
+        return str(file_path)
+
+    raise RuntimeError("staged upload requires a local:// object_store")
+
+
+def _safe_staged_doc_id(doc_id: str) -> str:
+    return "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "_"
+        for char in doc_id
+    ).strip("._") or "upload-doc"
+
+
+def _resolve_staged_upload_dir(runtime_obj: ParseRuntime) -> Path | None:
+    root = _local_object_store_root(runtime_obj.settings.object_store)
+    if root is None:
+        return None
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    upload_dir = root / "_api_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    return upload_dir
+
+
+def _cleanup_expired_staged_uploads(runtime_obj: ParseRuntime) -> None:
+    retention_seconds = max(0, int(runtime_obj.settings.runtime.staged_upload_retention_seconds))
+    if retention_seconds <= 0:
+        return
+    upload_dir = _resolve_staged_upload_dir(runtime_obj)
+    if upload_dir is None or not upload_dir.exists():
+        return
+    expiry_cutoff = time.time() - retention_seconds
+    for candidate in upload_dir.iterdir():
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_mtime > expiry_cutoff:
+                continue
+            candidate.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
 
 
 def _resolve_api_file_path(runtime_obj: ParseRuntime, file_path: str) -> str | None:
