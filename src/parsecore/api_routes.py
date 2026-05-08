@@ -102,6 +102,31 @@ class ApiRoutes:
 
     async def create_job(self, request: Request) -> JSONResponse:
         payload = await request.json()
+        doc_id = str(payload.get("doc_id") or "").strip()
+        file_path = str(payload.get("file_path") or "").strip()
+        if not doc_id:
+            return _error_response(
+                request,
+                code="missing_doc_id",
+                message="Missing doc_id",
+                status_code=400,
+            )
+        if not file_path:
+            return _error_response(
+                request,
+                code="missing_file_path",
+                message="Missing file_path",
+                status_code=400,
+            )
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        safe_file_path = _resolve_api_file_path(runtime_obj, file_path)
+        if safe_file_path is None:
+            return _error_response(
+                request,
+                code="file_path_not_allowed",
+                message="file_path must be inside the configured local object_store",
+                status_code=403,
+            )
         quota_units_raw = payload.get("quota_units", 1)
         try:
             quota_units = max(1, int(quota_units_raw))
@@ -113,8 +138,8 @@ class ApiRoutes:
                 status_code=400,
             )
         parse_request = ParseRequest(
-            doc_id=str(payload["doc_id"]),
-            file_path=str(payload["file_path"]),
+            doc_id=doc_id,
+            file_path=safe_file_path,
             media_type=payload.get("media_type"),
             options=dict(payload.get("options") or {}),
             tenant_id=str(payload.get("tenant_id") or "default"),
@@ -124,7 +149,6 @@ class ApiRoutes:
         try:
             job = request.app.state.runner.submit(parse_request)
         except QuotaExceededError as exc:
-            runtime_obj = request.app.state.runtime
             _record_quota_exceeded_event(request, runtime_obj, exc)
             return self._quota_error_response(request, exc)
         except RuntimeError as exc:
@@ -795,6 +819,33 @@ def _resolve_media_type(file_name: str, provided: str | None) -> str | None:
         return provided
     guessed, _ = mimetypes.guess_type(file_name)
     return guessed
+
+
+def _resolve_api_file_path(runtime_obj: ParseRuntime, file_path: str) -> str | None:
+    if runtime_obj.settings.runtime.allow_external_file_paths:
+        return file_path
+
+    root = _local_object_store_root(runtime_obj.settings.object_store)
+    if root is None:
+        return None
+
+    try:
+        candidate = Path(file_path).expanduser().resolve(strict=False)
+        root = root.expanduser().resolve(strict=False)
+        candidate.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return str(candidate)
+
+
+def _local_object_store_root(object_store: str) -> Path | None:
+    raw = str(object_store or "").strip()
+    if not raw.startswith("local://"):
+        return None
+    path = raw.removeprefix("local://").strip()
+    if not path:
+        return None
+    return Path(path)
 
 
 def _record_quota_exceeded_event(request: Request, runtime_obj: ParseRuntime, exc: QuotaExceededError) -> None:

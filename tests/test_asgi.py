@@ -589,6 +589,23 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(invalid_trend.status_code, 400)
                 self.assertEqual(invalid_trend.json()["code"], "invalid_trend_window_hours")
 
+    def test_create_job_rejects_file_path_outside_object_store_by_default(self) -> None:
+        protected_config = SAMPLE_CONFIG + "\nallow_external_file_paths = false"
+        with TemporaryWorkspace(protected_config) as workspace:
+            document_path = workspace.create_docx("outside.docx", ["Do not read me"])
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-outside",
+                        "file_path": str(document_path),
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    },
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"], "file_path_not_allowed")
+
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("compat.docx", ["Maintenance Manual", "Apply torque in sequence"])

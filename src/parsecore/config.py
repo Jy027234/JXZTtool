@@ -32,6 +32,7 @@ class RuntimeSettings:
     max_attempts: int = 3
     log_path: str = "var/logs/job_events.jsonl"
     api_key_env: str = ""
+    allow_external_file_paths: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -215,6 +216,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             max_attempts=int(runtime.get("max_attempts", 3)),
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
             api_key_env=str(runtime.get("api_key_env", "")),
+            allow_external_file_paths=bool(runtime.get("allow_external_file_paths", False)),
         ),
         parsers=parser_settings,
         providers=ProviderSettings(
