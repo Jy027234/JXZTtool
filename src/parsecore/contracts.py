@@ -51,6 +51,17 @@ class IndexAdapter(Protocol):
         tenant_id: str | None = None,
     ) -> Sequence[Chunk] | None: ...
 
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+        document: Any | None = None,
+        index_manifest: Mapping[str, Any] | None = None,
+    ) -> None: ...
+
 
 @runtime_checkable
 class TranslationAdapter(Protocol):
@@ -110,6 +121,24 @@ class JobStore(Protocol):
     def save_blocks(self, *, doc_id: str, blocks: Sequence[Block], tenant_id: str | None = None) -> None: ...
 
     def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None: ...
+
+    def replace_blocks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        blocks: Sequence[Block],
+        block_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None: ...
+
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None: ...
 
     def claim_next_job(self) -> ParseJob | None: ...
 

@@ -15,34 +15,34 @@
 极快 smoke：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --skip-regression
 ```
 
 默认 fast 自检：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check
 ```
 
 slow/full 专项自检：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile slow
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile slow
 ```
 
 perf 长尾性能跟踪：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile perf
 ```
 
 如需和上一份 perf 报告做趋势对比：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf --compare-report var/self-check/previous.perf.json
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile perf --compare-report var/self-check/previous.perf.json
 ```
 
-说明：`tools/self_check.py` 现支持三档门禁。默认 `fast` profile 会跑 `var/regression/suite.fast.json`，只覆盖日常主线 baseline；`slow`（等价别名 `full`）会切到 `var/regression/suite.full.json`，保留主线加中等时长 slow baseline；`perf` 会切到 `var/regression/suite.perf.json`，单独跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本。对应回归超时默认值分别为 `900s`、`4200s` 和 `4200s`。
+说明：默认入口是 `parsecore self-check`（源码 checkout 下可用 `python -m parsecore.cli self-check`），内部仍复用 `tools/self_check.py`。该入口支持三档门禁。默认 `fast` profile 会跑 `var/regression/suite.fast.json`，只覆盖日常主线 baseline；`slow`（等价别名 `full`）会切到 `var/regression/suite.full.json`，保留主线加中等时长 slow baseline；`perf` 会切到 `var/regression/suite.perf.json`，单独跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本。对应回归超时默认值分别为 `900s`、`4200s` 和 `4200s`。
 
 `perf` profile 现在会在输出 JSON 中额外写入 `perf_tracking.samples / overview / comparison`。当 `--compare-report` 指向上一份 self-check JSON 时，会按样本生成 `elapsed_s / ocr_total_s / call_s / provider_s / rec_s / max_page_ocr_s` 的 delta，便于 CI 或自托管 runner 长期跟踪趋势。
 
@@ -54,7 +54,7 @@ CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。base
 
 ## 覆盖范围
 
-`tools/self_check.py` 当前串联三类检查：
+`parsecore self-check` 当前串联三类检查：
 
 1. 单测：`unittest discover -s tests -p "test_*.py"`
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
@@ -119,8 +119,8 @@ fast profile 当前覆盖以下基线样本：
 
 ## 当前建议
 
-1. 日常改动默认跑 `tools/self_check.py` 的 fast profile。
-2. 涉及 PDF 后处理、长文样本和门禁口径调整时跑 `tools/self_check.py --profile slow`。
-3. 涉及 `sample-27-81-17`、`sample-cmm-32-48-21-ocr` 这类布局/OCR 重样本性能跟踪时跑 `tools/self_check.py --profile perf`。
+1. 日常改动默认跑 `parsecore self-check` 的 fast profile。
+2. 涉及 PDF 后处理、长文样本和门禁口径调整时跑 `parsecore self-check --profile slow`。
+3. 涉及 `sample-27-81-17`、`sample-cmm-32-48-21-ocr` 这类布局/OCR 重样本性能跟踪时跑 `parsecore self-check --profile perf`。
 4. 若 `slow/full` 或 `perf` 返回 `degraded`，优先检查是否再次触发超时边界或 OCR 长尾异常放大。
 5. 若要继续收敛长尾性能，应把 OCR/复杂版面重样本优化视为专项任务，而不是继续改变默认上线口径。

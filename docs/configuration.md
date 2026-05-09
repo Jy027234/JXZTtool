@@ -529,7 +529,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/o
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --config parsecore.toml
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --config parsecore.toml
 ```
 
 Excel 真实样本：
@@ -542,6 +542,13 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .pdf,.docx,.xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
+```
+
+大 PDF part 调度压测：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
 ```
 
 HTTP smoke：
@@ -662,7 +669,7 @@ POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
 
 取消接口只保证尚未运行的 part：持久化状态为 `pending`，inline runner 内部队列中的 part 也会先移出队列再转为 `cancelled`；如果 part 已在运行中，不强杀 worker 进程，会返回当前状态。运行态 job 的软 timeout 会使当前 `claim_token` 失效，旧 worker 后续写回会被拒绝，再由复跑或下一次 attempt 接管。
 
-宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑第一版已经能重跑指定页段；本轮生产增强继续补齐了批量复跑、取消和限流，后续再推进只重建受影响 part 的 embedding/index。
+宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑已经能重跑指定页段；本轮生产增强补齐了批量复跑、取消、限流和父文档 part 前缀增量索引，part 成功完成后只替换该 part 对应的 blocks/chunks/index rows，并在 `index_manifest.part_index.parts[]` 记录 `chunk_ids / page_range / index_version`。
 
 ## 超长 PDF 配置口径
 
@@ -694,7 +701,7 @@ Invoke-RestMethod -Headers $headers http://127.0.0.1:8090/v1/runtime
 - `providers.embedding.enabled = true` 时已明确是 fake 还是真实 provider。
 - Excel 大表场景已设置 `max_rows_per_sheet / max_cols_per_sheet / max_metadata_cells` 或完成性能基线。
 - 超大 PDF / part 调度场景已评估 `runtime.max_active_parts_per_doc`，并准备 `parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled` 指标面板。
-- `tools/self_check.py`、真实样本质量报告、性能基线均通过并留档。
+- `parsecore self-check`、真实样本质量报告、性能基线和必要的大 PDF stress 报告均通过并留档。
 - 灰度时已准备 `/health`、`/v1/parse/metrics`、`/v1/parse/events`、`/v1/parse/prometheus` 的观测面板。
 - OCR 观测建议至少覆盖 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_failed` 四类事件与对应 Prometheus 计数器。
 - 已准备回滚配置：通常回到 `parsecore.queue.toml` 或关闭 OCR fallback、上传放宽/收紧等低风险开关。

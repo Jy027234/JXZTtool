@@ -15,6 +15,24 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _prefix_insert_index(*, existing_ids: Sequence[str], retained_ids: Sequence[str], prefix: str) -> int:
+    if not prefix:
+        return len(retained_ids)
+    deleted_positions = [
+        position
+        for position, item_id in enumerate(existing_ids)
+        if str(item_id).startswith(prefix)
+    ]
+    if not deleted_positions:
+        return len(retained_ids)
+    first_deleted = deleted_positions[0]
+    return sum(
+        1
+        for position, item_id in enumerate(existing_ids)
+        if position < first_deleted and not str(item_id).startswith(prefix)
+    )
+
+
 class StubParser(ParserAdapter):
     def __init__(self, *, name: str, media_types: Sequence[str], extensions: Sequence[str]) -> None:
         self.name = name
@@ -155,6 +173,58 @@ class NullIndex(IndexAdapter):
             selected = ()
         self.layer_chunks[(normalized_tenant, doc_id, "high_precision")] = selected
 
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+        document: object | None = None,
+        index_manifest: dict[str, object] | None = None,
+    ) -> None:
+        normalized_tenant = tenant_id or "default"
+        prefix = str(chunk_id_prefix or "")
+        old_primary = self.layer_chunks.get((normalized_tenant, doc_id, "primary"), ())
+        retained_primary = tuple(chunk for chunk in old_primary if not str(chunk.chunk_id).startswith(prefix))
+        insert_at = _prefix_insert_index(
+            existing_ids=[str(chunk.chunk_id) for chunk in old_primary],
+            retained_ids=[str(chunk.chunk_id) for chunk in retained_primary],
+            prefix=prefix,
+        )
+        primary = retained_primary[:insert_at] + tuple(chunks) + retained_primary[insert_at:]
+        structure_items = tuple(getattr(document, "items", ()) or ()) if document is not None else ()
+        payload = {
+            "doc_id": doc_id,
+            "tenant_id": normalized_tenant,
+            "mode": "replace_by_prefix",
+            "chunk_id_prefix": prefix,
+            "chunks": len(chunks),
+            "structure_items": len(structure_items),
+            "index_manifest": dict(index_manifest or {}),
+        }
+        self.upserts.append(payload)
+        self.documents[(normalized_tenant, doc_id)] = dict(index_manifest or {})
+        self.layer_chunks[(normalized_tenant, doc_id, "primary")] = primary
+
+        high_precision_ids: set[str] = set()
+        if isinstance(index_manifest, dict):
+            for layer in tuple(index_manifest.get("layers", ())):
+                if not isinstance(layer, dict):
+                    continue
+                if str(layer.get("name") or "") != "high_precision":
+                    continue
+                for chunk_id in tuple(layer.get("chunk_ids") or ()):
+                    normalized = str(chunk_id).strip()
+                    if normalized:
+                        high_precision_ids.add(normalized)
+        old_high_precision = self.layer_chunks.get((normalized_tenant, doc_id, "high_precision"), ())
+        retained_high_precision = tuple(
+            chunk for chunk in old_high_precision if not str(chunk.chunk_id).startswith(prefix)
+        )
+        selected = tuple(chunk for chunk in chunks if chunk.chunk_id in high_precision_ids)
+        self.layer_chunks[(normalized_tenant, doc_id, "high_precision")] = retained_high_precision + selected
+
     def describe_document(
         self,
         *,
@@ -269,6 +339,46 @@ class InMemoryJobStore(JobStore):
     def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
         key = ((tenant_id or "default"), doc_id)
         self.chunks_by_doc[key] = tuple(chunks)
+
+    def replace_blocks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        blocks: Sequence[Block],
+        block_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        key = ((tenant_id or "default"), doc_id)
+        prefix = str(block_id_prefix or "")
+        existing = self.blocks_by_doc.get(key, ())
+        retained = tuple(block for block in existing if not str(block.block_id).startswith(prefix))
+        insert_at = _prefix_insert_index(
+            existing_ids=[str(block.block_id) for block in existing],
+            retained_ids=[str(block.block_id) for block in retained],
+            prefix=prefix,
+        )
+        replacement = tuple(blocks)
+        self.blocks_by_doc[key] = retained[:insert_at] + replacement + retained[insert_at:]
+
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        key = ((tenant_id or "default"), doc_id)
+        prefix = str(chunk_id_prefix or "")
+        existing = self.chunks_by_doc.get(key, ())
+        retained = tuple(chunk for chunk in existing if not str(chunk.chunk_id).startswith(prefix))
+        insert_at = _prefix_insert_index(
+            existing_ids=[str(chunk.chunk_id) for chunk in existing],
+            retained_ids=[str(chunk.chunk_id) for chunk in retained],
+            prefix=prefix,
+        )
+        replacement = tuple(chunks)
+        self.chunks_by_doc[key] = retained[:insert_at] + replacement + retained[insert_at:]
 
     def claim_next_job(self) -> ParseJob | None:
         pending = [job for job in self.jobs.values() if job.state == ParseJobState.PENDING]

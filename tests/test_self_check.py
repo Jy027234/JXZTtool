@@ -4,6 +4,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from parsecore.cli import main as cli_main
 from tools import self_check
 
 
@@ -200,6 +201,20 @@ class SelfCheckTests(unittest.TestCase):
         self.assertEqual(result.details["perf_samples"][0]["name"], "sample-a.pdf")
         self.assertEqual(result.details["perf_overview"]["slowest_sample"]["name"], "sample-a.pdf")
         self.assertIn("slowest=sample-a.pdf:44.2s", result.summary)
+
+    def test_cli_self_check_delegates_to_default_gate(self) -> None:
+        with patch("tools.self_check.main", return_value=0) as run_self_check:
+            exit_code = cli_main(["self-check", "--profile", "perf", "--skip-regression"])
+
+        self.assertEqual(exit_code, 0)
+        run_self_check.assert_called_once_with(["--profile", "perf", "--skip-regression"])
+
+    def test_cli_large_pdf_stress_delegates_to_tool(self) -> None:
+        with patch("tools.large_pdf_stress.main", return_value=0) as run_stress:
+            exit_code = cli_main(["large-pdf-stress", "--generate-pages", "3"])
+
+        self.assertEqual(exit_code, 0)
+        run_stress.assert_called_once_with(["--generate-pages", "3"])
 
 
 if __name__ == "__main__":

@@ -168,6 +168,142 @@ class SQLiteJobStore(JobStore):
                 ],
             )
 
+    def replace_blocks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        blocks: Sequence[Block],
+        block_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(block_id_prefix or "")
+        if not prefix:
+            self.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=tenant_id)
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(position), MAX(position), COUNT(*)
+                FROM blocks
+                WHERE doc_id = ? AND tenant_id = ? AND substr(block_id, 1, ?) = ?
+                """,
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            ).fetchone()
+            min_position = row[0] if row is not None else None
+            max_position = row[1] if row is not None else None
+            old_count = int(row[2] or 0) if row is not None else 0
+            if min_position is None:
+                max_row = conn.execute(
+                    "SELECT MAX(position) FROM blocks WHERE doc_id = ? AND tenant_id = ?",
+                    (doc_id, normalized_tenant),
+                ).fetchone()
+                insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+            else:
+                insert_at = int(min_position)
+            conn.execute(
+                "DELETE FROM blocks WHERE doc_id = ? AND tenant_id = ? AND substr(block_id, 1, ?) = ?",
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            delta = len(blocks) - old_count
+            if delta and max_position is not None:
+                conn.execute(
+                    """
+                    UPDATE blocks
+                    SET position = position + ?
+                    WHERE doc_id = ? AND tenant_id = ? AND position > ?
+                    """,
+                    (delta, doc_id, normalized_tenant, int(max_position)),
+                )
+            if blocks:
+                conn.executemany(
+                    """
+                    INSERT INTO blocks (doc_id, tenant_id, position, block_id, type, content, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            doc_id,
+                            normalized_tenant,
+                            insert_at + position,
+                            block.block_id,
+                            block.type.value,
+                            block.content,
+                            json.dumps(block.metadata, ensure_ascii=False),
+                        )
+                        for position, block in enumerate(blocks)
+                    ],
+                )
+
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(chunk_id_prefix or "")
+        if not prefix:
+            self.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=tenant_id)
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(position), MAX(position), COUNT(*)
+                FROM chunks
+                WHERE doc_id = ? AND tenant_id = ? AND substr(chunk_id, 1, ?) = ?
+                """,
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            ).fetchone()
+            min_position = row[0] if row is not None else None
+            max_position = row[1] if row is not None else None
+            old_count = int(row[2] or 0) if row is not None else 0
+            if min_position is None:
+                max_row = conn.execute(
+                    "SELECT MAX(position) FROM chunks WHERE doc_id = ? AND tenant_id = ?",
+                    (doc_id, normalized_tenant),
+                ).fetchone()
+                insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+            else:
+                insert_at = int(min_position)
+            conn.execute(
+                "DELETE FROM chunks WHERE doc_id = ? AND tenant_id = ? AND substr(chunk_id, 1, ?) = ?",
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            delta = len(chunks) - old_count
+            if delta and max_position is not None:
+                conn.execute(
+                    """
+                    UPDATE chunks
+                    SET position = position + ?
+                    WHERE doc_id = ? AND tenant_id = ? AND position > ?
+                    """,
+                    (delta, doc_id, normalized_tenant, int(max_position)),
+                )
+            if chunks:
+                conn.executemany(
+                    """
+                    INSERT INTO chunks (doc_id, tenant_id, position, chunk_id, block_ids_json, text, language, semantic_role, embedding_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            doc_id,
+                            normalized_tenant,
+                            insert_at + position,
+                            chunk.chunk_id,
+                            json.dumps(chunk.block_ids, ensure_ascii=False),
+                            chunk.text,
+                            chunk.language,
+                            chunk.semantic_role,
+                            json.dumps(chunk.embedding, ensure_ascii=False) if chunk.embedding is not None else None,
+                        )
+                        for position, chunk in enumerate(chunks)
+                    ],
+                )
+
     def claim_next_job(self) -> ParseJob | None:
         now = _utc_now()
         claim_token = uuid4().hex
@@ -987,6 +1123,148 @@ class PostgresJobStore(JobStore):
                     rows,
                 )
 
+    def replace_blocks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        blocks: Sequence[Block],
+        block_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(block_id_prefix or "")
+        if not prefix:
+            self.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=tenant_id)
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MIN(position), MAX(position), COUNT(*)
+                FROM blocks
+                WHERE doc_id = %s AND tenant_id = %s AND LEFT(block_id, %s) = %s
+                """,
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            row = cur.fetchone()
+            min_position = row[0] if row is not None else None
+            max_position = row[1] if row is not None else None
+            old_count = int(row[2] or 0) if row is not None else 0
+            if min_position is None:
+                cur.execute(
+                    "SELECT MAX(position) FROM blocks WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
+                )
+                max_row = cur.fetchone()
+                insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+            else:
+                insert_at = int(min_position)
+            cur.execute(
+                "DELETE FROM blocks WHERE doc_id = %s AND tenant_id = %s AND LEFT(block_id, %s) = %s",
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            delta = len(blocks) - old_count
+            if delta and max_position is not None:
+                cur.execute(
+                    """
+                    UPDATE blocks
+                    SET position = position + %s
+                    WHERE doc_id = %s AND tenant_id = %s AND position > %s
+                    """,
+                    (delta, doc_id, normalized_tenant, int(max_position)),
+                )
+            if blocks:
+                cur.executemany(
+                    """
+                    INSERT INTO blocks (block_id, doc_id, tenant_id, position, type, content, metadata_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            block.block_id,
+                            doc_id,
+                            normalized_tenant,
+                            insert_at + position,
+                            block.type.value,
+                            block.content,
+                            json.dumps(block.metadata, ensure_ascii=False),
+                        )
+                        for position, block in enumerate(blocks)
+                    ],
+                )
+
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(chunk_id_prefix or "")
+        if not prefix:
+            self.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=tenant_id)
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MIN(position), MAX(position), COUNT(*)
+                FROM chunks
+                WHERE doc_id = %s AND tenant_id = %s AND LEFT(chunk_id, %s) = %s
+                """,
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            row = cur.fetchone()
+            min_position = row[0] if row is not None else None
+            max_position = row[1] if row is not None else None
+            old_count = int(row[2] or 0) if row is not None else 0
+            if min_position is None:
+                cur.execute(
+                    "SELECT MAX(position) FROM chunks WHERE doc_id = %s AND tenant_id = %s",
+                    (doc_id, normalized_tenant),
+                )
+                max_row = cur.fetchone()
+                insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+            else:
+                insert_at = int(min_position)
+            cur.execute(
+                "DELETE FROM chunks WHERE doc_id = %s AND tenant_id = %s AND LEFT(chunk_id, %s) = %s",
+                (doc_id, normalized_tenant, len(prefix), prefix),
+            )
+            delta = len(chunks) - old_count
+            if delta and max_position is not None:
+                cur.execute(
+                    """
+                    UPDATE chunks
+                    SET position = position + %s
+                    WHERE doc_id = %s AND tenant_id = %s AND position > %s
+                    """,
+                    (delta, doc_id, normalized_tenant, int(max_position)),
+                )
+            if chunks:
+                cur.executemany(
+                    """
+                    INSERT INTO chunks (chunk_id, doc_id, tenant_id, position, block_ids_json, text, language, semantic_role, embedding_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            chunk.chunk_id,
+                            doc_id,
+                            normalized_tenant,
+                            insert_at + position,
+                            json.dumps(chunk.block_ids, ensure_ascii=False),
+                            chunk.text,
+                            chunk.language,
+                            chunk.semantic_role,
+                            json.dumps(chunk.embedding, ensure_ascii=False)
+                            if chunk.embedding is not None
+                            else None,
+                        )
+                        for position, chunk in enumerate(chunks)
+                    ],
+                )
+
     # -- claim / read -----------------------------------------------------
 
     def claim_next_job(self) -> ParseJob | None:
@@ -1532,6 +1810,172 @@ class PgVectorIndex(IndexAdapter):
                         """,
                         structure_rows,
                     )
+                if index_manifest is not None:
+                    cur.execute(
+                        "DELETE FROM index_manifests WHERE doc_id = %s AND tenant_id = %s",
+                        (doc_id, normalized_tenant),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO index_manifests (doc_id, tenant_id, manifest_json, updated_at)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (doc_id, normalized_tenant, json.dumps(dict(index_manifest), ensure_ascii=False), now),
+                    )
+
+    def replace_chunks_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Chunk],
+        chunk_id_prefix: str,
+        tenant_id: str | None = None,
+        document: object | None = None,
+        index_manifest: Mapping[str, Any] | None = None,
+    ) -> None:
+        from pgvector.psycopg import register_vector
+
+        prefix = str(chunk_id_prefix or "")
+        if not prefix:
+            self.upsert(
+                doc_id=doc_id,
+                chunks=chunks,
+                tenant_id=tenant_id,
+                document=document,
+                index_manifest=index_manifest,
+            )
+            return
+
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        rows: list[tuple[str, str, str, list[float], str]] = []
+        high_precision_rows: list[tuple[str, str, str, str, str, str, str, str, list[float] | None, str]] = []
+        structure_rows: list[tuple[str, str, str, str, str, int | None, str, str, str]] = []
+        now = _utc_now()
+        for chunk in chunks:
+            if chunk.embedding is None:
+                continue
+            vec = list(float(v) for v in chunk.embedding)
+            if len(vec) != self.dim:
+                raise ValueError(
+                    f"chunk {chunk.chunk_id} embedding dim={len(vec)} "
+                    f"mismatch with index dim={self.dim}"
+                )
+            rows.append((chunk.chunk_id, doc_id, normalized_tenant, vec, now))
+
+        high_precision_ids: set[str] = set()
+        if isinstance(index_manifest, Mapping):
+            for layer in tuple(index_manifest.get("layers", ())):
+                if not isinstance(layer, Mapping):
+                    continue
+                if str(layer.get("name") or "") != "high_precision":
+                    continue
+                for chunk_id in tuple(layer.get("chunk_ids", ())):
+                    normalized = str(chunk_id).strip()
+                    if normalized:
+                        high_precision_ids.add(normalized)
+
+        if high_precision_ids:
+            for chunk in chunks:
+                if chunk.chunk_id not in high_precision_ids:
+                    continue
+                if chunk.embedding is not None:
+                    chunk_embedding = list(float(value) for value in chunk.embedding)
+                    if len(chunk_embedding) != self.dim:
+                        raise ValueError(
+                            f"chunk {chunk.chunk_id} embedding dim={len(chunk_embedding)} "
+                            f"mismatch with index dim={self.dim}"
+                        )
+                else:
+                    chunk_embedding = None
+                high_precision_rows.append(
+                    (
+                        f"{normalized_tenant}:{doc_id}:{chunk.chunk_id}",
+                        chunk.chunk_id,
+                        doc_id,
+                        normalized_tenant,
+                        json.dumps(tuple(chunk.block_ids), ensure_ascii=False),
+                        str(chunk.text or ""),
+                        str(chunk.language or "unknown"),
+                        str(chunk.semantic_role or "paragraph"),
+                        chunk_embedding,
+                        now,
+                    )
+                )
+
+        if document is not None:
+            for item in tuple(getattr(document, "items", ()) or ()):
+                item_id = str(getattr(item, "item_id", "")).strip()
+                if not item_id:
+                    continue
+                semantic_role = str(getattr(item, "semantic_role", "") or "paragraph")
+                tags = list(getattr(item, "metadata", {}).get("structure_tags") or [])
+                page_number_raw = getattr(item, "page_number", None)
+                try:
+                    page_number = int(page_number_raw) if page_number_raw is not None else None
+                except (TypeError, ValueError):
+                    page_number = None
+                structure_rows.append(
+                    (
+                        f"{normalized_tenant}:{doc_id}:{item_id}",
+                        doc_id,
+                        normalized_tenant,
+                        item_id,
+                        semantic_role,
+                        page_number,
+                        json.dumps(tags, ensure_ascii=False),
+                        str(getattr(item, "text", "") or ""),
+                        now,
+                    )
+                )
+
+        with self._connect() as conn:
+            register_vector(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM chunk_embeddings WHERE doc_id = %s AND tenant_id = %s AND LEFT(chunk_id, %s) = %s",
+                    (doc_id, normalized_tenant, len(prefix), prefix),
+                )
+                if rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO chunk_embeddings (chunk_id, doc_id, tenant_id, embedding, updated_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        rows,
+                    )
+                cur.execute(
+                    """
+                    DELETE FROM high_precision_chunk_embeddings
+                    WHERE doc_id = %s AND tenant_id = %s AND LEFT(chunk_id, %s) = %s
+                    """,
+                    (doc_id, normalized_tenant, len(prefix), prefix),
+                )
+                if high_precision_rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO high_precision_chunk_embeddings (
+                            entry_id, chunk_id, doc_id, tenant_id,
+                            block_ids_json, text, language, semantic_role,
+                            embedding, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        high_precision_rows,
+                    )
+                if document is not None:
+                    cur.execute(
+                        "DELETE FROM structure_index_entries WHERE doc_id = %s AND tenant_id = %s",
+                        (doc_id, normalized_tenant),
+                    )
+                    if structure_rows:
+                        cur.executemany(
+                            """
+                            INSERT INTO structure_index_entries (
+                                entry_id, doc_id, tenant_id, item_id, semantic_role,
+                                page_number, tags_json, text, updated_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            structure_rows,
+                        )
                 if index_manifest is not None:
                     cur.execute(
                         "DELETE FROM index_manifests WHERE doc_id = %s AND tenant_id = %s",

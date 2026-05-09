@@ -205,19 +205,19 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 运行默认自检门禁：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check
 ```
 
 运行 slow/full 专项自检：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile slow
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile slow
 ```
 
 运行 perf 长尾性能跟踪：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --profile perf
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile perf
 ```
 
 说明：
@@ -227,6 +227,15 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 - `perf` profile 会执行 `var/regression/suite.perf.json`，专门跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本
 - 若样本目录不在原始机器路径下，可设置 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向实际 PDF 目录，baseline 会优先按 `fixture_relative_path` 解析
 - 默认输出分别写入 `var/self-check/latest.json`、`var/self-check/latest.full.json` 和 `var/self-check/latest.perf.json`
+
+运行大 PDF part 调度压测：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
+```
+
+说明：默认只做 plan-only，避免误跑超长任务；加 `--execute-parts` 后会 inline 执行 part，可用 `--max-parts` 先抽样压测。
 
 运行 OCR 长尾专项 benchmark：
 
@@ -442,8 +451,8 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 1. projection、profile 自动路由、413 异步分流、基础 `tables/cells/quality_signals/parse_units` 已完成；优先让宿主 parser client 在异步 job 创建阶段接入 `profile=auto`，并继续用 `projection=structured` 读取结构化结果。
 2. 对两类样本先做灰度：表格密集文件使用 `profile=table-heavy`，超大或长页数 PDF 使用 `profile=large-pdf`，观察耗时、质量信号和结果双写稳定性。
 3. 异步导出包、PDF 页段调度、父文档 partial 合并和单 part 复跑第一版已完成；下一步重点压测大 PDF 样本和 queue-worker 部署。
-4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout、claim_token 防旧 worker 写回和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
-5. 把 part 级增量索引从“刷新父读模型”继续推进到“只重建受影响 part 的 embedding/index layer”。
-6. 把 `tools/self_check.py` 固化为默认自检入口，并继续收敛 OCR 长尾样本性能。
+4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout、claim_token 防旧 worker 写回、父文档 part 前缀增量索引和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
+5. `index_manifest.part_index.parts[]` 已记录每个 part 的 `chunk_ids / page_range / index_version`，可用于后续跨版本迁移、增量同步和审计。
+6. `parsecore self-check` 和 `parsecore large-pdf-stress` 已作为默认运维入口落地；下一步继续收敛 OCR 长尾样本性能。
 7. 在 queue-worker + pgvector 模式下固化入口鉴权、灰度配置与回滚口径。
 8. 为 `fast/full/perf` 三档门禁补稳定样本环境与持续趋势跟踪。

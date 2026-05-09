@@ -30,7 +30,7 @@ docker compose --profile pgvector up -d --build
 ## 灰度前检查
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --skip-regression
 ```
 
 ```powershell

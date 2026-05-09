@@ -7,7 +7,7 @@
 1. 本地快速门禁：提交前运行单测和 runtime smoke。
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/self_check.py --skip-regression
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --skip-regression
 ```
 
 2. PR / 主分支 CI：`.github/workflows/parsecore-ci.yml` 自动运行快速门禁，并额外验证 base SDK import 不会加载 API 可选依赖。
@@ -24,6 +24,17 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/s
 - `PARSECORE_PREVIOUS_PERF_REPORT`：显式指定上一份 perf 报告路径；若未配置，则 workflow 会优先读取 `PARSECORE_PERF_HISTORY_DIR/latest.perf.json`
 
 ## 上传保护
+
+## 大 PDF 压测入口
+
+`parsecore large-pdf-stress` 用于验证页段规划、part 子 job、父文档增量合并和 manifest part index。默认是 plan-only，适合先验证 17000 页级别的切分成本；需要压实际解析链路时再加 `--execute-parts`，并用 `--max-parts` 先抽样。
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 17000 --target-pages-per-part 200 --out-json var/self-check/large-pdf-stress.json --out-md var/self-check/large-pdf-stress.md
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 5
+```
+
+报告会输出 `planned_parts / executed_parts / plan_elapsed_s / part_timings / manifest_part_index`。其中 `manifest_part_index` 对应文档 `index_manifest.part_index.parts[]`，可用于确认 `chunk_ids / page_range / index_version` 是否随 part rerun 正常刷新。
 
 API 同步入口支持运行时文件大小保护：
 
@@ -167,10 +178,7 @@ PARSECORE_PERF_HISTORY_DIR=/var/lib/parsecore/perf-history
 - 单文档 active parts 限流，配置口径为 `runtime.max_active_parts_per_doc`，生产建议先设 `2-4`。
 - 尚未运行 part 取消，接口口径为 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`。
 - queue-worker 失败指数退避、job/part 软 timeout、claim_token 写回保护，以及批量 failed-only rerun。
-
-仍需增强：
-
-- 只对变更 part 的 chunks 重建 embedding/index layer，避免 17000 页复跑时全量 re-embed。
+- part 成功完成后，父文档按 `part_id` 前缀替换 blocks/chunks，并只重建受影响 part 的 index rows；`index_manifest.part_index.parts[]` 记录每个 part 的 `chunk_ids / page_range / index_version`。
 
 性能验收建议新增三组指标：
 

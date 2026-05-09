@@ -470,6 +470,7 @@ class ParseRuntime:
                     doc_id=str(request.options.get("source_doc_id") or request.options.get("parent_doc_id") or ""),
                     tenant_id=request.tenant_id,
                     parent_job_id=str(request.options.get("parent_job_id") or ""),
+                    changed_part_ids=[str(request.options.get("part_id") or request.doc_id)],
                 )
             self.event_logger.log(
                 "completed",
@@ -1054,6 +1055,7 @@ class ParseRuntime:
         doc_id: str,
         tenant_id: str | None = None,
         parent_job_id: str | None = None,
+        changed_part_ids: Sequence[str] | None = None,
     ):
         if not doc_id:
             return None
@@ -1064,35 +1066,47 @@ class ParseRuntime:
         )
         if parent_job is None:
             return None
-        blocks, chunks = self._merged_partition_artifacts(
-            parent_doc_id=doc_id,
+        child_jobs = self._latest_pdf_part_jobs(
+            doc_id=doc_id,
             tenant_id=parent_job.tenant_id,
             parent_job_id=parent_job.job_id,
         )
-        if blocks or chunks:
-            existing_blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
-            if len(blocks) >= len(existing_blocks):
-                self.job_store.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=parent_job.tenant_id)
-                self.job_store.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=parent_job.tenant_id)
-                index_manifest = self._derive_index_manifest_from_snapshot(
-                    job=parent_job,
-                    blocks=blocks,
-                    chunks=chunks,
-                )
-                self.index.upsert(
-                    doc_id=doc_id,
-                    chunks=chunks,
-                    tenant_id=parent_job.tenant_id,
-                    document=None,
-                    index_manifest=index_manifest,
-                )
-        new_state = self._partition_parent_state(
-            self._latest_pdf_part_jobs(
-                doc_id=doc_id,
+        new_state = self._partition_parent_state(child_jobs)
+        changed_ids = tuple(
+            str(part_id).strip()
+            for part_id in tuple(changed_part_ids or ())
+            if str(part_id).strip()
+        )
+        if changed_ids:
+            self._refresh_partitioned_parent_incremental(
+                parent_doc_id=doc_id,
+                parent_job=parent_job,
+                child_jobs=child_jobs,
+                changed_part_ids=changed_ids,
+            )
+        else:
+            blocks, chunks = self._merged_partition_artifacts(
+                parent_doc_id=doc_id,
                 tenant_id=parent_job.tenant_id,
                 parent_job_id=parent_job.job_id,
             )
-        )
+            if blocks or chunks:
+                existing_blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
+                if new_state == ParseJobState.DONE or len(blocks) >= len(existing_blocks):
+                    self.job_store.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=parent_job.tenant_id)
+                    self.job_store.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=parent_job.tenant_id)
+                    index_manifest = self._derive_index_manifest_from_snapshot(
+                        job=parent_job,
+                        blocks=blocks,
+                        chunks=chunks,
+                    )
+                    self.index.upsert(
+                        doc_id=doc_id,
+                        chunks=chunks,
+                        tenant_id=parent_job.tenant_id,
+                        document=None,
+                        index_manifest=index_manifest,
+                    )
         if parent_job.state != new_state:
             parent_job = self._update_job_state(
                 job_id=parent_job.job_id,
@@ -1100,6 +1114,101 @@ class ParseRuntime:
                 clear_claim=True,
             )
         return parent_job
+
+    def _refresh_partitioned_parent_incremental(
+        self,
+        *,
+        parent_doc_id: str,
+        parent_job: Any,
+        child_jobs: Sequence[Any],
+        changed_part_ids: Sequence[str],
+    ) -> bool:
+        child_by_part_id = {
+            str((getattr(job, "options", {}) or {}).get("part_id") or job.doc_id): job
+            for job in child_jobs
+        }
+        replaced: list[tuple[str, tuple[Chunk, ...]]] = []
+        replace_blocks = getattr(self.job_store, "replace_blocks_by_prefix", None)
+        replace_chunks = getattr(self.job_store, "replace_chunks_by_prefix", None)
+        if not callable(replace_blocks) or not callable(replace_chunks):
+            blocks, chunks = self._merged_partition_artifacts(
+                parent_doc_id=parent_doc_id,
+                tenant_id=parent_job.tenant_id,
+                parent_job_id=parent_job.job_id,
+            )
+            if blocks or chunks:
+                self.job_store.save_blocks(doc_id=parent_doc_id, blocks=blocks, tenant_id=parent_job.tenant_id)
+                self.job_store.save_chunks(doc_id=parent_doc_id, chunks=chunks, tenant_id=parent_job.tenant_id)
+                index_manifest = self._derive_index_manifest_from_snapshot(
+                    job=parent_job,
+                    blocks=blocks,
+                    chunks=chunks,
+                )
+                self.index.upsert(
+                    doc_id=parent_doc_id,
+                    chunks=chunks,
+                    tenant_id=parent_job.tenant_id,
+                    document=None,
+                    index_manifest=index_manifest,
+                )
+                return True
+            return False
+
+        for part_id in changed_part_ids:
+            child = child_by_part_id.get(str(part_id))
+            if child is None or child.state != ParseJobState.DONE:
+                continue
+            prefix = _merged_part_prefix(parent_doc_id=parent_doc_id, part_id=str(part_id))
+            blocks, chunks = self._merged_partition_artifacts(
+                parent_doc_id=parent_doc_id,
+                tenant_id=parent_job.tenant_id,
+                parent_job_id=parent_job.job_id,
+                part_ids=[str(part_id)],
+            )
+            replace_blocks(
+                doc_id=parent_doc_id,
+                blocks=blocks,
+                block_id_prefix=prefix,
+                tenant_id=parent_job.tenant_id,
+            )
+            replace_chunks(
+                doc_id=parent_doc_id,
+                chunks=chunks,
+                chunk_id_prefix=prefix,
+                tenant_id=parent_job.tenant_id,
+            )
+            replaced.append((prefix, chunks))
+
+        if not replaced:
+            return False
+
+        all_blocks = tuple(self.job_store.get_blocks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
+        all_chunks = tuple(self.job_store.get_chunks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
+        index_manifest = self._derive_index_manifest_from_snapshot(
+            job=parent_job,
+            blocks=all_blocks,
+            chunks=all_chunks,
+        )
+        replace_index = getattr(self.index, "replace_chunks_by_prefix", None)
+        if callable(replace_index):
+            for prefix, chunks in replaced:
+                replace_index(
+                    doc_id=parent_doc_id,
+                    chunks=chunks,
+                    chunk_id_prefix=prefix,
+                    tenant_id=parent_job.tenant_id,
+                    document=None,
+                    index_manifest=index_manifest,
+                )
+        else:
+            self.index.upsert(
+                doc_id=parent_doc_id,
+                chunks=all_chunks,
+                tenant_id=parent_job.tenant_id,
+                document=None,
+                index_manifest=index_manifest,
+            )
+        return True
 
     def _start_pdf_part_job(
         self,
@@ -1211,7 +1320,13 @@ class ParseRuntime:
         parent_doc_id: str,
         tenant_id: str,
         parent_job_id: str,
+        part_ids: Sequence[str] | None = None,
     ) -> tuple[tuple[Any, ...], tuple[Chunk, ...]]:
+        part_filter = {
+            str(part_id).strip()
+            for part_id in tuple(part_ids or ())
+            if str(part_id).strip()
+        }
         child_jobs = self._latest_pdf_part_jobs(
             doc_id=parent_doc_id,
             tenant_id=tenant_id,
@@ -1223,12 +1338,15 @@ class ParseRuntime:
         for job in child_jobs:
             if job.state != ParseJobState.DONE:
                 continue
+            part_id = str((job.options or {}).get("part_id") or job.doc_id)
+            if part_filter and part_id not in part_filter:
+                continue
             for block in self.job_store.get_blocks(doc_id=job.doc_id, tenant_id=job.tenant_id):
                 merged_id = f"{parent_doc_id}:merged:{getattr(block, 'block_id', len(merged_blocks) + 1)}"
                 block_id_map[str(getattr(block, "block_id", ""))] = merged_id
                 metadata = dict(getattr(block, "metadata", {}) or {})
                 metadata.setdefault("part_doc_id", job.doc_id)
-                metadata.setdefault("part_id", str((job.options or {}).get("part_id") or job.doc_id))
+                metadata.setdefault("part_id", part_id)
                 merged_blocks.append(
                     replace(
                         block,
@@ -1358,7 +1476,7 @@ class ParseRuntime:
                     "chunk_ids": [chunk.chunk_id for chunk in high_precision_chunks],
                 }
             )
-        return {
+        manifest = {
             "doc_id": job.doc_id,
             "tenant_id": job.tenant_id,
             "pipeline_name": pipeline_name,
@@ -1366,6 +1484,85 @@ class ParseRuntime:
             "index_version": job.job_id,
             "embedding_tiers": embedding_tiers,
             "layers": layers,
+        }
+        if _job_kind(job) == _PDF_PARENT_JOB_KIND:
+            part_index = self._partition_index_manifest(parent_job=job, blocks=blocks, chunks=chunks)
+            if part_index:
+                manifest["part_index"] = part_index
+        return manifest
+
+    def _partition_index_manifest(
+        self,
+        *,
+        parent_job: Any,
+        blocks: Sequence[Any],
+        chunks: Sequence[Chunk],
+    ) -> dict[str, Any]:
+        child_jobs = self._latest_pdf_part_jobs(
+            doc_id=parent_job.doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        )
+        if not child_jobs:
+            return {}
+        blocks_by_part: dict[str, int] = {}
+        for block in blocks:
+            metadata = getattr(block, "metadata", {}) or {}
+            part_id = str(metadata.get("part_id") or "").strip()
+            if not part_id:
+                block_id = str(getattr(block, "block_id", "") or "")
+                part_id = _part_id_from_merged_id(parent_doc_id=parent_job.doc_id, item_id=block_id)
+            if part_id:
+                blocks_by_part[part_id] = blocks_by_part.get(part_id, 0) + 1
+
+        chunk_ids_by_part: dict[str, list[str]] = {}
+        for chunk in chunks:
+            chunk_id = str(chunk.chunk_id or "")
+            part_id = _part_id_from_merged_id(parent_doc_id=parent_job.doc_id, item_id=chunk_id)
+            if not part_id:
+                for block_id in tuple(chunk.block_ids or ()):
+                    part_id = _part_id_from_merged_id(parent_doc_id=parent_job.doc_id, item_id=str(block_id))
+                    if part_id:
+                        break
+            if part_id:
+                chunk_ids_by_part.setdefault(part_id, []).append(chunk_id)
+
+        parts: list[dict[str, Any]] = []
+        for child in child_jobs:
+            options = getattr(child, "options", {}) or {}
+            part_id = str(options.get("part_id") or child.doc_id).strip()
+            if not part_id:
+                continue
+            state = _job_state(child)
+            page_start = _safe_int_runtime(options.get("page_start"), default=1)
+            page_end = _safe_int_runtime(options.get("page_end"), default=page_start)
+            chunk_ids = chunk_ids_by_part.get(part_id, [])
+            parts.append(
+                {
+                    "part_id": part_id,
+                    "part_doc_id": child.doc_id,
+                    "job_id": child.job_id,
+                    "state": state.value if state is not None else str(getattr(child, "state", "") or ""),
+                    "page_range": {
+                        "start": page_start,
+                        "end": page_end,
+                    },
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "chunk_id_prefix": _merged_part_prefix(parent_doc_id=parent_job.doc_id, part_id=part_id),
+                    "chunk_ids": chunk_ids,
+                    "chunk_count": len(chunk_ids),
+                    "block_count": blocks_by_part.get(part_id, 0),
+                    "index_version": child.job_id,
+                }
+            )
+        return {
+            "strategy": "pdf_part",
+            "parent_job_id": parent_job.job_id,
+            "source_doc_id": parent_job.doc_id,
+            "part_count": len(parts),
+            "indexed_part_count": len([part for part in parts if int(part.get("chunk_count") or 0) > 0]),
+            "parts": parts,
         }
 
     def search_document(
@@ -2266,7 +2463,7 @@ class ParseRuntime:
                     "chunk_ids": [chunk.chunk_id for chunk in high_precision_chunks],
                 }
             )
-        return {
+        manifest = {
             "doc_id": request.doc_id,
             "tenant_id": request.tenant_id,
             "pipeline_name": pipeline_name,
@@ -2277,6 +2474,13 @@ class ParseRuntime:
             "manual_anatomy": dict((getattr(document, "metadata", {}) or {}).get("manual_anatomy") or {}),
             "structure_quality": dict((getattr(document, "metadata", {}) or {}).get("structure_quality") or {}),
         }
+        if _is_pdf_part_request(request):
+            manifest["part"] = _pdf_part_index_manifest(
+                request=request,
+                chunks=chunks,
+                index_version=index_version,
+            )
+        return manifest
 
     @staticmethod
     def _structure_entries_from_blocks(*, doc_id: str, blocks: Sequence[Any]) -> tuple[dict[str, Any], ...]:
@@ -2974,6 +3178,52 @@ def _normalize_chunk_index_layer(value: str | None) -> str:
     if normalized in {"primary", "high_precision"}:
         return normalized
     return "primary"
+
+
+def _merged_part_prefix(*, parent_doc_id: str, part_id: str) -> str:
+    return f"{parent_doc_id}:merged:{part_id}:"
+
+
+def _part_id_from_merged_id(*, parent_doc_id: str, item_id: str) -> str:
+    prefix = f"{parent_doc_id}:merged:"
+    value = str(item_id or "")
+    if not value.startswith(prefix):
+        return ""
+    remainder = value[len(prefix):]
+    if ":" not in remainder:
+        return ""
+    return remainder.split(":", 1)[0]
+
+
+def _pdf_part_index_manifest(
+    *,
+    request: ParseRequest,
+    chunks: Sequence[Chunk],
+    index_version: str,
+) -> dict[str, Any]:
+    options = request.options or {}
+    part_id = str(options.get("part_id") or request.doc_id)
+    page_start = _safe_int_runtime(options.get("page_start"), default=1)
+    page_end = _safe_int_runtime(options.get("page_end"), default=page_start)
+    chunk_ids = [chunk.chunk_id for chunk in chunks]
+    return {
+        "part_id": part_id,
+        "part_doc_id": request.doc_id,
+        "source_doc_id": str(options.get("source_doc_id") or options.get("parent_doc_id") or ""),
+        "parent_doc_id": str(options.get("parent_doc_id") or options.get("source_doc_id") or ""),
+        "parent_job_id": str(options.get("parent_job_id") or ""),
+        "source_job_id": str(options.get("source_job_id") or ""),
+        "page_range": {
+            "start": page_start,
+            "end": page_end,
+        },
+        "page_start": page_start,
+        "page_end": page_end,
+        "chunk_id_prefix": f"{part_id}:",
+        "chunk_ids": chunk_ids,
+        "chunk_count": len(chunk_ids),
+        "index_version": index_version,
+    }
 
 
 def _normalize_trend_windows_hours(values: Sequence[float] | None) -> tuple[float, ...]:

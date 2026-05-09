@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 from typing import Sequence
 
@@ -38,6 +39,12 @@ def _build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--once", action="store_true")
     worker.add_argument("--max-jobs", type=int)
 
+    self_check = sub.add_parser("self-check", help="Run the default ParseCore self-check gate")
+    self_check.add_argument("self_check_args", nargs=argparse.REMAINDER)
+
+    large_pdf_stress = sub.add_parser("large-pdf-stress", help="Run the large PDF part scheduling stress tool")
+    large_pdf_stress.add_argument("stress_args", nargs=argparse.REMAINDER)
+
     batch_reindex = sub.add_parser("batch-reindex", help="Rebuild chunk/index outputs for a batch of documents")
     batch_reindex.add_argument("--config", default="parsecore.toml")
     batch_reindex.add_argument("--tenant-id")
@@ -49,11 +56,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "self-check":
+        from tools import self_check as self_check_tool
+
+        return int(self_check_tool.main(raw_args[1:]))
+    if raw_args and raw_args[0] == "large-pdf-stress":
+        from tools import large_pdf_stress
+
+        return int(large_pdf_stress.main(raw_args[1:]))
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
-    runtime = build_runtime(args.config)
+    args = parser.parse_args(raw_args)
 
     if args.command == "describe":
+        runtime = build_runtime(args.config)
         print(json.dumps(runtime.describe(), ensure_ascii=False, indent=2))
         return 0
 
@@ -72,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "batch-reindex":
+        runtime = build_runtime(args.config)
         payload = runtime.batch_reindex(
             tenant_id=args.tenant_id,
             doc_ids=args.doc_ids,
@@ -84,6 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     options: dict[str, str] = {}
     if getattr(args, "mode", "default") != "default":
         options["mode"] = args.mode
+    runtime = build_runtime(args.config)
     request = ParseRequest(
         doc_id=args.doc_id,
         file_path=args.file_path,

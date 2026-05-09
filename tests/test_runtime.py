@@ -1548,12 +1548,166 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["job"].state, ParseJobState.DONE)
             self.assertEqual(len(snapshot["partition_parts"]), 2)
             self.assertTrue(all(part["state"] == "done" for part in snapshot["partition_parts"]))
+            manifest = snapshot["index_manifest"]
+            part_index = manifest["part_index"]
+            self.assertEqual(part_index["strategy"], "pdf_part")
+            self.assertEqual(part_index["part_count"], 2)
+            self.assertEqual(
+                [part["page_range"] for part in part_index["parts"]],
+                [{"start": 1, "end": 2}, {"start": 3, "end": 3}],
+            )
+            self.assertEqual(
+                [part["index_version"] for part in part_index["parts"]],
+                [job.job_id for job in planned["part_jobs"]],
+            )
+            self.assertTrue(
+                all(
+                    chunk_id.startswith(
+                        f"doc-partitioned:merged:{part['part_id']}:"
+                    )
+                    for part in part_index["parts"]
+                    for chunk_id in part["chunk_ids"]
+                )
+            )
 
             payload = _document_projection(snapshot, projection="structured")
             self.assertEqual(payload["state"], "done")
             self.assertEqual([unit["page_start"] for unit in payload["parse_units"]], [1, 3])
             self.assertEqual([page["page_number"] for page in payload["pages"]], [1, 2, 3])
             self.assertEqual([page["text"] for page in payload["pages"]], ["one", "two", "three"])
+
+    def test_partitioned_pdf_parent_index_replaces_only_changed_part_prefix(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("partitioned-incremental.pdf", [["one"], ["two"], ["three"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-partitioned-incremental",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(
+                doc_id="doc-partitioned-incremental",
+                target_pages_per_part=1,
+            )
+
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+
+            parent_upserts = [
+                upsert
+                for upsert in runtime.index.upserts
+                if upsert["doc_id"] == "doc-partitioned-incremental"
+            ]
+            self.assertGreaterEqual(len(parent_upserts), 3)
+            self.assertTrue(all(upsert.get("mode") == "replace_by_prefix" for upsert in parent_upserts[-3:]))
+            self.assertEqual([upsert["chunks"] for upsert in parent_upserts[-3:]], [2, 2, 2])
+            self.assertEqual(
+                [upsert["index_manifest"]["layers"][0]["item_count"] for upsert in parent_upserts[-3:]],
+                [2, 4, 6],
+            )
+            final_part_index = parent_upserts[-1]["index_manifest"]["part_index"]
+            self.assertEqual(final_part_index["part_count"], 3)
+            self.assertEqual(final_part_index["indexed_part_count"], 3)
+            self.assertEqual(
+                [part["page_range"] for part in final_part_index["parts"]],
+                [{"start": 1, "end": 1}, {"start": 2, "end": 2}, {"start": 3, "end": 3}],
+            )
+            self.assertEqual(
+                [part["index_version"] for part in final_part_index["parts"]],
+                [job.job_id for job in planned["part_jobs"]],
+            )
+            self.assertEqual(
+                len(runtime.job_store.get_chunks(doc_id="doc-partitioned-incremental")),
+                6,
+            )
+
+    def test_store_prefix_replacement_removes_old_part_artifacts(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            prefix = "doc-parent:merged:part-1:"
+            runtime.job_store.save_blocks(
+                doc_id="doc-parent",
+                blocks=[
+                    Block(
+                        block_id=f"{prefix}old-a",
+                        doc_id="doc-parent",
+                        type=BlockType.PARAGRAPH,
+                        content="old one",
+                    ),
+                    Block(
+                        block_id=f"{prefix}old-b",
+                        doc_id="doc-parent",
+                        type=BlockType.PARAGRAPH,
+                        content="old two",
+                    ),
+                    Block(
+                        block_id="doc-parent:merged:part-2:keep",
+                        doc_id="doc-parent",
+                        type=BlockType.PARAGRAPH,
+                        content="keep",
+                    ),
+                ],
+            )
+            runtime.job_store.save_chunks(
+                doc_id="doc-parent",
+                chunks=[
+                    Chunk(
+                        chunk_id=f"{prefix}old-a",
+                        doc_id="doc-parent",
+                        block_ids=(f"{prefix}old-a",),
+                        text="old one",
+                    ),
+                    Chunk(
+                        chunk_id=f"{prefix}old-b",
+                        doc_id="doc-parent",
+                        block_ids=(f"{prefix}old-b",),
+                        text="old two",
+                    ),
+                    Chunk(
+                        chunk_id="doc-parent:merged:part-2:keep",
+                        doc_id="doc-parent",
+                        block_ids=("doc-parent:merged:part-2:keep",),
+                        text="keep",
+                    ),
+                ],
+            )
+
+            runtime.job_store.replace_blocks_by_prefix(
+                doc_id="doc-parent",
+                block_id_prefix=prefix,
+                blocks=[
+                    Block(
+                        block_id=f"{prefix}new",
+                        doc_id="doc-parent",
+                        type=BlockType.PARAGRAPH,
+                        content="new",
+                    )
+                ],
+            )
+            runtime.job_store.replace_chunks_by_prefix(
+                doc_id="doc-parent",
+                chunk_id_prefix=prefix,
+                chunks=[
+                    Chunk(
+                        chunk_id=f"{prefix}new",
+                        doc_id="doc-parent",
+                        block_ids=(f"{prefix}new",),
+                        text="new",
+                    )
+                ],
+            )
+
+            self.assertEqual(
+                [block.block_id for block in runtime.job_store.get_blocks(doc_id="doc-parent")],
+                [f"{prefix}new", "doc-parent:merged:part-2:keep"],
+            )
+            self.assertEqual(
+                [chunk.chunk_id for chunk in runtime.job_store.get_chunks(doc_id="doc-parent")],
+                [f"{prefix}new", "doc-parent:merged:part-2:keep"],
+            )
 
     def test_rerun_pdf_part_creates_replacement_child_job(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
@@ -1570,6 +1724,12 @@ class ParseRuntimeTests(unittest.TestCase):
             planned = runtime.start_pdf_part_jobs(doc_id="doc-rerun-part", target_pages_per_part=1)
             for job in planned["part_jobs"]:
                 runtime.execute(job_id=job.job_id)
+            before_manifest = runtime.get_document(doc_id="doc-rerun-part")["index_manifest"]
+            before_part_two = next(
+                part
+                for part in before_manifest["part_index"]["parts"]
+                if part["part_id"] == "doc-rerun-part-part-2"
+            )
 
             rerun = runtime.rerun_pdf_part(
                 doc_id="doc-rerun-part",
@@ -1582,6 +1742,16 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(part_two["state"], "done")
             self.assertEqual(part_two["attempts"], 1)
             self.assertNotEqual(part_two["job_id"], planned["part_jobs"][1].job_id)
+            after_manifest = runtime.get_document(doc_id="doc-rerun-part")["index_manifest"]
+            after_part_two = next(
+                part
+                for part in after_manifest["part_index"]["parts"]
+                if part["part_id"] == "doc-rerun-part-part-2"
+            )
+            self.assertEqual(after_part_two["index_version"], rerun["job"].job_id)
+            self.assertNotEqual(after_part_two["index_version"], before_part_two["index_version"])
+            self.assertEqual(after_part_two["page_range"], {"start": 2, "end": 2})
+            self.assertTrue(after_part_two["chunk_ids"])
 
     def test_batch_rerun_defaults_to_failed_parts_only(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

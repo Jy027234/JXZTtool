@@ -234,9 +234,9 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 1. `parse_unit_id / part_id / page_range / source_doc_id / parse_run_id` 是复跑最小定位字段，第一页段落地时就要保留。
 2. 单 part 复跑只覆盖该 part 产出的 `pages / tables / quality_signals / blocks / chunks`，不重写其他 part 的结果。
 3. 复跑结果保留 `parent_parse_run_id` 和 `rerun_reason`，便于宿主审计为什么某段内容和初次解析不同。
-4. 复跑完成后生成新的 `index_manifest`，标记哪些 chunks 需要重建 embedding，避免全量 re-embed。
+4. 复跑完成后刷新 `index_manifest`，并按 `part_id` 前缀只替换该 part 的 chunks/index rows，避免父文档全量 re-embed。
 
-当前状态：`GET /v1/parse/documents/{doc_id}/parts` 和 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun` 第一版已落地。parts 视图基于真实 part job 与 `parse_units + quality_signals` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`；复跑会创建新的指定 part 子 job，并在完成后刷新父文档读模型。
+当前状态：`GET /v1/parse/documents/{doc_id}/parts` 和 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun` 已落地。parts 视图基于真实 part job 与 `parse_units + quality_signals` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`；复跑会创建新的指定 part 子 job，并在完成后增量刷新父文档读模型和索引。
 
 ### 17000 页 PDF 页段调度路线
 
@@ -261,7 +261,7 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 5. 文档状态区分 `running / partial / done / failed`：只要部分 part 成功，宿主就可以读取 partial structured 结果和异常 part 列表。
 6. 异常 part 通过上一节规划接口复跑，优先只对失败页段启用 OCR、多引擎或更小页段，不默认全量重跑。
 
-已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。本轮生产增强已补齐单文档 active part 限流 `max_active_parts_per_doc`、批量复跑 `/parts/rerun`、尚未运行 part 取消 `/parts/{part_id}/cancel`、queue-worker 失败退避、job/part 软超时和 `claim_token` 防旧 worker 写回。仍需增强：只重建受影响 part 的 embedding/index layer。
+已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。本轮生产增强已补齐单文档 active part 限流 `max_active_parts_per_doc`、批量复跑 `/parts/rerun`、尚未运行 part 取消 `/parts/{part_id}/cancel`、queue-worker 失败退避、job/part 软超时、`claim_token` 防旧 worker 写回、父文档按 `part_id` 前缀增量替换 blocks/chunks/index rows，以及 `index_manifest.part_index.parts[]` 的 `chunk_ids / page_range / index_version`。
 
 ### Phase 5：导出与人工复核
 
@@ -343,5 +343,5 @@ Phase 2 的中台承接能力已完成：
 - 人工复核 UI。
 - 默认多引擎解析。
 - 生产级优先级和更细 timeout 编排；批量 part 复跑、尚未运行 part 取消、active part 限流、失败退避和软 timeout 已完成第一版。
-- 只重建受影响 part 的 embedding/index layer。
+- manifest part index 与导出包 manifest 对齐，支持按 part 追踪复跑原因、质量摘要和版本迁移状态。
 - `parquet`、截图、raw cells、trace 打包。

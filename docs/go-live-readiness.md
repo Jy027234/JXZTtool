@@ -73,7 +73,7 @@
 
 1. ParseCore 当前版本可以进入产品灰度。
 2. 默认配置保持不变，不引入任何 OCR 实验开关。
-3. 默认质量门禁以 `tools/self_check.py` 的 fast profile 为准；涉及长文与扩展回归时补跑 `tools/self_check.py --profile slow`，涉及 `sample-27-81-17` / `sample-cmm-32-48-21-ocr` 这类重样本性能跟踪时再补跑 `tools/self_check.py --profile perf`。
+3. 默认质量门禁以 `parsecore self-check` 的 fast profile 为准；涉及长文与扩展回归时补跑 `parsecore self-check --profile slow`，涉及 `sample-27-81-17` / `sample-cmm-32-48-21-ocr` 这类重样本性能跟踪时再补跑 `parsecore self-check --profile perf`。
 4. OCR 长尾性能问题保留为已知风险，但不单独阻塞当前灰度。
 5. 若出现主线功能故障、门禁失败或 API 不可用，再触发回滚；不要把已知 OCR 长尾波动直接等同于版本不可上线。
 
