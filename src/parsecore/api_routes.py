@@ -14,7 +14,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .api_payloads import _batch_success_response, _parse_success_response, _to_payload
+from .api_payloads import (
+    _batch_success_response,
+    _document_projection,
+    _document_quality_projection,
+    _parse_success_response,
+    _to_payload,
+)
 from .api_responses import batch_error_response as _batch_error_response
 from .api_responses import error_response as _error_response
 from .api_support import (
@@ -61,6 +67,7 @@ class ApiRoutes:
             Route("/v1/parse/events", self.get_events, methods=["GET"]),
             Route("/v1/parse/dashboard", self.tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}", self.get_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/search", self.search_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/structure-search", self.search_document_structure, methods=["GET"]),
@@ -727,10 +734,30 @@ class ApiRoutes:
     async def get_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         tenant_id = str(request.query_params.get("tenant_id") or "default")
+        projection = str(request.query_params.get("projection") or "full").strip().lower()
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
-        return JSONResponse(_to_payload(snapshot))
+        try:
+            return JSONResponse(_document_projection(snapshot, projection=projection))
+        except ValueError as exc:
+            if str(exc) == "invalid_projection":
+                return _error_response(
+                    request,
+                    code="invalid_projection",
+                    message="Invalid projection",
+                    status_code=400,
+                    detail={"allowed": ["compat", "structured", "full"]},
+                )
+            raise
+
+    async def get_document_quality(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        return JSONResponse(_document_quality_projection(snapshot))
 
     async def search_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime

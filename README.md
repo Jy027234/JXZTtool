@@ -51,6 +51,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - [docs/go-live-readiness.md](docs/go-live-readiness.md)：主线版本进入产品灰度前的必做项、遗留问题分级与回滚口径
 - [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
 - [docs/performance-stability.md](docs/performance-stability.md)：分层 CI、上传保护与 OCR benchmark 的执行口径
+- [docs/parsecore-data-quality-pipeline-plan.md](docs/parsecore-data-quality-pipeline-plan.md)：中等改动升级计划，覆盖异步解析、结构化表格、质量信号与未来深度改造承接
 - [docs/gray-deployment.md](docs/gray-deployment.md)：queue-worker + Postgres + pgvector 灰度推荐配置与回滚口径
 
 ## 目录结构
@@ -66,6 +67,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │  ├─ implementation-plan.md
 │  ├─ ocr-integration-checklist.md
 │  ├─ ocr-gateway-contract.md
+│  ├─ parsecore-data-quality-pipeline-plan.md
 │  ├─ performance-stability.md
 │  └─ self-check-gate.md
 ├─ src/
@@ -262,6 +264,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `since_hours`：可选时间窗口（小时），用于 `quotas/usage`、`metrics`、`dashboard` 仅统计最近 N 小时任务
 - `POST /v1/parse/jobs`：创建异步解析 job；默认要求 `file_path` 指向 `storage.object_store` 内已存在的普通文件，越界返回 `403 file_path_not_allowed`
 - `POST /v1/parse/jobs` 与文档重跑接口在 inline 模式下支持 inflight 背压：超过阈值返回 `429 too_many_inflight_jobs`
+- `GET /v1/parse/documents/{doc_id}?projection=compat|structured|full`：读取文档结果；`compat` 保持旧 parser-service 口径，`structured` 输出 `tables/cells/quality_signals/parse_units`，`full` 额外包含 blocks/chunks 调试快照
+- `GET /v1/parse/documents/{doc_id}/quality`：读取 V2 质量摘要、质量信号、OCR trace 与 parse unit 概览
 - `staged_upload_api_key_env`：仅保护 `/parse/uploads` 与 `/v1/parse/uploads`；配置后调用方需提供 `x-api-key` 或 `Authorization: Bearer ...`，不会影响 `/v1/runtime` 等其他接口
 - `staged_upload_retention_seconds`：桥接暂存文件的保留秒数；服务会在新的桥接上传请求到达时清理 `_api_uploads` 下超过该时长的旧文件
 - `pages[]`：同步 batch 响应中的页级结构包含 `page_number / page_type / text / tables_markdown / tables / artifacts / confidence`，可直接映射现有 parser-service 消费方；`page_type` 除 `body` 外，还会按结构语义输出 `toc / front_matter / appendix / signature`

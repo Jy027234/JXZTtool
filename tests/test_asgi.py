@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from parsecore.asgi import _project_pages, create_app
 from parsecore.models import Block, BlockType, ParseJobState
 from parsecore.stubs import FakeEmbeddingProvider
-from tests.support import TemporaryWorkspace
+from tests.support import TemporaryWorkspace, build_docx_table
 from unittest.mock import patch
 
 
@@ -1048,6 +1048,72 @@ class ParseApiTests(unittest.TestCase):
                 )
                 self.assertEqual(invalid_trend.status_code, 400)
                 self.assertEqual(invalid_trend.json()["code"], "invalid_trend_window_hours")
+
+    def test_document_projection_structured_exposes_v2_tables_and_quality(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx_with_body(
+                "table.docx",
+                build_docx_table([["Part"], ["Bolt", "2"]]),
+            )
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-table-v2",
+                        "file_path": str(document_path),
+                        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "options": {"profile": "table-heavy"},
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                job_id = created.json()["job_id"]
+
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    if current.json()["state"] == ParseJobState.DONE.value:
+                        break
+
+                structured = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "structured"},
+                )
+                self.assertEqual(structured.status_code, 200)
+                payload = structured.json()
+                self.assertEqual(payload["schema_version"], "2026-06")
+                self.assertEqual(payload["projection"], "structured")
+                self.assertEqual(payload["profile"], "table-heavy")
+                self.assertNotIn("blocks", payload)
+                self.assertEqual(len(payload["tables"]), 1)
+                table = payload["tables"][0]
+                self.assertEqual(table["header_rows"], 1)
+                self.assertEqual(table["cells"][0]["text"], "Part")
+                self.assertTrue(any(signal["code"] == "table_ragged_rows" for signal in payload["quality_signals"]))
+                self.assertEqual(payload["parse_units"][0]["table_count"], 1)
+
+                quality = client.get("/v1/parse/documents/doc-table-v2/quality")
+                self.assertEqual(quality.status_code, 200)
+                quality_payload = quality.json()
+                self.assertEqual(quality_payload["projection"], "quality")
+                self.assertGreaterEqual(quality_payload["quality_summary"]["total"], 1)
+
+                compat = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "compat"},
+                )
+                self.assertEqual(compat.status_code, 200)
+                compat_payload = compat.json()
+                self.assertEqual(compat_payload["schema_version"], "2026-04")
+                self.assertEqual(compat_payload["projection"], "compat")
+                self.assertIn("pages", compat_payload)
+
+                invalid = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "future"},
+                )
+                self.assertEqual(invalid.status_code, 400)
+                self.assertEqual(invalid.json()["code"], "invalid_projection")
 
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

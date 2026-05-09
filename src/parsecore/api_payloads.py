@@ -18,6 +18,7 @@ _ARTIFACT_SEMANTIC_ROLES = {
 # Increment when the shape of pages[] or top-level fields changes in a
 # backwards-incompatible way.  Consumers can gate on this string.
 PAYLOAD_SCHEMA_VERSION = "2026-04"
+DOCUMENT_SCHEMA_VERSION = "2026-06"
 
 
 def _to_payload(value: Any) -> Any:
@@ -113,6 +114,98 @@ def _parse_success_response(
     }
 
 
+def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") -> dict[str, Any]:
+    normalized_projection = str(projection or "full").strip().lower()
+    if normalized_projection not in {"compat", "structured", "full"}:
+        raise ValueError("invalid_projection")
+
+    blocks = tuple(snapshot.get("blocks") or ())
+    chunks = tuple(snapshot.get("chunks") or ())
+    job = snapshot.get("job")
+    doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", ""))
+    pages = _project_pages(blocks)
+    raw_qs = evaluate_parse_quality(blocks)
+    output_qs = evaluate_projected_parse_quality(pages)
+    ocr_trace = build_ocr_decision_trace(blocks)
+    trace_payload = ocr_decision_trace_payload(ocr_trace)
+
+    if normalized_projection == "compat":
+        return {
+            "schema_version": PAYLOAD_SCHEMA_VERSION,
+            "projection": "compat",
+            "doc_id": doc_id,
+            "job": _to_payload(job),
+            "total_pages": len(pages),
+            "pages": pages,
+            "parser_used": _infer_parser_used(blocks),
+            "quality": _quality_payload(output_qs),
+            "raw_quality": _quality_payload(raw_qs),
+            "output_quality": _quality_payload(output_qs),
+            "ocr_decision_trace": trace_payload,
+            "error": None,
+        }
+
+    tables = _structured_tables(blocks, doc_id=doc_id)
+    quality_signals = _quality_signals(
+        pages=pages,
+        tables=tables,
+        blocks=blocks,
+    )
+    structured_pages = _structured_pages(
+        pages=pages,
+        tables=tables,
+        quality_signals=quality_signals,
+    )
+    payload: dict[str, Any] = {
+        "schema_version": DOCUMENT_SCHEMA_VERSION,
+        "projection": normalized_projection,
+        "doc_id": doc_id,
+        "parse_run_id": str(getattr(job, "job_id", "") or ""),
+        "profile": _profile_for_document(job=job, pages=pages, tables=tables),
+        "state": _state_value(getattr(job, "state", None)),
+        "compat_pages": pages,
+        "pages": structured_pages,
+        "tables": tables,
+        "quality": _quality_payload(output_qs),
+        "raw_quality": _quality_payload(raw_qs),
+        "output_quality": _quality_payload(output_qs),
+        "quality_signals": quality_signals,
+        "quality_summary": _quality_signal_summary(quality_signals),
+        "ocr_decision_trace": trace_payload,
+        "parse_units": _parse_units(
+            snapshot=snapshot,
+            pages=pages,
+            tables=tables,
+            quality_signals=quality_signals,
+        ),
+        "index_manifest": snapshot.get("index_manifest"),
+    }
+    if normalized_projection == "full":
+        payload["job"] = _to_payload(job)
+        payload["blocks"] = _to_payload(blocks)
+        payload["chunks"] = _to_payload(chunks)
+    return payload
+
+
+def _document_quality_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
+    structured = _document_projection(snapshot, projection="structured")
+    return {
+        "schema_version": DOCUMENT_SCHEMA_VERSION,
+        "projection": "quality",
+        "doc_id": structured["doc_id"],
+        "parse_run_id": structured["parse_run_id"],
+        "profile": structured["profile"],
+        "state": structured["state"],
+        "quality": structured["quality"],
+        "raw_quality": structured["raw_quality"],
+        "output_quality": structured["output_quality"],
+        "quality_signals": structured["quality_signals"],
+        "quality_summary": structured["quality_summary"],
+        "ocr_decision_trace": structured["ocr_decision_trace"],
+        "parse_units": structured["parse_units"],
+    }
+
+
 def _read_first_metadata(blocks: tuple[Block, ...], key: str) -> Any:
     """Return the first non-None value for ``key`` in any block's metadata."""
     for block in blocks:
@@ -151,6 +244,360 @@ def _aggregate_stage_timings(blocks: tuple[Block, ...]) -> dict[str, float] | No
     if total_ocr_provider > 0:
         result["ocr_provider_s"] = round(total_ocr_provider, 4)
     return result
+
+
+def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    for fallback_index, block in enumerate(blocks, start=1):
+        if block.type != BlockType.TABLE:
+            continue
+        metadata = block.metadata or {}
+        page_number = _safe_int(metadata.get("page"), default=1)
+        table_index = _safe_int(metadata.get("table_index"), default=len(tables) + 1)
+        rows = _safe_int(metadata.get("rows"), default=0)
+        cols = _safe_int(metadata.get("cols"), default=0)
+        raw_rows = _table_rows_from_metadata(metadata)
+        if not rows:
+            rows = len(raw_rows)
+        if not cols:
+            cols = max((len(row) for row in raw_rows), default=0)
+        table_id = f"{doc_id}:p{page_number}:t{table_index}"
+        cells = _structured_cells(
+            raw_rows,
+            page_number=page_number,
+            table_index=table_index,
+        )
+        warnings = _table_warnings(raw_rows=raw_rows, rows=rows, cols=cols)
+        table: dict[str, Any] = {
+            "table_id": table_id,
+            "source_doc_id": doc_id,
+            "part_doc_id": doc_id,
+            "block_id": block.block_id,
+            "page_number": page_number,
+            "table_index": table_index,
+            "source_parser": str(metadata.get("parser") or ""),
+            "bbox": metadata.get("bbox"),
+            "rows": rows,
+            "cols": cols,
+            "header_rows": max(0, _safe_int(metadata.get("header_rows"), default=1 if rows else 0)),
+            "cells": cells,
+            "warnings": warnings,
+        }
+        for key in (
+            "table_type",
+            "sheet_name",
+            "cell_range",
+            "source_cell_range",
+            "sheet_table_index",
+            "table_title",
+            "hidden_sheet",
+            "cells_truncated",
+            "cells_total",
+            "cells_preview_rows",
+        ):
+            if key in metadata:
+                table[key] = metadata[key]
+        if not cells and block.content.strip():
+            table["text"] = block.content
+        table["empty_cell_ratio"] = _empty_cell_ratio(raw_rows)
+        table["source_row_col_counts"] = [len(row) for row in raw_rows]
+        table["ordinal"] = fallback_index
+        tables.append(table)
+    return tables
+
+
+def _structured_cells(
+    rows: list[list[str]],
+    *,
+    page_number: int,
+    table_index: int,
+) -> list[dict[str, Any]]:
+    cells: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        for col_index, value in enumerate(row):
+            cells.append(
+                {
+                    "row_index": row_index,
+                    "col_index": col_index,
+                    "text": str(value or ""),
+                    "confidence": 1.0,
+                    "source_page_number": page_number,
+                    "source_table_index": table_index,
+                    "warnings": [],
+                }
+            )
+    return cells
+
+
+def _table_rows_from_metadata(metadata: dict[str, Any]) -> list[list[str]]:
+    raw = metadata.get("cells")
+    if raw is None:
+        raw = metadata.get("cells_preview")
+    if not isinstance(raw, list):
+        return []
+    rows: list[list[str]] = []
+    for row in raw:
+        if isinstance(row, (list, tuple)):
+            rows.append([str(value or "") for value in row])
+        else:
+            rows.append([str(row or "")])
+    return rows
+
+
+def _table_warnings(*, raw_rows: list[list[str]], rows: int, cols: int) -> list[str]:
+    warnings: list[str] = []
+    if rows == 0 or cols == 0:
+        warnings.append("table_empty")
+    if raw_rows and not any(cell.strip() for cell in raw_rows[0]):
+        warnings.append("table_header_missing")
+    row_widths = {len(row) for row in raw_rows if row}
+    if len(row_widths) > 1:
+        warnings.append("table_ragged_rows")
+    if _empty_cell_ratio(raw_rows) > 0.5:
+        warnings.append("table_empty_ratio_high")
+    return warnings
+
+
+def _quality_signals(
+    *,
+    pages: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+    blocks: tuple[Block, ...],
+) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for page in pages:
+        page_number = _safe_int(page.get("page_number"), default=1)
+        if not str(page.get("text") or "").strip() and not page.get("tables"):
+            signals.append(
+                _quality_signal(
+                    code="empty_page",
+                    severity="info",
+                    message="Page has no text or tables",
+                    page_number=page_number,
+                )
+            )
+        if bool(page.get("ocr_attempted")):
+            signals.append(
+                _quality_signal(
+                    code="ocr_attempted",
+                    severity="info",
+                    message="OCR was attempted for this page",
+                    page_number=page_number,
+                )
+            )
+        if page.get("ocr_error_reasons"):
+            signals.append(
+                _quality_signal(
+                    code="ocr_failed",
+                    severity="error",
+                    message="OCR failed for this page",
+                    page_number=page_number,
+                    detail={"reasons": page.get("ocr_error_reasons")},
+                )
+            )
+
+    common_cols = _common_table_col_count(tables)
+    for table in tables:
+        table_id = str(table.get("table_id") or "")
+        page_number = _safe_int(table.get("page_number"), default=1)
+        for warning in table.get("warnings", []):
+            severity = "warning"
+            if warning == "table_empty":
+                severity = "error"
+            signals.append(
+                _quality_signal(
+                    code=str(warning),
+                    severity=severity,
+                    message=_quality_signal_message(str(warning)),
+                    page_number=page_number,
+                    table_id=table_id,
+                    row_index=0 if warning == "table_header_missing" else None,
+                )
+            )
+        cols = _safe_int(table.get("cols"), default=0)
+        if common_cols > 0 and cols > 0 and cols != common_cols:
+            signals.append(
+                _quality_signal(
+                    code="table_col_count_changed",
+                    severity="warning",
+                    message="Table column count differs from the document's common table width",
+                    page_number=page_number,
+                    table_id=table_id,
+                    detail={"cols": cols, "common_cols": common_cols},
+                )
+            )
+    return signals
+
+
+def _quality_signal(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    page_number: int | None = None,
+    table_id: str | None = None,
+    row_index: int | None = None,
+    col_index: int | None = None,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    signal: dict[str, Any] = {
+        "code": code,
+        "severity": severity,
+        "message": message,
+    }
+    if page_number is not None:
+        signal["page_number"] = page_number
+    if table_id:
+        signal["table_id"] = table_id
+    if row_index is not None:
+        signal["row_index"] = row_index
+    if col_index is not None:
+        signal["col_index"] = col_index
+    if detail:
+        signal["detail"] = detail
+    return signal
+
+
+def _quality_signal_message(code: str) -> str:
+    return {
+        "table_empty": "Table has no structured cells",
+        "table_header_missing": "Table header row is empty",
+        "table_ragged_rows": "Table rows have inconsistent column counts",
+        "table_empty_ratio_high": "Table has a high ratio of empty cells",
+    }.get(code, code)
+
+
+def _quality_signal_summary(signals: list[dict[str, Any]]) -> dict[str, Any]:
+    by_severity: dict[str, int] = {}
+    by_code: dict[str, int] = {}
+    for signal in signals:
+        severity = str(signal.get("severity") or "info")
+        code = str(signal.get("code") or "unknown")
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        by_code[code] = by_code.get(code, 0) + 1
+    return {
+        "total": len(signals),
+        "by_severity": by_severity,
+        "by_code": by_code,
+    }
+
+
+def _structured_pages(
+    *,
+    pages: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+    quality_signals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table_ids_by_page: dict[int, list[str]] = {}
+    for table in tables:
+        page_number = _safe_int(table.get("page_number"), default=1)
+        table_ids_by_page.setdefault(page_number, []).append(str(table.get("table_id") or ""))
+    signal_codes_by_page: dict[int, list[str]] = {}
+    for signal in quality_signals:
+        page_number = signal.get("page_number")
+        if page_number is None:
+            continue
+        signal_codes_by_page.setdefault(_safe_int(page_number, default=1), []).append(str(signal.get("code") or ""))
+
+    structured: list[dict[str, Any]] = []
+    for page in pages:
+        page_number = _safe_int(page.get("page_number"), default=1)
+        structured.append(
+            {
+                "page_number": page_number,
+                "page_type": page.get("page_type", "body"),
+                "text": page.get("text", ""),
+                "table_ids": table_ids_by_page.get(page_number, []),
+                "quality_signal_codes": signal_codes_by_page.get(page_number, []),
+                "confidence": page.get("confidence", 1.0),
+            }
+        )
+    return structured
+
+
+def _parse_units(
+    *,
+    snapshot: dict[str, Any],
+    pages: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+    quality_signals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    job = snapshot.get("job")
+    doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", ""))
+    page_numbers = [_safe_int(page.get("page_number"), default=1) for page in pages]
+    if not page_numbers:
+        page_numbers = [1]
+    return [
+        {
+            "parse_unit_id": f"{doc_id}:unit:1",
+            "source_doc_id": doc_id,
+            "part_doc_id": doc_id,
+            "part_index": 1,
+            "source_type": str(getattr(job, "media_type", "") or ""),
+            "page_start": min(page_numbers),
+            "page_end": max(page_numbers),
+            "state": _state_value(getattr(job, "state", None)),
+            "table_count": len(tables),
+            "quality_signal_count": len(quality_signals),
+        }
+    ]
+
+
+def _profile_for_document(
+    *,
+    job: Any,
+    pages: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+) -> str:
+    options = getattr(job, "options", {}) or {}
+    if isinstance(options, dict):
+        explicit = str(options.get("profile") or options.get("parse_profile") or "").strip()
+        if explicit:
+            return explicit
+    media_type = str(getattr(job, "media_type", "") or "").lower()
+    if "pdf" in media_type and len(pages) >= 100:
+        return "large-pdf"
+    if tables and len(tables) >= max(2, len(pages) // 2):
+        return "table-heavy"
+    return "default"
+
+
+def _common_table_col_count(tables: list[dict[str, Any]]) -> int:
+    counts: dict[int, int] = {}
+    for table in tables:
+        cols = _safe_int(table.get("cols"), default=0)
+        if cols <= 0:
+            continue
+        counts[cols] = counts.get(cols, 0) + 1
+    if not counts:
+        return 0
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _empty_cell_ratio(rows: list[list[str]]) -> float:
+    total = 0
+    empty = 0
+    for row in rows:
+        for value in row:
+            total += 1
+            if not str(value or "").strip():
+                empty += 1
+    if total <= 0:
+        return 0.0
+    return round(empty / total, 4)
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _state_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(getattr(value, "value", value))
 
 
 def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:

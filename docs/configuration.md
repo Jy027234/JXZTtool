@@ -513,6 +513,17 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/parse/metrics
 Invoke-RestMethod http://127.0.0.1:8090/v1/parse/prometheus
 ```
 
+文档结果 projection：
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=compat"
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=structured"
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=full"
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/quality"
+```
+
+`compat` 用于旧 parser-service 消费方；`structured` 返回 `schema_version = "2026-06"`，并包含 `tables / cells / quality_signals / parse_units`；`full` 在 structured 基础上额外带 `job / blocks / chunks`，适合调试和后续人工复核。
+
 如果启用了 API key：
 
 ```powershell
