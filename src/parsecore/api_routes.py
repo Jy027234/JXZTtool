@@ -86,6 +86,8 @@ class ApiRoutes:
             Route("/v1/parse/documents/{doc_id}/export-jobs", self.create_export_job, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}/parts", self.get_document_parts, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/parts/plan", self.plan_document_parts, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/parts/rerun", self.rerun_document_parts, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/parts/{part_id}/cancel", self.cancel_document_part, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}/parts/{part_id}/rerun", self.rerun_document_part, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}", self.get_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/search", self.search_document, methods=["GET"]),
@@ -959,6 +961,11 @@ class ApiRoutes:
                 tenant_id=tenant_id,
                 target_pages_per_part=_optional_int(payload.get("target_pages_per_part")),
                 ocr_heavy_pages_per_part=_optional_int(payload.get("ocr_heavy_pages_per_part")),
+                max_active_parts_per_doc=(
+                    _optional_int(payload.get("max_active_parts_per_doc"))
+                    if payload.get("max_active_parts_per_doc") is not None
+                    else int(getattr(request.app.state.runtime.settings.runtime, "max_active_parts_per_doc", 0) or 0)
+                ),
                 profile=payload.get("profile"),
             )
         except LookupError:
@@ -1001,6 +1008,49 @@ class ApiRoutes:
             return self._quota_error_response(request, exc)
         return JSONResponse(_to_payload(result), status_code=202)
 
+    async def rerun_document_parts(self, request: Request) -> JSONResponse:
+        payload = await _optional_json_payload(request)
+        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        failed_only = _coerce_bool(payload.get("failed_only"), default=True)
+        try:
+            result = request.app.state.runner.rerun_pdf_parts(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
+                part_ids=_includes_payload(payload.get("part_ids"), field_name="part_ids"),
+                failed_only=failed_only,
+                state_filter=_includes_payload(payload.get("state"), field_name="state"),
+                profile=payload.get("profile"),
+            )
+        except LookupError:
+            return _error_response(request, code="part_not_found", message="Part not found", status_code=404)
+        except ValueError as exc:
+            return _error_response(
+                request,
+                code=str(exc) or "invalid_part_rerun",
+                message="Invalid part rerun",
+                status_code=400,
+            )
+        except QuotaExceededError as exc:
+            _record_quota_exceeded_event(request, request.app.state.runtime, exc)
+            return self._quota_error_response(request, exc)
+        if not result.get("submitted"):
+            return JSONResponse(_to_payload(result), status_code=409)
+        return JSONResponse(_to_payload(result), status_code=202)
+
+    async def cancel_document_part(self, request: Request) -> JSONResponse:
+        payload = await _optional_json_payload(request)
+        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        try:
+            result = request.app.state.runner.cancel_pdf_part(
+                doc_id=request.path_params["doc_id"],
+                part_id=request.path_params["part_id"],
+                tenant_id=tenant_id,
+            )
+        except LookupError:
+            return _error_response(request, code="part_not_found", message="Part not found", status_code=404)
+        status_code = 202 if result.get("cancelled") else 409
+        return JSONResponse(_to_payload(result), status_code=status_code)
+
     async def create_export_job(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         payload = await _optional_json_payload(request)
@@ -1015,7 +1065,7 @@ class ApiRoutes:
                 export_payload,
                 _export_root(runtime_obj),
                 formats=_formats_payload(payload.get("formats")),
-                includes=_includes_payload(payload.get("include") or payload.get("includes")),
+                includes=_includes_payload(payload.get("include") or payload.get("includes"), field_name="include"),
                 filters=dict(payload.get("filters") or {}),
             )
         except ValueError as exc:
@@ -1361,14 +1411,23 @@ def _formats_payload(value: Any) -> dict[str, str] | None:
     return None
 
 
-def _includes_payload(value: Any) -> list[str] | None:
+def _includes_payload(value: Any, *, field_name: str = "include") -> list[str] | None:
     if value is None:
         return None
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     if isinstance(value, (list, tuple)):
-        return [str(item) for item in value]
-    return None
+        items: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, (dict, list, tuple, set)):
+                raise ValueError(f"invalid_{field_name}")
+            text = str(item).strip()
+            if text:
+                items.append(text)
+        return items
+    raise ValueError(f"invalid_{field_name}")
 
 
 def _export_root(runtime_obj: ParseRuntime) -> Path:

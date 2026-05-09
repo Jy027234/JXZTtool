@@ -19,7 +19,7 @@ from .api_support import (
     _resolve_staged_upload_api_key,
 )
 from .bootstrap import build_runtime
-from .models import ParseJob, ParseOutcome, ParseRequest
+from .models import ParseJob, ParseJobState, ParseOutcome, ParseRequest
 from .runtime import ParseRuntime
 
 
@@ -31,6 +31,7 @@ def _resolve_api_version() -> str:
 
 
 API_VERSION = _resolve_api_version()
+_PART_JOB_KIND = "pdf_part"
 
 
 class BackgroundParseRunner:
@@ -96,9 +97,55 @@ class BackgroundParseRunner:
             self._submit_existing_job(job, allow_queue=True)
         return result
 
+    def rerun_pdf_parts(self, **kwargs) -> dict[str, object]:
+        result = self.runtime.rerun_pdf_parts(**kwargs)
+        for item in tuple(result.get("submitted", ())):
+            if isinstance(item, dict) and isinstance(item.get("job"), ParseJob):
+                self._submit_existing_job(item["job"], allow_queue=True)
+        result["submitted_job_ids"] = list(self.inflight)
+        result["queued_job_ids"] = list(self.queued_job_ids)
+        return result
+
+    def cancel_pdf_part(self, **kwargs) -> dict[str, object]:
+        target = self.runtime.latest_pdf_part_job(
+            doc_id=str(kwargs.get("doc_id") or ""),
+            part_id=str(kwargs.get("part_id") or ""),
+            tenant_id=kwargs.get("tenant_id"),
+        )
+        if isinstance(target, ParseJob):
+            with self._lock:
+                if target.job_id in self.inflight:
+                    return {
+                        "doc_id": kwargs.get("doc_id"),
+                        "tenant_id": kwargs.get("tenant_id") or target.tenant_id,
+                        "part_id": kwargs.get("part_id"),
+                        "cancelled": False,
+                        "job": target,
+                        "state": target.state.value,
+                        "message": "part is already running or completed",
+                    }
+                was_queued = target.job_id in self.queued_job_ids
+                if was_queued:
+                    self.queued_job_ids = [job_id for job_id in self.queued_job_ids if job_id != target.job_id]
+                result = self.runtime.cancel_pdf_part(**kwargs)
+                if was_queued and result.get("cancelled"):
+                    result["message"] = "cancelled"
+                return result
+        result = self.runtime.cancel_pdf_part(**kwargs)
+        job = result.get("job")
+        if isinstance(job, ParseJob):
+            with self._lock:
+                if job.job_id in self.queued_job_ids:
+                    self.queued_job_ids = [job_id for job_id in self.queued_job_ids if job_id != job.job_id]
+                    result["cancelled"] = True
+                    result["message"] = "cancelled"
+        return result
+
     def _submit_existing_job(self, job: ParseJob, *, allow_queue: bool = False) -> None:
         with self._lock:
-            if len(self.inflight) >= self.max_inflight_jobs:
+            if job.state != ParseJobState.PENDING:
+                return
+            if len(self.inflight) >= self.max_inflight_jobs or not self._can_start_job(job):
                 if allow_queue:
                     self.queued_job_ids.append(job.job_id)
                     return
@@ -111,10 +158,48 @@ class BackgroundParseRunner:
         with self._lock:
             self.inflight.pop(job_id, None)
             while self.queued_job_ids and len(self.inflight) < self.max_inflight_jobs:
-                next_job_id = self.queued_job_ids.pop(0)
+                next_index = self._next_startable_queued_index()
+                if next_index is None:
+                    break
+                next_job_id = self.queued_job_ids.pop(next_index)
                 future = self.executor.submit(self.runtime.execute, job_id=next_job_id)
                 self.inflight[next_job_id] = future
                 future.add_done_callback(lambda _future, queued_id=next_job_id: self._job_done(queued_id))
+
+    def _next_startable_queued_index(self) -> int | None:
+        for index, job_id in enumerate(self.queued_job_ids):
+            job = self.runtime.get_job(job_id=job_id)
+            if job is None:
+                continue
+            if job.state != ParseJobState.PENDING:
+                continue
+            if self._can_start_job(job):
+                return index
+        return None
+
+    def _can_start_job(self, job: ParseJob) -> bool:
+        if job.state != ParseJobState.PENDING:
+            return False
+        options = job.options or {}
+        if str(options.get("job_kind") or "") != _PART_JOB_KIND:
+            return True
+        limit = _part_active_limit(job)
+        if limit <= 0:
+            return True
+        source_doc_id = str(options.get("source_doc_id") or options.get("parent_doc_id") or "")
+        parent_job_id = str(options.get("parent_job_id") or "")
+        active = 0
+        for active_job_id in self.inflight:
+            active_job = self.runtime.get_job(job_id=active_job_id)
+            active_options = (active_job.options if active_job is not None else {}) or {}
+            if str(active_options.get("job_kind") or "") != _PART_JOB_KIND:
+                continue
+            if str(active_options.get("source_doc_id") or active_options.get("parent_doc_id") or "") != source_doc_id:
+                continue
+            if parent_job_id and str(active_options.get("parent_job_id") or "") != parent_job_id:
+                continue
+            active += 1
+        return active < limit
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=True)
@@ -141,6 +226,12 @@ class QueueSubmissionRunner:
 
     def rerun_pdf_part(self, **kwargs) -> dict[str, object]:
         return self.runtime.rerun_pdf_part(**kwargs)
+
+    def rerun_pdf_parts(self, **kwargs) -> dict[str, object]:
+        return self.runtime.rerun_pdf_parts(**kwargs)
+
+    def cancel_pdf_part(self, **kwargs) -> dict[str, object]:
+        return self.runtime.cancel_pdf_part(**kwargs)
 
     def shutdown(self) -> None:
         return None
@@ -196,3 +287,10 @@ def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
 
 def _health_service_details(runtime: ParseRuntime) -> dict[str, dict[str, object]]:
     return _base_health_service_details(runtime, ocr_probe=_is_ocr_service_available)
+
+
+def _part_active_limit(job: ParseJob) -> int:
+    try:
+        return max(0, int((job.options or {}).get("max_active_parts_per_doc") or 0))
+    except (TypeError, ValueError):
+        return 0

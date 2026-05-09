@@ -17,6 +17,11 @@ execution_mode = "inline"
 max_workers = 1
 poll_interval_ms = 500
 staged_upload_max_bytes = 104857600
+max_active_parts_per_doc = 3
+job_timeout_seconds = 120
+part_timeout_seconds = 30
+retry_backoff_seconds = 2.5
+retry_backoff_max_seconds = 45
 api_key_env = "PARSECORE_API_KEY"
 
 [storage]
@@ -91,6 +96,11 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.runtime.api_key_env, "PARSECORE_API_KEY")
         self.assertFalse(settings.runtime.allow_external_file_paths)
         self.assertEqual(settings.runtime.staged_upload_max_bytes, 104857600)
+        self.assertEqual(settings.runtime.max_active_parts_per_doc, 3)
+        self.assertEqual(settings.runtime.job_timeout_seconds, 120)
+        self.assertEqual(settings.runtime.part_timeout_seconds, 30)
+        self.assertEqual(settings.runtime.retry_backoff_seconds, 2.5)
+        self.assertEqual(settings.runtime.retry_backoff_max_seconds, 45)
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},

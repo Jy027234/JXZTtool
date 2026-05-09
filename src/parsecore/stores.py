@@ -199,6 +199,51 @@ class SQLiteJobStore(JobStore):
             return None
         return self._row_to_job(claimed)
 
+    def claim_job(self, *, job_id: str) -> ParseJob | None:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                """
+                UPDATE parse_jobs
+                SET state = ?, updated_at = ?
+                WHERE job_id = ? AND state = ?
+                """,
+                (ParseJobState.PARSING.value, now, job_id, ParseJobState.PENDING.value),
+            )
+            if updated.rowcount == 0:
+                return None
+            row = conn.execute(
+                """
+                SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
+                       state, created_at, updated_at, failure_reason,
+                       attempt_count, dead_lettered_at
+                FROM parse_jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_job(row)
+
+    def update_options(self, *, job_id: str, options: Mapping[str, Any]) -> ParseJob:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE parse_jobs
+                SET options_json = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (json.dumps(dict(options), ensure_ascii=False), now, job_id),
+            )
+        job = self.get_job(job_id=job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
+
     def get_job(self, *, job_id: str) -> ParseJob | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -876,6 +921,50 @@ class PostgresJobStore(JobStore):
         if claimed is None:
             return None
         return self._row_to_job(claimed)
+
+    def claim_job(self, *, job_id: str) -> ParseJob | None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE parse_jobs
+                SET state = %s, updated_at = %s
+                WHERE job_id = %s AND state = %s
+                """,
+                (ParseJobState.PARSING.value, now, job_id, ParseJobState.PENDING.value),
+            )
+            if cur.rowcount == 0:
+                return None
+            cur.execute(
+                """
+                SELECT job_id, doc_id, file_path, media_type, options_json,
+                      tenant_id, quota_key, quota_units,
+                       state, created_at, updated_at, failure_reason,
+                       attempt_count, dead_lettered_at
+                FROM parse_jobs WHERE job_id = %s
+                """,
+                (job_id,),
+            )
+            claimed = cur.fetchone()
+        if claimed is None:
+            return None
+        return self._row_to_job(claimed)
+
+    def update_options(self, *, job_id: str, options: Mapping[str, Any]) -> ParseJob:
+        now = _utc_now()
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE parse_jobs
+                SET options_json = %s, updated_at = %s
+                WHERE job_id = %s
+                """,
+                (json.dumps(dict(options), ensure_ascii=False), now, job_id),
+            )
+        job = self.get_job(job_id=job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
 
     def get_job(self, *, job_id: str) -> ParseJob | None:
         with self._connect() as conn, conn.cursor() as cur:

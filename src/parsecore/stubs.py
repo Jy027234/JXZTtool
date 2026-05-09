@@ -4,7 +4,7 @@ from dataclasses import asdict
 from dataclasses import replace
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 from uuid import uuid4
 
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
@@ -263,6 +263,20 @@ class InMemoryJobStore(JobStore):
             return None
         job = sorted(pending, key=lambda item: item.created_at)[0]
         job.state = ParseJobState.PARSING
+        job.updated_at = _utc_now()
+        return job
+
+    def claim_job(self, *, job_id: str) -> ParseJob | None:
+        job = self.jobs.get(job_id)
+        if job is None or job.state != ParseJobState.PENDING:
+            return None
+        job.state = ParseJobState.PARSING
+        job.updated_at = _utc_now()
+        return job
+
+    def update_options(self, *, job_id: str, options: Mapping[str, object]) -> ParseJob:
+        job = self.jobs[job_id]
+        job.options = dict(options)
         job.updated_at = _utc_now()
         return job
 

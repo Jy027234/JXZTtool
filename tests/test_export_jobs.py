@@ -13,7 +13,11 @@ from parsecore.export_jobs import create_export_package, export_file_path, load_
 class ExportPackageTests(unittest.TestCase):
     def test_creates_default_export_package(self) -> None:
         payload = {
+            "schema_version": "2026-06",
             "doc_id": "doc-001",
+            "tenant_id": "tenant-a",
+            "parse_run_id": "job-001",
+            "profile": "table-heavy",
             "tables": [{"table_id": "t1", "page_number": 1, "rows": 2}],
             "quality_signals": [{"code": "warn", "severity": "warning", "page_number": 1}],
             "parse_units": [{"parse_unit_id": "u1", "page_start": 1, "page_end": 2}],
@@ -23,7 +27,20 @@ class ExportPackageTests(unittest.TestCase):
             manifest = create_export_package(payload, tmp)
 
             self.assertEqual(manifest["doc_id"], "doc-001")
+            self.assertEqual(manifest["manifest_schema_version"], "2026-05")
+            self.assertEqual(manifest["tenant_id"], "tenant-a")
+            self.assertEqual(manifest["schema_version"], "2026-06")
+            self.assertEqual(manifest["parse_run_id"], "job-001")
+            self.assertEqual(manifest["profile"], "table-heavy")
             self.assertEqual(manifest["state"], "done")
+            self.assertEqual(
+                manifest["request"],
+                {
+                    "include": ["tables", "quality_signals", "parse_units"],
+                    "formats": {"tables": "csv", "quality_signals": "jsonl", "parse_units": "tsv"},
+                    "filters": {},
+                },
+            )
             self.assertTrue(manifest["export_id"].startswith("exp_"))
             self.assertEqual(
                 [(entry["dataset"], entry["format"], entry["path"]) for entry in manifest["files"]],
@@ -40,6 +57,7 @@ class ExportPackageTests(unittest.TestCase):
             for entry in manifest["files"]:
                 self.assertGreater(entry["bytes"], 0)
                 self.assertIn("content_type", entry)
+                self.assertEqual(entry["records"], 1)
 
     def test_filters_severity_and_page_range(self) -> None:
         payload = {
@@ -63,8 +81,12 @@ class ExportPackageTests(unittest.TestCase):
             manifest = create_export_package(
                 payload,
                 tmp,
+                includes=["tables", "quality_signals", "parse_units"],
+                formats={"tables": "csv", "quality_signals": "jsonl", "parse_units": "tsv"},
                 filters={"severity": ["warning"], "page_range": {"start": 2, "end": 3}},
             )
+            self.assertEqual(manifest["request"]["include"], ["tables", "quality_signals", "parse_units"])
+            self.assertEqual(manifest["request"]["filters"]["severity"], ["warning"])
 
             tables_content = export_file_path(tmp, manifest["export_id"], "tables.csv").read_text(encoding="utf-8")
             tables = list(csv.DictReader(io.StringIO(tables_content)))

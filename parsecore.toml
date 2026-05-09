@@ -7,6 +7,11 @@ execution_mode = "inline"
 max_workers = 2
 # 0 = auto(max_workers * 4), set explicit value to cap in-flight jobs
 max_inflight_jobs = 0
+max_active_parts_per_doc = 0
+job_timeout_seconds = 0
+part_timeout_seconds = 0
+retry_backoff_seconds = 1.0
+retry_backoff_max_seconds = 60.0
 poll_interval_ms = 500
 # Optional API ingress auth. When enabled, every HTTP endpoint except /health
 # requires x-api-key or Authorization: Bearer with the secret from this env var.

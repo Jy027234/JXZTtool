@@ -25,6 +25,11 @@ _RERUN_EMBEDDINGS_ONLY_MODE = "rerun_embeddings_only"
 _SEARCH_VECTOR_WEIGHT = 0.7
 _SEARCH_KEYWORD_WEIGHT = 0.3
 _SEARCH_METRICS_HISTORY_LIMIT = 5000
+_ACTIVE_PART_STATES = {
+    ParseJobState.PARSING,
+    ParseJobState.STRUCTURING,
+    ParseJobState.EMBEDDING,
+}
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
     "title": 1.35,
@@ -231,6 +236,26 @@ class EventAggregator:
                 )
 
         lines.extend([
+            "# HELP parse_job_retry_scheduled_total Total jobs scheduled for retry",
+            "# TYPE parse_job_retry_scheduled_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "job_retry_scheduled":
+                lines.append(
+                    f'parse_job_retry_scheduled_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
+            "# HELP parse_job_timeout_total Total jobs recovered after soft timeout",
+            "# TYPE parse_job_timeout_total counter",
+        ])
+        for (tenant_id, quota_key, event_type), count in self.counters.items():
+            if event_type == "job_timeout":
+                lines.append(
+                    f'parse_job_timeout_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
+                )
+
+        lines.extend([
             "# HELP parse_ringbuffer_size Current event ringbuffer size",
             "# TYPE parse_ringbuffer_size gauge",
             f"parse_ringbuffer_size {len(self.ringbuffer)}",
@@ -280,6 +305,12 @@ class ParseRuntime:
                 "poll_interval_ms": self.settings.runtime.poll_interval_ms,
                 "max_upload_bytes": self.settings.runtime.max_upload_bytes,
                 "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
+                "max_active_parts_per_doc": self.settings.runtime.max_active_parts_per_doc,
+                "max_attempts": self.settings.runtime.max_attempts,
+                "retry_backoff_seconds": self.settings.runtime.retry_backoff_seconds,
+                "retry_backoff_max_seconds": self.settings.runtime.retry_backoff_max_seconds,
+                "job_timeout_seconds": self.settings.runtime.job_timeout_seconds,
+                "part_timeout_seconds": self.settings.runtime.part_timeout_seconds,
                 "allow_external_file_paths": self.settings.runtime.allow_external_file_paths,
                 "staged_upload_max_bytes": self.settings.runtime.staged_upload_max_bytes,
                 "api_auth_enabled": bool(str(self.settings.runtime.api_key_env).strip()),
@@ -324,6 +355,8 @@ class ParseRuntime:
             raise RuntimeError(
                 f"job {job.job_id} is dead-lettered ({job.failure_reason!r}); refusing to execute"
             )
+        if job.state == ParseJobState.FAILED and str(job.failure_reason or "").strip().lower() == "cancelled":
+            raise RuntimeError(f"job {job.job_id} was cancelled; refusing to execute")
         attempt = self._increment_attempt(job_id=job.job_id)
         request = ParseRequest(
             doc_id=job.doc_id,
@@ -439,20 +472,74 @@ class ParseRuntime:
                     error=str(exc),
                 )
             else:
-                failed_job = self.job_store.update_state(
-                    job_id=job.job_id,
-                    state=ParseJobState.FAILED,
-                    failure_reason=str(exc),
-                )
-                self.event_logger.log(
-                    "failed",
-                    job_id=job.job_id,
-                    doc_id=job.doc_id,
-                    attempt=attempt,
-                    error=str(exc),
+                if self._should_retry_failed_job():
+                    failed_job = self._schedule_retry(job=job, attempt=attempt, error=exc)
+                else:
+                    failed_job = self.job_store.update_state(
+                        job_id=job.job_id,
+                        state=ParseJobState.FAILED,
+                        failure_reason=str(exc),
+                    )
+                    self.event_logger.log(
+                        "failed",
+                        job_id=job.job_id,
+                        doc_id=job.doc_id,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+            if _job_kind(job) == _PDF_PART_JOB_KIND:
+                self.refresh_partitioned_parent(
+                    doc_id=str(job.options.get("source_doc_id") or job.options.get("parent_doc_id") or ""),
+                    tenant_id=job.tenant_id,
+                    parent_job_id=str(job.options.get("parent_job_id") or ""),
                 )
             self.product_adapter.on_failure(request=request, job=failed_job, error=exc)
             raise
+
+    def _should_retry_failed_job(self) -> bool:
+        return str(self.settings.runtime.execution_mode).strip().lower() == "queue-worker"
+
+    def _schedule_retry(self, *, job, attempt: int, error: Exception):
+        delay = _retry_delay_seconds(
+            attempt,
+            base_seconds=self.settings.runtime.retry_backoff_seconds,
+            max_seconds=self.settings.runtime.retry_backoff_max_seconds,
+        )
+        next_attempt_at = _iso_after_seconds(delay)
+        options = dict(job.options or {})
+        options["next_attempt_at"] = next_attempt_at
+        options["retry_delay_s"] = delay
+        options["last_error"] = str(error)
+        update_options = getattr(self.job_store, "update_options", None)
+        if callable(update_options):
+            update_options(job_id=job.job_id, options=options)
+        retry_job = self.job_store.update_state(
+            job_id=job.job_id,
+            state=ParseJobState.PENDING,
+            failure_reason=f"retry_scheduled:{type(error).__name__}:{error}",
+        )
+        self.event_logger.log(
+            "retry",
+            job_id=job.job_id,
+            doc_id=job.doc_id,
+            attempt=attempt,
+            error=str(error),
+            retry_delay_s=delay,
+        )
+        self.event_aggregator.record_event(
+            "job_retry_scheduled",
+            tenant_id=job.tenant_id or "default",
+            quota_key=job.quota_key or "default",
+            doc_id=job.doc_id,
+            details={
+                "job_id": job.job_id,
+                "attempt": attempt,
+                "retry_delay_s": delay,
+                "next_attempt_at": next_attempt_at,
+                "error": str(error),
+            },
+        )
+        return retry_job
 
     def _increment_attempt(self, *, job_id: str) -> int:
         increment = getattr(self.job_store, "increment_attempt", None)
@@ -519,6 +606,7 @@ class ParseRuntime:
         tenant_id: str | None = None,
         target_pages_per_part: int | None = None,
         ocr_heavy_pages_per_part: int | None = None,
+        max_active_parts_per_doc: int | None = None,
         profile: str | None = None,
     ) -> dict[str, Any]:
         source_job = self._resolve_latest_non_partition_job(doc_id=doc_id, tenant_id=tenant_id)
@@ -547,6 +635,7 @@ class ParseRuntime:
                 "total_pages": total_pages,
                 "target_pages_per_part": target_pages_per_part,
                 "ocr_heavy_pages_per_part": ocr_heavy_pages_per_part,
+                "max_active_parts_per_doc": max_active_parts_per_doc,
                 "profile": effective_profile,
                 "part_specs": part_specs,
             }
@@ -572,6 +661,7 @@ class ParseRuntime:
                     parent_job=parent_job,
                     spec=spec,
                     profile=effective_profile,
+                    max_active_parts_per_doc=max_active_parts_per_doc,
                 )
             )
         parent_job = self.refresh_partitioned_parent(
@@ -616,6 +706,7 @@ class ParseRuntime:
             parent_job=parent_job,
             spec=matching[0],
             profile=str(profile or parent_job.options.get("profile") or source_job.options.get("profile") or "large-pdf"),
+            max_active_parts_per_doc=_safe_optional_int(parent_job.options.get("max_active_parts_per_doc")),
             rerun=True,
         )
         self.refresh_partitioned_parent(
@@ -629,6 +720,123 @@ class ParseRuntime:
             "part_id": part_id,
             "job": part_job,
         }
+
+    def rerun_pdf_parts(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        part_ids: Sequence[str] | None = None,
+        failed_only: bool = False,
+        state_filter: Sequence[str] | None = None,
+        profile: str | None = None,
+    ) -> dict[str, Any]:
+        parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        if parent_job is None:
+            raise LookupError(f"No partitioned parse job found for doc_id={doc_id!r}")
+        requested_part_ids = {str(part_id) for part_id in tuple(part_ids or ()) if str(part_id).strip()}
+        requested_states = {
+            str(state).strip().lower()
+            for state in tuple(state_filter or ())
+            if str(state).strip()
+        }
+        submitted: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for part in self.partition_parts_for_document(
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        ):
+            part_id = str(part.get("part_id") or "")
+            state = str(part.get("state") or "pending")
+            if requested_part_ids and part_id not in requested_part_ids:
+                skipped.append({"part_id": part_id, "state": state, "reason": "not_requested"})
+                continue
+            if failed_only and state not in {"failed", "cancelled"}:
+                skipped.append({"part_id": part_id, "state": state, "reason": "not_failed"})
+                continue
+            if requested_states and state not in requested_states:
+                skipped.append({"part_id": part_id, "state": state, "reason": "state_not_selected"})
+                continue
+            rerun = self.rerun_pdf_part(
+                doc_id=doc_id,
+                part_id=part_id,
+                tenant_id=parent_job.tenant_id,
+                profile=profile,
+            )
+            job = rerun["job"]
+            submitted.append({"part_id": part_id, "job": job})
+        return {
+            "doc_id": doc_id,
+            "tenant_id": parent_job.tenant_id,
+            "submitted": submitted,
+            "skipped": skipped,
+        }
+
+    def cancel_pdf_part(
+        self,
+        *,
+        doc_id: str,
+        part_id: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        if parent_job is None:
+            raise LookupError(f"No partitioned parse job found for doc_id={doc_id!r}")
+        child_job = None
+        for job in self._latest_pdf_part_jobs(
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        ):
+            if str((job.options or {}).get("part_id") or "") == str(part_id):
+                child_job = job
+                break
+        if child_job is None:
+            raise LookupError(f"No part found for part_id={part_id!r}")
+        cancellable_states = {ParseJobState.PENDING}
+        cancelled = False
+        job = child_job
+        if child_job.state in cancellable_states:
+            job = self.job_store.update_state(
+                job_id=child_job.job_id,
+                state=ParseJobState.FAILED,
+                failure_reason="cancelled",
+            )
+            cancelled = True
+            self.refresh_partitioned_parent(
+                doc_id=doc_id,
+                tenant_id=parent_job.tenant_id,
+                parent_job_id=parent_job.job_id,
+            )
+        return {
+            "doc_id": doc_id,
+            "tenant_id": parent_job.tenant_id,
+            "part_id": part_id,
+            "cancelled": cancelled,
+            "job": job,
+            "state": "cancelled" if cancelled else str(job.state.value),
+            "message": "cancelled" if cancelled else "part is already running or completed",
+        }
+
+    def latest_pdf_part_job(
+        self,
+        *,
+        doc_id: str,
+        part_id: str,
+        tenant_id: str | None = None,
+    ):
+        parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        if parent_job is None:
+            return None
+        for job in self._latest_pdf_part_jobs(
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        ):
+            if str((job.options or {}).get("part_id") or "") == str(part_id):
+                return job
+        return None
 
     def partition_parts_for_document(
         self,
@@ -669,6 +877,10 @@ class ParseRuntime:
                     for block in self.job_store.get_blocks(doc_id=child.doc_id, tenant_id=child.tenant_id)
                     if str(getattr(getattr(block, "type", None), "value", getattr(block, "type", ""))) == "table"
                 )
+            state = str((child.state.value if child is not None else spec.get("state")) or "pending")
+            failure_reason = getattr(child, "failure_reason", None) if child is not None else None
+            if state == ParseJobState.FAILED.value and str(failure_reason or "").strip().lower() == "cancelled":
+                state = "cancelled"
             parts.append(
                 {
                     "parse_unit_id": part_id,
@@ -680,14 +892,14 @@ class ParseRuntime:
                     "page_start": page_start,
                     "page_end": page_end,
                     "page_count": _safe_int_runtime(spec.get("page_count"), default=max(1, page_end - page_start + 1)),
-                    "state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
+                    "state": state,
                     "raw_state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
                     "job_id": child.job_id if child is not None else None,
                     "attempts": int(getattr(child, "attempt_count", 0) or 0) if child is not None else 0,
                     "table_count": table_count,
                     "quality_signal_count": 0,
                     "rerun_supported": True,
-                    "last_error": getattr(child, "failure_reason", None) if child is not None else None,
+                    "last_error": failure_reason,
                 }
             )
         return parts
@@ -748,6 +960,7 @@ class ParseRuntime:
         parent_job: Any,
         spec: dict[str, Any],
         profile: str,
+        max_active_parts_per_doc: int | None = None,
         rerun: bool = False,
     ):
         part_id = str(spec.get("part_id") or child_doc_id(parent_job.doc_id, spec.get("part_index") or 1))
@@ -778,6 +991,7 @@ class ParseRuntime:
                 "page_end": page_end,
                 "page_count": max(1, page_end - page_start + 1),
                 "page_offset": page_start - 1,
+                "max_active_parts_per_doc": max_active_parts_per_doc,
                 "profile": profile,
                 "rerun": bool(rerun),
             }
@@ -1581,6 +1795,8 @@ class ParseRuntime:
                 "failed_jobs": 0,
                 "active_jobs": 0,
                 "failure_rate": 0.0,
+                "retry_pending_jobs": 0,
+                "part_jobs": _part_job_metrics(()),
                 "durations_s": {
                     "count": 0,
                     "mean": 0.0,
@@ -1603,6 +1819,7 @@ class ParseRuntime:
         duration_stats = _duration_summary(durations)
         total_terminal = len(done_jobs) + len(failed_jobs)
         failure_rate = round((len(failed_jobs) / total_terminal), 4) if total_terminal > 0 else 0.0
+        retry_pending_jobs = len([job for job in jobs if job.state == ParseJobState.PENDING and _next_attempt_at(job)])
 
         return {
             "tenant_id": (tenant_id or "").strip() or None,
@@ -1613,6 +1830,8 @@ class ParseRuntime:
             "failed_jobs": len(failed_jobs),
             "active_jobs": len(active_jobs),
             "failure_rate": failure_rate,
+            "retry_pending_jobs": retry_pending_jobs,
+            "part_jobs": _part_job_metrics(jobs),
             "durations_s": duration_stats,
         }
 
@@ -1665,7 +1884,87 @@ class ParseRuntime:
         }
 
     def claim_next_job(self):
-        return self.job_store.claim_next_job()
+        claim_job = getattr(self.job_store, "claim_job", None)
+        if not callable(claim_job):
+            return self.job_store.claim_next_job()
+
+        self.recover_timed_out_jobs()
+        jobs = tuple(self.list_jobs())
+        active_counts = _active_part_counts(jobs)
+        now = datetime.now(timezone.utc)
+        pending_jobs = sorted(
+            (
+                job
+                for job in jobs
+                if job.state == ParseJobState.PENDING and _job_ready_for_attempt(job, now=now)
+            ),
+            key=lambda item: item.created_at,
+        )
+        for candidate in pending_jobs:
+            if not _part_claim_allowed(candidate, active_counts):
+                continue
+            claimed = claim_job(job_id=candidate.job_id)
+            if claimed is None:
+                continue
+            if _part_claim_over_limit(claimed, tuple(self.list_jobs())):
+                self.job_store.update_state(job_id=claimed.job_id, state=ParseJobState.PENDING)
+                continue
+            return claimed
+        return None
+
+    def recover_timed_out_jobs(self) -> dict[str, Any]:
+        timed_out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        for job in self.list_jobs():
+            if _job_kind(job) == _PDF_PARENT_JOB_KIND or job.state not in _ACTIVE_PART_STATES:
+                continue
+            timeout_seconds = _timeout_seconds_for_job(job, self.settings.runtime)
+            if timeout_seconds <= 0 or not _job_exceeded_timeout(job, now=now, timeout_seconds=timeout_seconds):
+                continue
+            attempt = int(job.attempt_count or 0)
+            if attempt <= 0:
+                attempt = self._increment_attempt(job_id=job.job_id)
+            error = TimeoutError(f"job_timeout:{timeout_seconds}s")
+            if attempt >= max(1, int(self.settings.runtime.max_attempts)):
+                dead_letter = getattr(self.job_store, "mark_dead_letter", None)
+                if callable(dead_letter):
+                    updated = dead_letter(job_id=job.job_id, reason=str(error))
+                else:
+                    updated = self.job_store.update_state(
+                        job_id=job.job_id,
+                        state=ParseJobState.FAILED,
+                        failure_reason=str(error),
+                    )
+            else:
+                updated = self._schedule_retry(job=job, attempt=attempt, error=error)
+            self.event_aggregator.record_event(
+                "job_timeout",
+                tenant_id=job.tenant_id or "default",
+                quota_key=job.quota_key or "default",
+                doc_id=job.doc_id,
+                details={
+                    "job_id": job.job_id,
+                    "attempt": attempt,
+                    "timeout_seconds": timeout_seconds,
+                    "state": getattr(updated.state, "value", str(updated.state)),
+                },
+            )
+            if _job_kind(job) == _PDF_PART_JOB_KIND:
+                self.refresh_partitioned_parent(
+                    doc_id=str(job.options.get("source_doc_id") or job.options.get("parent_doc_id") or ""),
+                    tenant_id=job.tenant_id,
+                    parent_job_id=str(job.options.get("parent_job_id") or ""),
+                )
+            timed_out.append(
+                {
+                    "job_id": job.job_id,
+                    "doc_id": job.doc_id,
+                    "attempt": attempt,
+                    "timeout_seconds": timeout_seconds,
+                    "state": getattr(updated.state, "value", str(updated.state)),
+                }
+            )
+        return {"timed_out": timed_out}
 
     def _resolve_latest_job(self, *, doc_id: str, tenant_id: str | None = None):
         jobs = self.list_jobs(doc_id=doc_id, tenant_id=tenant_id)
@@ -2090,6 +2389,159 @@ def _percentile(sorted_values: Sequence[float], ratio: float) -> float:
     return float(sorted_values[index])
 
 
+def _part_job_metrics(jobs: Sequence[Any]) -> dict[str, Any]:
+    part_jobs = [job for job in jobs if _job_kind(job) == _PDF_PART_JOB_KIND]
+    active_jobs = [job for job in part_jobs if _job_state(job) in _ACTIVE_PART_STATES]
+    queued_jobs = [job for job in part_jobs if _job_state(job) == ParseJobState.PENDING]
+    cancelled_jobs = [
+        job
+        for job in part_jobs
+        if _job_state(job) == ParseJobState.FAILED
+        and str(getattr(job, "failure_reason", "") or "").strip().lower() == "cancelled"
+    ]
+    failed_jobs = [job for job in part_jobs if _job_state(job) == ParseJobState.FAILED and job not in cancelled_jobs]
+    durations = [duration for duration in (_job_duration_seconds(job) for job in part_jobs if _job_state(job) == ParseJobState.DONE) if duration is not None]
+    return {
+        "parts_total": len(part_jobs),
+        "parts_done": len([job for job in part_jobs if _job_state(job) == ParseJobState.DONE]),
+        "parts_failed": len(failed_jobs),
+        "parts_active": len(active_jobs),
+        "parts_queued": len(queued_jobs),
+        "parts_cancelled": len(cancelled_jobs),
+        "parts_retry_pending": len([job for job in queued_jobs if _next_attempt_at(job)]),
+        "part_elapsed_s": _duration_summary(durations),
+    }
+
+
+def _job_ready_for_attempt(job: Any, *, now: datetime) -> bool:
+    next_attempt_at = _next_attempt_at(job)
+    if next_attempt_at is None:
+        return True
+    return next_attempt_at <= now
+
+
+def _next_attempt_at(job: Any) -> datetime | None:
+    options = getattr(job, "options", {}) or {}
+    if not isinstance(options, dict):
+        return None
+    return _parse_iso_datetime(options.get("next_attempt_at"))
+
+
+def _retry_delay_seconds(attempt: int, *, base_seconds: float, max_seconds: float) -> float:
+    base = max(0.0, float(base_seconds))
+    cap = max(base, float(max_seconds))
+    if base <= 0:
+        return 0.0
+    delay = base * (2 ** max(0, int(attempt) - 1))
+    return round(min(delay, cap), 3)
+
+
+def _iso_after_seconds(delay_seconds: float) -> str:
+    target = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(delay_seconds)))
+    return target.isoformat()
+
+
+def _timeout_seconds_for_job(job: Any, runtime_settings: Any) -> int:
+    if _job_kind(job) == _PDF_PART_JOB_KIND:
+        part_timeout = int(getattr(runtime_settings, "part_timeout_seconds", 0) or 0)
+        if part_timeout > 0:
+            return part_timeout
+    return int(getattr(runtime_settings, "job_timeout_seconds", 0) or 0)
+
+
+def _job_exceeded_timeout(job: Any, *, now: datetime, timeout_seconds: int) -> bool:
+    updated_at = _parse_iso_datetime(getattr(job, "updated_at", None))
+    if updated_at is None:
+        return False
+    return (now - updated_at).total_seconds() >= max(1, int(timeout_seconds))
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _active_part_counts(jobs: Sequence[Any]) -> dict[tuple[str, str, str], int]:
+    counts: dict[tuple[str, str, str], int] = {}
+    for job in jobs:
+        if _job_kind(job) != _PDF_PART_JOB_KIND or _job_state(job) not in _ACTIVE_PART_STATES:
+            continue
+        key = _part_limit_key(job)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _part_claim_allowed(job: Any, active_counts: Mapping[tuple[str, str, str], int]) -> bool:
+    if _job_kind(job) != _PDF_PART_JOB_KIND:
+        return True
+    limit = _part_active_limit(job)
+    if limit <= 0:
+        return True
+    return int(active_counts.get(_part_limit_key(job), 0)) < limit
+
+
+def _part_claim_over_limit(job: Any, jobs: Sequence[Any]) -> bool:
+    if _job_kind(job) != _PDF_PART_JOB_KIND:
+        return False
+    limit = _part_active_limit(job)
+    if limit <= 0:
+        return False
+    key = _part_limit_key(job)
+    active_jobs = sorted(
+        (
+            item
+            for item in jobs
+            if _job_kind(item) == _PDF_PART_JOB_KIND
+            and _job_state(item) in _ACTIVE_PART_STATES
+            and _part_limit_key(item) == key
+        ),
+        key=lambda item: item.created_at,
+    )
+    allowed_ids = {item.job_id for item in active_jobs[:limit]}
+    return getattr(job, "job_id", None) not in allowed_ids
+
+
+def _part_active_limit(job: Any) -> int:
+    options = getattr(job, "options", {}) or {}
+    if not isinstance(options, dict):
+        return 0
+    try:
+        return max(0, int(options.get("max_active_parts_per_doc") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _part_limit_key(job: Any) -> tuple[str, str, str]:
+    options = getattr(job, "options", {}) or {}
+    if not isinstance(options, dict):
+        options = {}
+    tenant_id = str(getattr(job, "tenant_id", None) or "default")
+    source_doc_id = str(options.get("source_doc_id") or getattr(job, "doc_id", "") or "")
+    parent_job_id = str(options.get("parent_job_id") or "")
+    return (tenant_id, source_doc_id, parent_job_id)
+
+
+def _job_state(job: Any) -> ParseJobState | None:
+    state = getattr(job, "state", None)
+    if isinstance(state, ParseJobState):
+        return state
+    value = getattr(state, "value", state)
+    try:
+        return ParseJobState(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _job_kind(job: Any) -> str:
     options = getattr(job, "options", {}) or {}
     if not isinstance(options, dict):
@@ -2124,6 +2576,15 @@ def _safe_int_runtime(value: Any, *, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_path_segment(value: Any) -> str:

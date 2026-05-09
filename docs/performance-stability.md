@@ -162,15 +162,16 @@ PARSECORE_PERF_HISTORY_DIR=/var/lib/parsecore/perf-history
 4. `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`：只重跑指定页段，其他 part 结果保留。
 5. 普通文本型 PDF 建议 100-300 页/part；OCR 密集样本建议 20-50 页/part。
 
-仍需增强的生产能力：
+已落地的生产增强能力：
 
-- 单文档 active parts 限流和取消。
-- part timeout、批量 failed-only rerun 和指数退避。
+- 单文档 active parts 限流，配置口径为 `runtime.max_active_parts_per_doc`，生产建议先设 `2-4`。
+- 尚未运行 part 取消，接口口径为 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`。
+- queue-worker 失败指数退避、job/part 软 timeout，以及批量 failed-only rerun。
 - 只对变更 part 的 chunks 重建 embedding/index layer，避免 17000 页复跑时全量 re-embed。
 
 性能验收建议新增三组指标：
 
-- 调度指标：`parts_total / parts_done / parts_failed / active_parts / partial_available_at_s`。
+- 调度指标：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / partial_available_at_s`。
 - 长尾指标：`part_elapsed_p50/p90/p99`、最慢 part 页段、part timeout 次数。
 - 合并指标：manifest 刷新耗时、增量 chunks 数、增量 embedding 耗时。
 
@@ -180,9 +181,10 @@ PARSECORE_PERF_HISTORY_DIR=/var/lib/parsecore/perf-history
 GET  /v1/parse/documents/{doc_id}/parts
 POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun
 POST /v1/parse/documents/{doc_id}/parts/rerun
+POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
 ```
 
-当前已落地 `GET /v1/parse/documents/{doc_id}/parts` 和 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`。复跑触发条件建议先来自 `quality_signals`，例如 `ocr_failed_page / truncated_table / low_text_density`。后续应继续支持按 signal 批量复跑，并优先只调整该 part 的 profile 或 OCR 策略，不默认对整份 PDF 开多引擎。
+本轮生产增强接口中，批量复跑请求支持 `part_ids`、`failed_only`、`state`、`profile`。取消只保证尚未运行的 part：运行中的 part 不强杀，会返回当前状态。复跑触发条件建议先来自 `quality_signals`，例如 `ocr_failed_page / truncated_table / low_text_density`。后续应继续支持按 signal 批量复跑，并优先只调整该 part 的 profile 或 OCR 策略，不默认对整份 PDF 开多引擎。
 
 ## 导出与排查包
 
@@ -217,7 +219,7 @@ GET /v1/parse/documents/{doc_id}/parts
 GET /v1/parse/documents/{doc_id}/parts?state=warning|failed
 ```
 
-它会把 `parse_units + quality_signals` 合并成 `part_id / page_range / state / quality_signal_codes / severity_counts`，并通过 `rerun_supported=false` 明确当前仍未支持 part 级执行复跑。
+它会把 `parse_units + quality_signals` 合并成 `part_id / page_range / state / quality_signal_codes / severity_counts`。已由 PDF 页段调度产生的 part 会返回 `rerun_supported=true` 和 `job_id`，可通过单 part 或批量复跑接口做小范围恢复；非页段化文档仍会保持 `rerun_supported=false`。
 
 ## 监控与告警口径
 
@@ -237,7 +239,19 @@ GET /v1/parse/documents/{doc_id}/parts?state=warning|failed
 - `parse_ocr_attempt_total`
 - `parse_ocr_fallback_total`
 - `parse_ocr_failed_total`
+- `parse_job_retry_scheduled_total`
+- `parse_job_timeout_total`
 - `parse_ringbuffer_size`
+
+本轮生产增强指标建议为 part 调度补充：
+
+- `parts_total`
+- `parts_done`
+- `parts_failed`
+- `parts_active`
+- `parts_queued`
+- `parts_cancelled`
+- `parts_retry_pending`
 
 建议默认告警规则：
 

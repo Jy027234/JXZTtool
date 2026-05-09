@@ -118,6 +118,8 @@ class TestEventAggregator(unittest.TestCase):
         self.assertIn("# HELP parse_ocr_fallback_total", prometheus)
         self.assertIn("# HELP parse_ocr_failed_total", prometheus)
         self.assertIn("# HELP parse_ocr_rejected_total", prometheus)
+        self.assertIn("# HELP parse_job_retry_scheduled_total", prometheus)
+        self.assertIn("# HELP parse_job_timeout_total", prometheus)
         self.assertIn("parse_ringbuffer_size", prometheus)  # gauge type
         
         # Verify it contains metric lines with correct labels and values

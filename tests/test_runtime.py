@@ -41,6 +41,39 @@ extensions = [".docx"]
 """.strip()
 
 
+QUEUE_RETRY_CONFIG = """
+[project]
+name = "test-parsecore"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "queue-worker"
+max_attempts = 2
+retry_backoff_seconds = 0
+retry_backoff_max_seconds = 0
+job_timeout_seconds = 1
+
+[storage]
+database_url = "memory://"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+""".strip()
+
+
 PDF_SAMPLE_CONFIG = """
 [project]
 name = "test-parsecore"
@@ -644,6 +677,66 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertIn("durations_s", metrics)
         self.assertGreaterEqual(metrics["durations_s"]["count"], 1)
         self.assertGreaterEqual(metrics["durations_s"]["p99"], metrics["durations_s"]["p50"])
+
+    def test_queue_worker_failure_is_requeued_until_dead_letter(self) -> None:
+        with TemporaryWorkspace(QUEUE_RETRY_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-retry",
+                    file_path=str(workspace.root / "missing.docx"),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+
+            claimed = runtime.claim_next_job()
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            with self.assertRaises(Exception):
+                runtime.execute(job_id=claimed.job_id)
+
+            retry_job = runtime.get_job(job_id=job.job_id)
+            assert retry_job is not None
+            self.assertEqual(retry_job.state, ParseJobState.PENDING)
+            self.assertEqual(retry_job.attempt_count, 1)
+            self.assertIn("retry_scheduled", retry_job.failure_reason or "")
+            self.assertIn("next_attempt_at", retry_job.options)
+
+            claimed_again = runtime.claim_next_job()
+            self.assertIsNotNone(claimed_again)
+            assert claimed_again is not None
+            with self.assertRaises(Exception):
+                runtime.execute(job_id=claimed_again.job_id)
+
+            dead = runtime.get_job(job_id=job.job_id)
+            assert dead is not None
+            self.assertEqual(dead.state, ParseJobState.FAILED)
+            self.assertEqual(dead.attempt_count, 2)
+            self.assertIsNotNone(dead.dead_lettered_at)
+
+    def test_recover_timed_out_jobs_requeues_active_job(self) -> None:
+        with TemporaryWorkspace(QUEUE_RETRY_CONFIG) as workspace:
+            document_path = workspace.create_docx("timeout.docx", ["timeout"])
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-timeout",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            claimed = runtime.claim_next_job()
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            runtime.job_store.jobs[job.job_id].updated_at = "2000-01-01T00:00:00+00:00"
+
+            recovered = runtime.recover_timed_out_jobs()
+
+            self.assertEqual([item["job_id"] for item in recovered["timed_out"]], [job.job_id])
+            requeued = runtime.get_job(job_id=job.job_id)
+            assert requeued is not None
+            self.assertEqual(requeued.state, ParseJobState.PENDING)
+            self.assertIn("job_timeout", requeued.failure_reason or "")
 
     def test_tenant_dashboard_aggregates_usage_metrics_and_recent_jobs(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1441,3 +1534,61 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(part_two["state"], "done")
             self.assertEqual(part_two["attempts"], 1)
             self.assertNotEqual(part_two["job_id"], planned["part_jobs"][1].job_id)
+
+    def test_batch_rerun_defaults_to_failed_parts_only(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("batch-rerun.pdf", [["one"], ["two"], ["three"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-batch-rerun",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-batch-rerun", target_pages_per_part=1)
+            runtime.execute(job_id=planned["part_jobs"][0].job_id)
+            runtime.execute(job_id=planned["part_jobs"][1].job_id)
+            runtime.job_store.update_state(
+                job_id=planned["part_jobs"][2].job_id,
+                state=ParseJobState.FAILED,
+                failure_reason="simulated failure",
+            )
+
+            rerun = runtime.rerun_pdf_parts(doc_id="doc-batch-rerun", failed_only=True)
+
+            self.assertEqual([item["part_id"] for item in rerun["submitted"]], ["doc-batch-rerun-part-3"])
+            self.assertEqual(len(rerun["skipped"]), 2)
+            self.assertTrue(all(item["reason"] == "not_failed" for item in rerun["skipped"]))
+
+    def test_cancel_pdf_part_marks_pending_child_as_cancelled(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("cancel-part.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-cancel-part",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            runtime.start_pdf_part_jobs(doc_id="doc-cancel-part", target_pages_per_part=1)
+
+            cancelled = runtime.cancel_pdf_part(
+                doc_id="doc-cancel-part",
+                part_id="doc-cancel-part-part-2",
+            )
+
+            self.assertTrue(cancelled["cancelled"])
+            self.assertEqual(cancelled["state"], "cancelled")
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                runtime.execute(job_id=cancelled["job"].job_id)
+            parts = runtime.partition_parts_for_document(doc_id="doc-cancel-part")
+            part_two = next(part for part in parts if part["part_id"] == "doc-cancel-part-part-2")
+            self.assertEqual(part_two["state"], "cancelled")
+            self.assertEqual(part_two["last_error"], "cancelled")
+            metrics = runtime.runtime_metrics(sample_size=50)
+            self.assertGreaterEqual(metrics["part_jobs"]["parts_total"], 2)
+            self.assertEqual(metrics["part_jobs"]["parts_cancelled"], 1)

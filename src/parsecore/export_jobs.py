@@ -31,15 +31,27 @@ def create_export_package(
     package_dir.mkdir(parents=True, exist_ok=False)
 
     filtered_payload = _filtered_payload(payload, filters or {})
+    requested_specs = _export_specs(includes=includes, formats=formats)
     manifest: dict[str, Any] = {
+        "manifest_schema_version": "2026-05",
         "export_id": export_id,
         "doc_id": payload.get("doc_id"),
+        "tenant_id": payload.get("tenant_id"),
+        "schema_version": payload.get("schema_version"),
+        "parse_run_id": payload.get("parse_run_id"),
+        "profile": payload.get("profile"),
+        "profile_resolution": payload.get("profile_resolution"),
         "state": "done",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "request": {
+            "include": [dataset for dataset, _format in requested_specs],
+            "formats": {dataset: format_name for dataset, format_name in requested_specs},
+            "filters": filters or {},
+        },
         "files": [],
     }
 
-    for dataset, format_name in _export_specs(includes=includes, formats=formats):
+    for dataset, format_name in requested_specs:
         exported = export_structured_projection(
             filtered_payload,
             dataset=dataset,
@@ -60,6 +72,7 @@ def create_export_package(
                 "path": filename,
                 "content_type": exported["content_type"],
                 "bytes": len(content),
+                "records": _record_count(filtered_payload.get(dataset)),
             }
         )
 
@@ -175,6 +188,10 @@ def _row_overlaps_page_range(row: dict[str, Any], page_range: tuple[int, int]) -
     if page_end is None:
         page_end = page_start
     return int(page_start) <= range_end and int(page_end) >= range_start
+
+
+def _record_count(rows: Any) -> int:
+    return len(rows) if isinstance(rows, list) else 0
 
 
 __all__ = ["create_export_package", "load_export_manifest", "export_file_path"]

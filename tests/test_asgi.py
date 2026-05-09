@@ -9,8 +9,9 @@ import unittest
 
 from starlette.testclient import TestClient
 
-from parsecore.asgi import _project_pages, create_app
-from parsecore.models import Block, BlockType, ParseJobState
+from parsecore.asgi import BackgroundParseRunner, _project_pages, create_app
+from parsecore.bootstrap import build_runtime
+from parsecore.models import Block, BlockType, ParseJobState, ParseRequest
 from parsecore.stubs import FakeEmbeddingProvider
 from tests.support import TemporaryWorkspace, build_docx_table
 from unittest.mock import patch
@@ -438,6 +439,86 @@ extensions = [".docx"]
 
 
 class ParseApiTests(unittest.TestCase):
+    def test_background_runner_respects_part_active_limit(self) -> None:
+        with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            runner = BackgroundParseRunner(runtime, max_workers=1, max_inflight_jobs=10)
+            try:
+                first = runtime.start(
+                    ParseRequest(
+                        doc_id="doc-runner-part-1",
+                        file_path="first.pdf",
+                        media_type="application/pdf",
+                        options={
+                            "job_kind": "pdf_part",
+                            "source_doc_id": "doc-runner",
+                            "parent_job_id": "parent-job",
+                            "part_id": "part-1",
+                            "max_active_parts_per_doc": 1,
+                        },
+                    )
+                )
+                second = runtime.start(
+                    ParseRequest(
+                        doc_id="doc-runner-part-2",
+                        file_path="second.pdf",
+                        media_type="application/pdf",
+                        options={
+                            "job_kind": "pdf_part",
+                            "source_doc_id": "doc-runner",
+                            "parent_job_id": "parent-job",
+                            "part_id": "part-2",
+                            "max_active_parts_per_doc": 1,
+                        },
+                    )
+                )
+                runner.inflight[first.job_id] = Future()
+
+                self.assertFalse(runner._can_start_job(second))
+                runner._submit_existing_job(second, allow_queue=True)
+                self.assertEqual(runner.queued_job_ids, [second.job_id])
+            finally:
+                runner.shutdown()
+
+    def test_background_runner_cancel_removes_queued_part(self) -> None:
+        with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
+            document_path = workspace.create_pdf("runner-cancel.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-runner-cancel",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(
+                doc_id="doc-runner-cancel",
+                target_pages_per_part=1,
+                max_active_parts_per_doc=1,
+            )
+            first, second = planned["part_jobs"]
+            runner = BackgroundParseRunner(runtime, max_workers=1, max_inflight_jobs=1)
+            try:
+                runner.inflight[first.job_id] = Future()
+                runner._submit_existing_job(second, allow_queue=True)
+                self.assertEqual(runner.queued_job_ids, [second.job_id])
+
+                result = runner.cancel_pdf_part(
+                    doc_id="doc-runner-cancel",
+                    part_id=second.options["part_id"],
+                    tenant_id=second.tenant_id,
+                )
+
+                self.assertTrue(result["cancelled"])
+                self.assertEqual(runner.queued_job_ids, [])
+                runner._job_done(first.job_id)
+                self.assertNotIn(second.job_id, runner.inflight)
+                with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                    runtime.execute(job_id=second.job_id)
+            finally:
+                runner.shutdown()
+
     def test_upload_bridge_stages_file_for_later_job_submission(self) -> None:
         with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
             app = create_app(workspace.config_path)
@@ -1220,7 +1301,7 @@ class ParseApiTests(unittest.TestCase):
 
                 invalid_part_filter = client.get(
                     "/v1/parse/documents/doc-table-v2/parts",
-                    params={"state": "cancelled"},
+                    params={"state": "bogus"},
                 )
                 self.assertEqual(invalid_part_filter.status_code, 400)
                 self.assertEqual(invalid_part_filter.json()["code"], "invalid_part_state")
@@ -1270,6 +1351,11 @@ class ParseApiTests(unittest.TestCase):
                 export_manifest = client.get(f"/v1/parse/export-jobs/{export_payload['export_id']}")
                 self.assertEqual(export_manifest.status_code, 200)
                 self.assertEqual(export_manifest.json()["export_id"], export_payload["export_id"])
+                self.assertEqual(export_manifest.json()["manifest_schema_version"], "2026-05")
+                self.assertEqual(export_manifest.json()["tenant_id"], "default")
+                self.assertEqual(export_manifest.json()["request"]["include"], ["tables", "quality_signals"])
+                self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
+                self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
 
                 export_download = client.get(
                     f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
@@ -1375,6 +1461,69 @@ class ParseApiTests(unittest.TestCase):
                 )
                 self.assertEqual(invalid.status_code, 400)
                 self.assertEqual(invalid.json()["code"], "invalid_projection")
+
+    def test_pdf_parts_batch_rerun_and_cancel_pending_part(self) -> None:
+        queue_config = PDF_API_CONFIG.replace('execution_mode = "inline"', 'execution_mode = "queue-worker"')
+        with TemporaryWorkspace(queue_config) as workspace:
+            document_path = workspace.create_pdf("partitioned-api-queue.pdf", [["one"], ["two"], ["three"]])
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-pdf-api-control",
+                        "file_path": str(document_path),
+                        "media_type": "application/pdf",
+                        "profile": "large-pdf",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+
+                planned = client.post(
+                    "/v1/parse/documents/doc-pdf-api-control/parts/plan",
+                    json={"target_pages_per_part": 1, "max_active_parts_per_doc": 1},
+                )
+                self.assertEqual(planned.status_code, 202)
+                self.assertEqual(len(planned.json()["part_jobs"]), 3)
+
+                cancelled = client.post(
+                    "/v1/parse/documents/doc-pdf-api-control/parts/doc-pdf-api-control-part-2/cancel"
+                )
+                self.assertEqual(cancelled.status_code, 202)
+                self.assertTrue(cancelled.json()["cancelled"])
+                self.assertEqual(cancelled.json()["state"], "cancelled")
+
+                parts = client.get(
+                    "/v1/parse/documents/doc-pdf-api-control/parts",
+                    params={"state": "cancelled"},
+                )
+                self.assertEqual(parts.status_code, 200)
+                self.assertEqual(parts.json()["part_summary"]["filtered"], 1)
+                self.assertEqual(parts.json()["parts"][0]["last_error"], "cancelled")
+
+                malformed = client.post(
+                    "/v1/parse/documents/doc-pdf-api-control/parts/rerun",
+                    json={"part_ids": {}, "failed_only": False},
+                )
+                self.assertEqual(malformed.status_code, 400)
+                self.assertEqual(malformed.json()["code"], "invalid_part_ids")
+
+                no_failed = client.post(
+                    "/v1/parse/documents/doc-pdf-api-control/parts/rerun",
+                    json={"part_ids": ["doc-pdf-api-control-part-1"]},
+                )
+                self.assertEqual(no_failed.status_code, 409)
+                self.assertEqual(no_failed.json()["submitted"], [])
+
+                rerun = client.post(
+                    "/v1/parse/documents/doc-pdf-api-control/parts/rerun",
+                    json={"failed_only": True},
+                )
+                self.assertEqual(rerun.status_code, 202)
+                self.assertEqual(
+                    [item["part_id"] for item in rerun.json()["submitted"]],
+                    ["doc-pdf-api-control-part-2"],
+                )
 
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

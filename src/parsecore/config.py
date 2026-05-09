@@ -25,6 +25,7 @@ class RuntimeSettings:
     poll_interval_ms: int
     max_upload_bytes: int = 0
     max_inflight_jobs: int = 0
+    max_active_parts_per_doc: int = 0
     allow_external_file_paths: bool = False
     staged_upload_max_bytes: int = 0
     staged_upload_retention_seconds: int = 86400
@@ -33,6 +34,10 @@ class RuntimeSettings:
     quota_default_limit_units: int = 0
     quota_limits: Mapping[str, int] = field(default_factory=lambda: _EMPTY_MAPPING)
     max_attempts: int = 3
+    retry_backoff_seconds: float = 1.0
+    retry_backoff_max_seconds: float = 60.0
+    job_timeout_seconds: int = 0
+    part_timeout_seconds: int = 0
     log_path: str = "var/logs/job_events.jsonl"
     api_key_env: str = ""
     staged_upload_api_key_env: str = ""
@@ -212,6 +217,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             poll_interval_ms=int(runtime.get("poll_interval_ms", 1000)),
             max_upload_bytes=int(runtime.get("max_upload_bytes", 0)),
             max_inflight_jobs=int(runtime.get("max_inflight_jobs", 0)),
+            max_active_parts_per_doc=int(runtime.get("max_active_parts_per_doc", 0)),
             allow_external_file_paths=bool(runtime.get("allow_external_file_paths", False)),
             staged_upload_max_bytes=int(runtime.get("staged_upload_max_bytes", 0)),
             staged_upload_retention_seconds=int(runtime.get("staged_upload_retention_seconds", 86400)),
@@ -220,6 +226,10 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             quota_default_limit_units=int(runtime.get("quota_default_limit_units", 0)),
             quota_limits=_freeze_int_mapping(runtime.get("quota_limits")),
             max_attempts=int(runtime.get("max_attempts", 3)),
+            retry_backoff_seconds=float(runtime.get("retry_backoff_seconds", 1.0)),
+            retry_backoff_max_seconds=float(runtime.get("retry_backoff_max_seconds", 60.0)),
+            job_timeout_seconds=int(runtime.get("job_timeout_seconds", 0)),
+            part_timeout_seconds=int(runtime.get("part_timeout_seconds", 0)),
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
             api_key_env=str(runtime.get("api_key_env", "")),
             staged_upload_api_key_env=str(runtime.get("staged_upload_api_key_env", "")),

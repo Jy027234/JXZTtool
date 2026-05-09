@@ -660,6 +660,7 @@ def _parse_units(
                     "table_count": _safe_int(part.get("table_count"), default=0),
                     "quality_signal_count": _safe_int(part.get("quality_signal_count"), default=0),
                     "rerun_supported": bool(part.get("rerun_supported", False)),
+                    "last_error": part.get("last_error"),
                 }
             )
         if units:

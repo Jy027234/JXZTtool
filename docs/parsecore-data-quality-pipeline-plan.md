@@ -206,6 +206,7 @@ quality_signals 扩展路线：
 GET  /v1/parse/documents/{doc_id}/parts?state=failed|warning|done
 POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun
 POST /v1/parse/documents/{doc_id}/parts/rerun
+POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
 GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 ```
 
@@ -221,6 +222,12 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
   "reuse_clean_parts": true
 }
 ```
+
+本轮生产增强接口已落地：
+
+- `POST /v1/parse/documents/{doc_id}/parts/rerun`：批量复跑入口，支持 `part_ids`、`failed_only`、`state`、`profile`，用于从异常 part 视图或质量信号面板直接触发小范围重跑。
+- `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`：取消单个尚未运行的 part；持久化状态为 `pending`，inline runner 内部队列会先移出队列再转为 `cancelled`，运行中的 part 不强杀，会返回当前状态。
+- `runtime.max_active_parts_per_doc`：单文档 active part 限流，inline 与 queue-worker 模式均会跳过已达上限的同文档 part，生产建议先按 worker 总量设为 `2-4`。
 
 落库与合并策略：
 
@@ -242,7 +249,7 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 | `target_pages_per_part` | 100-300 | 普通文本型 PDF 先用较大页段，减少调度开销。 |
 | `ocr_heavy_pages_per_part` | 20-50 | OCR 密集或扫描件降低页段大小，避免单 part 长尾。 |
 | `max_active_parts_per_doc` | 2-4 | 单文档内限流，防止一个 17000 页任务吃满 worker。 |
-| `part_timeout_s` | 按 profile 配置 | 超时只标记 part 异常，文档保留 partial 状态。 |
+| `part_timeout_seconds` | 按 profile 配置 | queue-worker 软超时回收阈值；超时后按 `max_attempts` 和退避策略重试或 dead-letter，文档保留 partial 状态。 |
 | `merge_checkpoint_parts` | 10-20 | 每完成一批 part 刷新一次 manifest 和质量摘要。 |
 
 中等改造步骤：
@@ -254,7 +261,7 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 5. 文档状态区分 `running / partial / done / failed`：只要部分 part 成功，宿主就可以读取 partial structured 结果和异常 part 列表。
 6. 异常 part 通过上一节规划接口复跑，优先只对失败页段启用 OCR、多引擎或更小页段，不默认全量重跑。
 
-已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。仍需增强：单文档 active part 限流、取消、批量复跑、part timeout、只重建受影响 part 的 embedding/index layer。
+已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。本轮生产增强已补齐单文档 active part 限流 `max_active_parts_per_doc`、批量复跑 `/parts/rerun`、尚未运行 part 取消 `/parts/{part_id}/cancel`、queue-worker 失败退避和 job/part 软超时。仍需增强：只重建受影响 part 的 embedding/index layer。
 
 ### Phase 5：导出与人工复核
 
@@ -335,6 +342,6 @@ Phase 2 的中台承接能力已完成：
 - 宿主产品 parser client 自动迁移；本轮只把中台接口能力准备好。
 - 人工复核 UI。
 - 默认多引擎解析。
-- 生产级批量 part 复跑、取消、优先级和 timeout 编排。
+- 生产级优先级和更细 timeout 编排；批量 part 复跑、尚未运行 part 取消、active part 限流、失败退避和软 timeout 已完成第一版。
 - 只重建受影响 part 的 embedding/index layer。
 - `parquet`、截图、raw cells、trace 打包。

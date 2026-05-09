@@ -12,6 +12,7 @@ PART_STATE_FILTERS = {
     "embedding",
     "done",
     "failed",
+    "cancelled",
     "warning",
     "partial",
     "unknown",
@@ -31,6 +32,10 @@ def document_parts_projection(
     ]
     filtered_parts = [part for part in parts if not filters or part["state"] in filters]
     state_counts = Counter(str(part["state"]) for part in parts)
+    active_parts = sum(
+        state_counts.get(state, 0)
+        for state in ("parsing", "structuring", "embedding")
+    )
 
     return {
         "schema_version": payload.get("schema_version"),
@@ -49,6 +54,9 @@ def document_parts_projection(
             "states": dict(sorted(state_counts.items())),
             "warning_parts": state_counts.get("warning", 0),
             "failed_parts": state_counts.get("failed", 0),
+            "queued_parts": state_counts.get("pending", 0),
+            "active_parts": active_parts,
+            "cancelled_parts": state_counts.get("cancelled", 0),
         },
     }
 

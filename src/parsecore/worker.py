@@ -16,7 +16,10 @@ class QueueWorker:
         job = self.runtime.claim_next_job()
         if job is None:
             return None
-        return self.runtime.execute(job_id=job.job_id)
+        try:
+            return self.runtime.execute(job_id=job.job_id)
+        except Exception:
+            return None
 
     def drain(self, *, max_jobs: int | None = None) -> int:
         processed = 0

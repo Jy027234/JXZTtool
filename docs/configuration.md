@@ -86,6 +86,11 @@ mode = "embedded-sdk"
 execution_mode = "inline"
 max_workers = 2
 max_inflight_jobs = 0
+max_active_parts_per_doc = 0
+job_timeout_seconds = 0
+part_timeout_seconds = 0
+retry_backoff_seconds = 1.0
+retry_backoff_max_seconds = 60.0
 poll_interval_ms = 500
 max_upload_bytes = 52428800
 staged_upload_max_bytes = 0
@@ -103,6 +108,11 @@ log_path = "var/logs/job_events.jsonl"
 | `execution_mode` | `inline` | `inline` / `queue-worker` | `inline` 由 API 进程执行后台 job；`queue-worker` 由 API 提交 job、Worker 独立消费。 |
 | `max_workers` | `2` | 正整数 | inline 后台 job 执行线程数。同步 `/parse` 和 `/parse/batch` 仍在请求内完成。 |
 | `max_inflight_jobs` | `0` | `0` 或正整数 | inline job 背压上限；`0` 表示自动取 `max_workers * 4`。超过时返回 `429 too_many_inflight_jobs`。 |
+| `max_active_parts_per_doc` | `0` | `0` 或正整数 | 单文档 active part 限流，`0` 表示不额外限制；inline 与 queue-worker 模式均会跳过已达上限的同文档 part，生产建议按 worker 总量设为 `2-4`。 |
+| `job_timeout_seconds` | `0` | `0` 或正整数 | queue-worker 软超时回收阈值；`0` 表示关闭。超时不会强杀正在运行的解析器，只会把 stale active job 重新排队或 dead-letter。 |
+| `part_timeout_seconds` | `0` | `0` 或正整数 | PDF part job 专用软超时；未设置时回退到 `job_timeout_seconds`。 |
+| `retry_backoff_seconds` | `1.0` | 非负数 | queue-worker job 失败后重新进入 pending 前的指数退避基准。 |
+| `retry_backoff_max_seconds` | `60.0` | 非负数 | 指数退避上限，避免长时间阻塞同一个失败任务。 |
 | `poll_interval_ms` | `1000` | 正整数 | Worker 拉取待处理 job 的轮询间隔。 |
 | `max_upload_bytes` | `0` | 字节数 | `/parse`、`/v1/parse`、`/parse/batch`、`/v1/parse/batch` 同步上传保护；`0` 表示不限制。推荐生产保留 50 MiB 或按业务调整。 |
 | `staged_upload_max_bytes` | `0` | 字节数 | `/parse/uploads` 与 `/v1/parse/uploads` 桥接暂存上限；`0` 表示不限制，用于承接同步入口拒绝的大文件。 |
@@ -111,7 +121,7 @@ log_path = "var/logs/job_events.jsonl"
 | `quota_enforce` | `false` | bool | 开启后按租户和 `quota_key` 做硬限校验。 |
 | `quota_window_hours` | `24` | 正数 | quota 统计时间窗，单位小时。 |
 | `quota_default_limit_units` | `0` | 非负整数 | 默认 quota 上限；`0` 表示未设置默认硬限。 |
-| `max_attempts` | `3` | 正整数 | Worker 模式下 job 最大尝试次数。 |
+| `max_attempts` | `3` | 正整数 | Worker 模式下 job 最大尝试次数；未达到上限的失败 job 会按退避时间回到 `pending`，达到上限后写入 dead-letter。 |
 | `log_path` | `var/logs/job_events.jsonl` | 路径 | 运行事件日志路径。 |
 
 生产建议：
@@ -609,7 +619,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包第一版会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
+异步包会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 
@@ -630,7 +640,27 @@ POST /v1/parse/documents/{doc_id}/rechunk
 POST /v1/parse/documents/{doc_id}/re-embed
 ```
 
-宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑第一版已经能重跑指定页段；后续会继续增强批量复跑、取消、限流和只重建受影响 part 的 embedding/index。
+本轮生产增强接口已落地：
+
+```text
+POST /v1/parse/documents/{doc_id}/parts/rerun
+POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
+```
+
+批量复跑请求支持：
+
+```json
+{
+  "part_ids": ["demo-doc-part-3", "demo-doc-part-5"],
+  "failed_only": true,
+  "state": ["failed", "cancelled"],
+  "profile": "auto"
+}
+```
+
+取消接口只保证尚未运行的 part：持久化状态为 `pending`，inline runner 内部队列中的 part 也会先移出队列再转为 `cancelled`；如果 part 已在运行中，不强杀 worker 进程，会返回当前状态，让运行态自然结束或由软 timeout/复跑策略处理。
+
+宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑第一版已经能重跑指定页段；本轮生产增强继续补齐了批量复跑、取消和限流，后续再推进只重建受影响 part 的 embedding/index。
 
 ## 超长 PDF 配置口径
 
@@ -661,6 +691,7 @@ Invoke-RestMethod -Headers $headers http://127.0.0.1:8090/v1/runtime
 - OCR、embedding、LLM provider 的 `base_url / api_key_env / timeout_seconds / max_retries` 已按真实网关设置。
 - `providers.embedding.enabled = true` 时已明确是 fake 还是真实 provider。
 - Excel 大表场景已设置 `max_rows_per_sheet / max_cols_per_sheet / max_metadata_cells` 或完成性能基线。
+- 超大 PDF / part 调度场景已评估 `runtime.max_active_parts_per_doc`，并准备 `parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled` 指标面板。
 - `tools/self_check.py`、真实样本质量报告、性能基线均通过并留档。
 - 灰度时已准备 `/health`、`/v1/parse/metrics`、`/v1/parse/events`、`/v1/parse/prometheus` 的观测面板。
 - OCR 观测建议至少覆盖 `ocr_attempted / ocr_fallback / ocr_rejected / ocr_failed` 四类事件与对应 Prometheus 计数器。

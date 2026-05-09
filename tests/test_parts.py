@@ -55,6 +55,9 @@ class DocumentPartsProjectionTests(unittest.TestCase):
         self.assertEqual(result["part_summary"]["total"], 2)
         self.assertTrue(result["part_summary"]["partitioned"])
         self.assertEqual(result["part_summary"]["states"], {"done": 1, "warning": 1})
+        self.assertEqual(result["part_summary"]["active_parts"], 0)
+        self.assertEqual(result["part_summary"]["queued_parts"], 0)
+        self.assertEqual(result["part_summary"]["cancelled_parts"], 0)
         self.assertEqual(result["parts"][0]["state"], "done")
         self.assertEqual(result["parts"][1]["state"], "warning")
         self.assertEqual(result["parts"][1]["quality_signal_count"], 2)
@@ -78,9 +81,26 @@ class DocumentPartsProjectionTests(unittest.TestCase):
         self.assertEqual([part["part_id"] for part in result["parts"]], ["u2", "u3"])
         self.assertEqual(result["part_summary"]["filtered"], 2)
 
+    def test_counts_cancelled_and_active_part_states(self) -> None:
+        payload = {
+            "doc_id": "doc-parts",
+            "parse_units": [
+                {"parse_unit_id": "u1", "state": "cancelled", "page_start": 1, "page_end": 1},
+                {"parse_unit_id": "u2", "state": "parsing", "page_start": 2, "page_end": 2},
+                {"parse_unit_id": "u3", "state": "pending", "page_start": 3, "page_end": 3},
+            ],
+        }
+
+        result = document_parts_projection(payload, state_filter="cancelled")
+
+        self.assertEqual(result["part_summary"]["cancelled_parts"], 1)
+        self.assertEqual(result["part_summary"]["active_parts"], 1)
+        self.assertEqual(result["part_summary"]["queued_parts"], 1)
+        self.assertEqual([part["part_id"] for part in result["parts"]], ["u1"])
+
     def test_rejects_invalid_state_filter(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid_part_state"):
-            document_parts_projection({"parse_units": []}, state_filter="cancelled")
+            document_parts_projection({"parse_units": []}, state_filter="bogus")
 
 
 if __name__ == "__main__":

@@ -287,6 +287,12 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `POST /v1/parse/documents/{doc_id}/parts/plan`：PDF 页段调度第一版，创建父 `partial` job、子 part job，并用独立 part doc_id 防止覆盖父文档
 - `GET /v1/parse/documents/{doc_id}/parts?state=warning|failed`：part 视图，返回页段、状态、质量信号 code、job_id 和复跑能力
 - `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`：part 级复跑第一版，只重跑指定页段
+- 本轮生产增强已落地：
+  - `runtime.max_active_parts_per_doc`：单文档 active part 限流，用于避免一个超大文档占满 inline 或 queue-worker 执行资源
+  - `runtime.job_timeout_seconds / part_timeout_seconds / retry_backoff_seconds`：queue-worker 软超时回收与失败指数退避
+  - `POST /v1/parse/documents/{doc_id}/parts/rerun`：批量复跑入口，支持 `part_ids`、`failed_only`、`state`、`profile`
+  - `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`：取消尚未运行的 part；运行中的 part 不强杀，会返回当前状态
+  - part 指标已统一输出 `parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`
 - `profile`：创建异步 job、桥接上传和同步入口都支持 `profile=auto|table-heavy|large-pdf|ocr-heavy|excel-ledger|scan-pdf`；`auto` 会按文件类型、大小和入口上下文先做基础推断，并在 413 detail、job options 和 structured/quality 结果的 `profile_resolution` 中体现 resolved profile。未知 profile 不会立刻拒绝，但会带 `profile_known=false / profile_warning=unknown_profile`，方便宿主发现拼写或灰度配置问题。`profile` 控制解析策略，`projection` 控制读取结果形态，推荐组合是提交时 `profile=auto`、读取时 `projection=structured`
 - `staged_upload_max_bytes`：仅保护 `/parse/uploads` 与 `/v1/parse/uploads` 的桥接暂存大小；默认 `0` 表示不限制，用于承接同步入口拒绝的大文件
 - `staged_upload_api_key_env`：仅保护 `/parse/uploads` 与 `/v1/parse/uploads`；配置后调用方需提供 `x-api-key` 或 `Authorization: Bearer ...`，不会影响 `/v1/runtime` 等其他接口
@@ -436,7 +442,7 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 1. projection、profile 自动路由、413 异步分流、基础 `tables/cells/quality_signals/parse_units` 已完成；优先让宿主 parser client 在异步 job 创建阶段接入 `profile=auto`，并继续用 `projection=structured` 读取结构化结果。
 2. 对两类样本先做灰度：表格密集文件使用 `profile=table-heavy`，超大或长页数 PDF 使用 `profile=large-pdf`，观察耗时、质量信号和结果双写稳定性。
 3. 异步导出包、PDF 页段调度、父文档 partial 合并和单 part 复跑第一版已完成；下一步重点压测大 PDF 样本和 queue-worker 部署。
-4. 为 part 调度补生产级限流、取消、失败重试策略和更细的指标：`parts_total / parts_done / parts_failed / active_parts`。
+4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout 和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
 5. 把 part 级增量索引从“刷新父读模型”继续推进到“只重建受影响 part 的 embedding/index layer”。
 6. 把 `tools/self_check.py` 固化为默认自检入口，并继续收敛 OCR 长尾样本性能。
 7. 在 queue-worker + pgvector 模式下固化入口鉴权、灰度配置与回滚口径。
