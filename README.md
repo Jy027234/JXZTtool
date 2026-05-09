@@ -289,7 +289,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 - `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`：part 级复跑第一版，只重跑指定页段
 - 本轮生产增强已落地：
   - `runtime.max_active_parts_per_doc`：单文档 active part 限流，用于避免一个超大文档占满 inline 或 queue-worker 执行资源
-  - `runtime.job_timeout_seconds / part_timeout_seconds / retry_backoff_seconds`：queue-worker 软超时回收与失败指数退避
+  - `runtime.job_timeout_seconds / part_timeout_seconds / retry_backoff_seconds`：queue-worker 软超时回收、claim_token 写回保护与失败指数退避
   - `POST /v1/parse/documents/{doc_id}/parts/rerun`：批量复跑入口，支持 `part_ids`、`failed_only`、`state`、`profile`
   - `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`：取消尚未运行的 part；运行中的 part 不强杀，会返回当前状态
   - part 指标已统一输出 `parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`
@@ -442,7 +442,7 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 1. projection、profile 自动路由、413 异步分流、基础 `tables/cells/quality_signals/parse_units` 已完成；优先让宿主 parser client 在异步 job 创建阶段接入 `profile=auto`，并继续用 `projection=structured` 读取结构化结果。
 2. 对两类样本先做灰度：表格密集文件使用 `profile=table-heavy`，超大或长页数 PDF 使用 `profile=large-pdf`，观察耗时、质量信号和结果双写稳定性。
 3. 异步导出包、PDF 页段调度、父文档 partial 合并和单 part 复跑第一版已完成；下一步重点压测大 PDF 样本和 queue-worker 部署。
-4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout 和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
+4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout、claim_token 防旧 worker 写回和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
 5. 把 part 级增量索引从“刷新父读模型”继续推进到“只重建受影响 part 的 embedding/index layer”。
 6. 把 `tools/self_check.py` 固化为默认自检入口，并继续收敛 OCR 长尾样本性能。
 7. 在 queue-worker + pgvector 模式下固化入口鉴权、灰度配置与回滚口径。

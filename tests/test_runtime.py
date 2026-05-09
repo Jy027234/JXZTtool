@@ -701,6 +701,8 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(retry_job.attempt_count, 1)
             self.assertIn("retry_scheduled", retry_job.failure_reason or "")
             self.assertIn("next_attempt_at", retry_job.options)
+            self.assertIsNotNone(retry_job.next_attempt_at)
+            self.assertIsNone(retry_job.claim_token)
 
             claimed_again = runtime.claim_next_job()
             self.assertIsNotNone(claimed_again)
@@ -728,7 +730,9 @@ class ParseRuntimeTests(unittest.TestCase):
             claimed = runtime.claim_next_job()
             self.assertIsNotNone(claimed)
             assert claimed is not None
-            runtime.job_store.jobs[job.job_id].updated_at = "2000-01-01T00:00:00+00:00"
+            self.assertIsNotNone(claimed.claim_token)
+            old_token = claimed.claim_token
+            runtime.job_store.jobs[job.job_id].lease_expires_at = "2000-01-01T00:00:00+00:00"
 
             recovered = runtime.recover_timed_out_jobs()
 
@@ -737,6 +741,50 @@ class ParseRuntimeTests(unittest.TestCase):
             assert requeued is not None
             self.assertEqual(requeued.state, ParseJobState.PENDING)
             self.assertIn("job_timeout", requeued.failure_reason or "")
+            self.assertIsNone(requeued.claim_token)
+            with self.assertRaisesRegex(RuntimeError, "stale_claim"):
+                runtime.job_store.update_state(
+                    job_id=job.job_id,
+                    state=ParseJobState.DONE,
+                    expected_claim_token=old_token,
+                    clear_claim=True,
+                )
+
+    def test_stale_worker_cannot_save_blocks_after_timeout_reclaim(self) -> None:
+        with TemporaryWorkspace(QUEUE_RETRY_CONFIG) as workspace:
+            document_path = workspace.create_docx("stale.docx", ["stale"])
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-stale-worker",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            claimed = runtime.claim_next_job()
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+
+            def expire_claim(_request):
+                runtime.job_store.jobs[job.job_id].lease_expires_at = "2000-01-01T00:00:00+00:00"
+                runtime.recover_timed_out_jobs()
+                return (
+                    Block(
+                        block_id="old-block",
+                        doc_id="doc-stale-worker",
+                        type=BlockType.PARAGRAPH,
+                        content="old worker content",
+                    ),
+                )
+
+            with patch.object(runtime, "_load_blocks_for_request", side_effect=expire_claim):
+                with self.assertRaisesRegex(RuntimeError, "stale_claim"):
+                    runtime.execute(job_id=claimed.job_id, claim_token=claimed.claim_token)
+
+            self.assertEqual(tuple(runtime.job_store.get_blocks(doc_id="doc-stale-worker")), ())
+            requeued = runtime.get_job(job_id=job.job_id)
+            assert requeued is not None
+            self.assertEqual(requeued.state, ParseJobState.PENDING)
 
     def test_tenant_dashboard_aggregates_usage_metrics_and_recent_jobs(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

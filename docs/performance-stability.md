@@ -166,7 +166,10 @@ PARSECORE_PERF_HISTORY_DIR=/var/lib/parsecore/perf-history
 
 - 单文档 active parts 限流，配置口径为 `runtime.max_active_parts_per_doc`，生产建议先设 `2-4`。
 - 尚未运行 part 取消，接口口径为 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel`。
-- queue-worker 失败指数退避、job/part 软 timeout，以及批量 failed-only rerun。
+- queue-worker 失败指数退避、job/part 软 timeout、claim_token 写回保护，以及批量 failed-only rerun。
+
+仍需增强：
+
 - 只对变更 part 的 chunks 重建 embedding/index layer，避免 17000 页复跑时全量 re-embed。
 
 性能验收建议新增三组指标：

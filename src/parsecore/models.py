@@ -76,6 +76,10 @@ class ParseJob:
     failure_reason: str | None = None
     attempt_count: int = 0
     dead_lettered_at: str | None = None
+    claimed_at: str | None = None
+    lease_expires_at: str | None = None
+    next_attempt_at: str | None = None
+    claim_token: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

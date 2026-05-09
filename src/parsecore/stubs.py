@@ -242,10 +242,23 @@ class InMemoryJobStore(JobStore):
         job_id: str,
         state: ParseJobState,
         failure_reason: str | None = None,
+        expected_claim_token: str | None = None,
+        clear_claim: bool = False,
+        next_attempt_at: str | None = None,
     ) -> ParseJob:
         job = self.jobs[job_id]
+        if expected_claim_token is not None and job.claim_token != expected_claim_token:
+            raise RuntimeError("stale_claim")
         job.state = state
         job.failure_reason = failure_reason
+        if next_attempt_at is not None:
+            job.next_attempt_at = next_attempt_at
+        elif clear_claim and state != ParseJobState.PENDING:
+            job.next_attempt_at = None
+        if clear_claim:
+            job.claimed_at = None
+            job.lease_expires_at = None
+            job.claim_token = None
         job.updated_at = _utc_now()
         return job
 
@@ -263,15 +276,29 @@ class InMemoryJobStore(JobStore):
             return None
         job = sorted(pending, key=lambda item: item.created_at)[0]
         job.state = ParseJobState.PARSING
-        job.updated_at = _utc_now()
+        now = _utc_now()
+        job.updated_at = now
+        job.claimed_at = now
+        job.lease_expires_at = None
+        job.next_attempt_at = None
+        job.claim_token = uuid4().hex
+        job.attempt_count = int(job.attempt_count or 0) + 1
+        job.failure_reason = None
         return job
 
-    def claim_job(self, *, job_id: str) -> ParseJob | None:
+    def claim_job(self, *, job_id: str, lease_expires_at: str | None = None) -> ParseJob | None:
         job = self.jobs.get(job_id)
         if job is None or job.state != ParseJobState.PENDING:
             return None
         job.state = ParseJobState.PARSING
-        job.updated_at = _utc_now()
+        now = _utc_now()
+        job.updated_at = now
+        job.claimed_at = now
+        job.lease_expires_at = lease_expires_at
+        job.next_attempt_at = None
+        job.claim_token = uuid4().hex
+        job.attempt_count = int(job.attempt_count or 0) + 1
+        job.failure_reason = None
         return job
 
     def update_options(self, *, job_id: str, options: Mapping[str, object]) -> ParseJob:
@@ -309,12 +336,24 @@ class InMemoryJobStore(JobStore):
         job.updated_at = _utc_now()
         return job.attempt_count
 
-    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
+    def mark_dead_letter(
+        self,
+        *,
+        job_id: str,
+        reason: str,
+        expected_claim_token: str | None = None,
+    ) -> ParseJob:
         job = self.jobs[job_id]
+        if expected_claim_token is not None and job.claim_token != expected_claim_token:
+            raise RuntimeError("stale_claim")
         job.state = ParseJobState.FAILED
         job.failure_reason = reason
         job.dead_lettered_at = _utc_now()
         job.updated_at = job.dead_lettered_at
+        job.claimed_at = None
+        job.lease_expires_at = None
+        job.next_attempt_at = None
+        job.claim_token = None
         return job
 
     def record_layer_search_hit(

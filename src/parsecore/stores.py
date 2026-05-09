@@ -85,17 +85,30 @@ class SQLiteJobStore(JobStore):
         job_id: str,
         state: ParseJobState,
         failure_reason: str | None = None,
+        expected_claim_token: str | None = None,
+        clear_claim: bool = False,
+        next_attempt_at: str | None = None,
     ) -> ParseJob:
         now = _utc_now()
+        assignments = ["state = ?", "failure_reason = ?", "updated_at = ?"]
+        params: list[Any] = [state.value, failure_reason, now]
+        if clear_claim or next_attempt_at is not None:
+            assignments.append("next_attempt_at = ?")
+            params.append(next_attempt_at)
+        if clear_claim:
+            assignments.extend(["claim_token = NULL", "claimed_at = NULL", "lease_expires_at = NULL"])
+        where = "job_id = ?"
+        params.append(job_id)
+        if expected_claim_token is not None:
+            where += " AND claim_token = ?"
+            params.append(expected_claim_token)
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE parse_jobs
-                SET state = ?, failure_reason = ?, updated_at = ?
-                WHERE job_id = ?
-                """,
-                (state.value, failure_reason, now, job_id),
+            updated = conn.execute(
+                f"UPDATE parse_jobs SET {', '.join(assignments)} WHERE {where}",
+                tuple(params),
             )
+            if expected_claim_token is not None and updated.rowcount == 0:
+                raise RuntimeError("stale_claim")
         job = self.get_job(job_id=job_id)
         if job is None:
             raise KeyError(job_id)
@@ -157,30 +170,31 @@ class SQLiteJobStore(JobStore):
 
     def claim_next_job(self) -> ParseJob | None:
         now = _utc_now()
+        claim_token = uuid4().hex
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT job_id, doc_id, file_path, media_type, options_json,
-                      tenant_id, quota_key, quota_units,
-                       state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                SELECT job_id
                 FROM parse_jobs
                 WHERE state = ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,
-                (ParseJobState.PENDING.value,),
+                (ParseJobState.PENDING.value, now),
             ).fetchone()
             if row is None:
                 return None
             updated = conn.execute(
                 """
                 UPDATE parse_jobs
-                SET state = ?, updated_at = ?
+                SET state = ?, updated_at = ?, claimed_at = ?, lease_expires_at = NULL,
+                    next_attempt_at = NULL, claim_token = ?, failure_reason = NULL,
+                    attempt_count = attempt_count + 1
                 WHERE job_id = ? AND state = ?
                 """,
-                (ParseJobState.PARSING.value, now, row[0], ParseJobState.PENDING.value),
+                (ParseJobState.PARSING.value, now, now, claim_token, row[0], ParseJobState.PENDING.value),
             )
             if updated.rowcount == 0:
                 return None
@@ -189,7 +203,8 @@ class SQLiteJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs
                 WHERE job_id = ?
                 """,
@@ -199,17 +214,40 @@ class SQLiteJobStore(JobStore):
             return None
         return self._row_to_job(claimed)
 
-    def claim_job(self, *, job_id: str) -> ParseJob | None:
+    def claim_job(self, *, job_id: str, lease_expires_at: str | None = None) -> ParseJob | None:
         now = _utc_now()
+        claim_token = uuid4().hex
+        return self._claim_job(job_id=job_id, now=now, claim_token=claim_token, lease_expires_at=lease_expires_at)
+
+    def _claim_job(
+        self,
+        *,
+        job_id: str,
+        now: str,
+        claim_token: str,
+        lease_expires_at: str | None,
+    ) -> ParseJob | None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
                 """
                 UPDATE parse_jobs
-                SET state = ?, updated_at = ?
+                SET state = ?, updated_at = ?, claimed_at = ?, lease_expires_at = ?,
+                    next_attempt_at = NULL, claim_token = ?, failure_reason = NULL,
+                    attempt_count = attempt_count + 1
                 WHERE job_id = ? AND state = ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 """,
-                (ParseJobState.PARSING.value, now, job_id, ParseJobState.PENDING.value),
+                (
+                    ParseJobState.PARSING.value,
+                    now,
+                    now,
+                    lease_expires_at,
+                    claim_token,
+                    job_id,
+                    ParseJobState.PENDING.value,
+                    now,
+                ),
             )
             if updated.rowcount == 0:
                 return None
@@ -218,7 +256,8 @@ class SQLiteJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs
                 WHERE job_id = ?
                 """,
@@ -251,7 +290,8 @@ class SQLiteJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs
                 WHERE job_id = ?
                 """,
@@ -268,7 +308,8 @@ class SQLiteJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs
                 WHERE doc_id = ?
                 ORDER BY created_at DESC
@@ -284,7 +325,8 @@ class SQLiteJobStore(JobStore):
         query = (
             "SELECT job_id, doc_id, file_path, media_type, options_json, "
             "tenant_id, quota_key, quota_units, "
-            "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at FROM parse_jobs"
+            "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at, "
+            "claimed_at, lease_expires_at, next_attempt_at, claim_token FROM parse_jobs"
         )
         params: tuple[str, ...] = ()
         if doc_id is not None:
@@ -356,17 +398,31 @@ class SQLiteJobStore(JobStore):
             ).fetchone()
         return int(row[0]) if row is not None else 0
 
-    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
+    def mark_dead_letter(
+        self,
+        *,
+        job_id: str,
+        reason: str,
+        expected_claim_token: str | None = None,
+    ) -> ParseJob:
         now = _utc_now()
+        where = "job_id = ?"
+        params: list[Any] = [ParseJobState.FAILED.value, reason, now, now, job_id]
+        if expected_claim_token is not None:
+            where += " AND claim_token = ?"
+            params.append(expected_claim_token)
         with self._connect() as conn:
-            conn.execute(
-                """
+            updated = conn.execute(
+                f"""
                 UPDATE parse_jobs
-                SET state = ?, failure_reason = ?, dead_lettered_at = ?, updated_at = ?
-                WHERE job_id = ?
+                SET state = ?, failure_reason = ?, dead_lettered_at = ?, updated_at = ?,
+                    claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL, next_attempt_at = NULL
+                WHERE {where}
                 """,
-                (ParseJobState.FAILED.value, reason, now, now, job_id),
+                tuple(params),
             )
+            if expected_claim_token is not None and updated.rowcount == 0:
+                raise RuntimeError("stale_claim")
         job = self.get_job(job_id=job_id)
         if job is None:
             raise KeyError(job_id)
@@ -388,7 +444,13 @@ class SQLiteJobStore(JobStore):
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    failure_reason TEXT
+                    failure_reason TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    dead_lettered_at TEXT,
+                    claimed_at TEXT,
+                    lease_expires_at TEXT,
+                    next_attempt_at TEXT,
+                    claim_token TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_parse_jobs_doc_created
@@ -441,6 +503,14 @@ class SQLiteJobStore(JobStore):
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
             if "dead_lettered_at" not in existing:
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN dead_lettered_at TEXT")
+            if "claimed_at" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN claimed_at TEXT")
+            if "lease_expires_at" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN lease_expires_at TEXT")
+            if "next_attempt_at" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN next_attempt_at TEXT")
+            if "claim_token" not in existing:
+                conn.execute("ALTER TABLE parse_jobs ADD COLUMN claim_token TEXT")
             if "tenant_id" not in existing:
                 conn.execute("ALTER TABLE parse_jobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             if "quota_key" not in existing:
@@ -549,6 +619,22 @@ class SQLiteJobStore(JobStore):
             dead_lettered_at = row["dead_lettered_at"]
         except (IndexError, KeyError):
             dead_lettered_at = None
+        try:
+            claimed_at = row["claimed_at"]
+        except (IndexError, KeyError):
+            claimed_at = None
+        try:
+            lease_expires_at = row["lease_expires_at"]
+        except (IndexError, KeyError):
+            lease_expires_at = None
+        try:
+            next_attempt_at = row["next_attempt_at"]
+        except (IndexError, KeyError):
+            next_attempt_at = None
+        try:
+            claim_token = row["claim_token"]
+        except (IndexError, KeyError):
+            claim_token = None
         return ParseJob(
             job_id=row[0],
             doc_id=row[1],
@@ -564,6 +650,10 @@ class SQLiteJobStore(JobStore):
             failure_reason=row[11],
             attempt_count=attempt_count,
             dead_lettered_at=dead_lettered_at,
+            claimed_at=claimed_at,
+            lease_expires_at=lease_expires_at,
+            next_attempt_at=next_attempt_at,
+            claim_token=claim_token,
         )
 
 
@@ -638,7 +728,11 @@ class PostgresJobStore(JobStore):
                     updated_at TEXT NOT NULL,
                     failure_reason TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
-                    dead_lettered_at TEXT
+                    dead_lettered_at TEXT,
+                    claimed_at TEXT,
+                    lease_expires_at TEXT,
+                    next_attempt_at TEXT,
+                    claim_token TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_parse_jobs_doc_created
                     ON parse_jobs (doc_id, created_at DESC);
@@ -688,6 +782,10 @@ class PostgresJobStore(JobStore):
             cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'")
             cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS quota_key TEXT NOT NULL DEFAULT 'default'")
             cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS quota_units INTEGER NOT NULL DEFAULT 1")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS claimed_at TEXT")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TEXT")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS next_attempt_at TEXT")
+            cur.execute("ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS claim_token TEXT")
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_parse_jobs_tenant_doc_created ON parse_jobs (tenant_id, doc_id, created_at DESC)"
             )
@@ -806,17 +904,30 @@ class PostgresJobStore(JobStore):
         job_id: str,
         state: ParseJobState,
         failure_reason: str | None = None,
+        expected_claim_token: str | None = None,
+        clear_claim: bool = False,
+        next_attempt_at: str | None = None,
     ) -> ParseJob:
         now = _utc_now()
+        assignments = ["state = %s", "failure_reason = %s", "updated_at = %s"]
+        params: list[Any] = [state.value, failure_reason, now]
+        if clear_claim or next_attempt_at is not None:
+            assignments.append("next_attempt_at = %s")
+            params.append(next_attempt_at)
+        if clear_claim:
+            assignments.extend(["claim_token = NULL", "claimed_at = NULL", "lease_expires_at = NULL"])
+        where = "job_id = %s"
+        params.append(job_id)
+        if expected_claim_token is not None:
+            where += " AND claim_token = %s"
+            params.append(expected_claim_token)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE parse_jobs
-                SET state = %s, failure_reason = %s, updated_at = %s
-                WHERE job_id = %s
-                """,
-                (state.value, failure_reason, now, job_id),
+                f"UPDATE parse_jobs SET {', '.join(assignments)} WHERE {where}",
+                tuple(params),
             )
+            if expected_claim_token is not None and cur.rowcount == 0:
+                raise RuntimeError("stale_claim")
         job = self.get_job(job_id=job_id)
         if job is None:
             raise KeyError(job_id)
@@ -882,16 +993,18 @@ class PostgresJobStore(JobStore):
         # SELECT ... FOR UPDATE SKIP LOCKED gives us safe multi-worker claim
         # semantics natively in Postgres.
         now = _utc_now()
+        claim_token = uuid4().hex
         with self._lock, self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT job_id FROM parse_jobs
                 WHERE state = %s
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
                 ORDER BY created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
-                (ParseJobState.PENDING.value,),
+                (ParseJobState.PENDING.value, now),
             )
             row = cur.fetchone()
             if row is None:
@@ -912,7 +1025,8 @@ class PostgresJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs WHERE job_id = %s
                 """,
                 (job_id,),
@@ -922,16 +1036,29 @@ class PostgresJobStore(JobStore):
             return None
         return self._row_to_job(claimed)
 
-    def claim_job(self, *, job_id: str) -> ParseJob | None:
+    def claim_job(self, *, job_id: str, lease_expires_at: str | None = None) -> ParseJob | None:
         now = _utc_now()
+        claim_token = uuid4().hex
         with self._lock, self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE parse_jobs
-                SET state = %s, updated_at = %s
+                SET state = %s, updated_at = %s, claimed_at = %s, lease_expires_at = %s,
+                    next_attempt_at = NULL, claim_token = %s, failure_reason = NULL,
+                    attempt_count = attempt_count + 1
                 WHERE job_id = %s AND state = %s
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
                 """,
-                (ParseJobState.PARSING.value, now, job_id, ParseJobState.PENDING.value),
+                (
+                    ParseJobState.PARSING.value,
+                    now,
+                    now,
+                    lease_expires_at,
+                    claim_token,
+                    job_id,
+                    ParseJobState.PENDING.value,
+                    now,
+                ),
             )
             if cur.rowcount == 0:
                 return None
@@ -940,7 +1067,8 @@ class PostgresJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs WHERE job_id = %s
                 """,
                 (job_id,),
@@ -973,7 +1101,8 @@ class PostgresJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs WHERE job_id = %s
                 """,
                 (job_id,),
@@ -990,7 +1119,8 @@ class PostgresJobStore(JobStore):
                 SELECT job_id, doc_id, file_path, media_type, options_json,
                       tenant_id, quota_key, quota_units,
                        state, created_at, updated_at, failure_reason,
-                       attempt_count, dead_lettered_at
+                       attempt_count, dead_lettered_at,
+                       claimed_at, lease_expires_at, next_attempt_at, claim_token
                 FROM parse_jobs
                 WHERE doc_id = %s
                 ORDER BY created_at DESC
@@ -1007,7 +1137,8 @@ class PostgresJobStore(JobStore):
         query = (
             "SELECT job_id, doc_id, file_path, media_type, options_json, "
             "tenant_id, quota_key, quota_units, "
-            "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at "
+            "state, created_at, updated_at, failure_reason, attempt_count, dead_lettered_at, "
+            "claimed_at, lease_expires_at, next_attempt_at, claim_token "
             "FROM parse_jobs"
         )
         params: tuple[Any, ...] = ()
@@ -1095,6 +1226,10 @@ class PostgresJobStore(JobStore):
     def _row_to_job(row: Sequence[Any]) -> ParseJob:
         attempt_count = int(row[12]) if row[12] is not None else 0
         dead_lettered_at = row[13] if len(row) > 13 else None
+        claimed_at = row[14] if len(row) > 14 else None
+        lease_expires_at = row[15] if len(row) > 15 else None
+        next_attempt_at = row[16] if len(row) > 16 else None
+        claim_token = row[17] if len(row) > 17 else None
         return ParseJob(
             job_id=row[0],
             doc_id=row[1],
@@ -1110,6 +1245,10 @@ class PostgresJobStore(JobStore):
             failure_reason=row[11],
             attempt_count=attempt_count,
             dead_lettered_at=dead_lettered_at,
+            claimed_at=claimed_at,
+            lease_expires_at=lease_expires_at,
+            next_attempt_at=next_attempt_at,
+            claim_token=claim_token,
         )
 
     def increment_attempt(self, *, job_id: str) -> int:
@@ -1130,17 +1269,31 @@ class PostgresJobStore(JobStore):
             row = cur.fetchone()
         return int(row[0]) if row is not None else 0
 
-    def mark_dead_letter(self, *, job_id: str, reason: str) -> ParseJob:
+    def mark_dead_letter(
+        self,
+        *,
+        job_id: str,
+        reason: str,
+        expected_claim_token: str | None = None,
+    ) -> ParseJob:
         now = _utc_now()
+        where = "job_id = %s"
+        params: list[Any] = [ParseJobState.FAILED.value, reason, now, now, job_id]
+        if expected_claim_token is not None:
+            where += " AND claim_token = %s"
+            params.append(expected_claim_token)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE parse_jobs
-                SET state = %s, failure_reason = %s, dead_lettered_at = %s, updated_at = %s
-                WHERE job_id = %s
+                SET state = %s, failure_reason = %s, dead_lettered_at = %s, updated_at = %s,
+                    claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL, next_attempt_at = NULL
+                WHERE {where}
                 """,
-                (ParseJobState.FAILED.value, reason, now, now, job_id),
+                tuple(params),
             )
+            if expected_claim_token is not None and cur.rowcount == 0:
+                raise RuntimeError("stale_claim")
         job = self.get_job(job_id=job_id)
         if job is None:
             raise KeyError(job_id)

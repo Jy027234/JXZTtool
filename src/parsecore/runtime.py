@@ -347,7 +347,7 @@ class ParseRuntime:
 
         return job
 
-    def execute(self, *, job_id: str) -> ParseOutcome:
+    def execute(self, *, job_id: str, claim_token: str | None = None) -> ParseOutcome:
         job = self.job_store.get_job(job_id=job_id)
         if job is None:
             raise LookupError(f"No parse job found for job_id={job_id!r}")
@@ -357,7 +357,17 @@ class ParseRuntime:
             )
         if job.state == ParseJobState.FAILED and str(job.failure_reason or "").strip().lower() == "cancelled":
             raise RuntimeError(f"job {job.job_id} was cancelled; refusing to execute")
-        attempt = self._increment_attempt(job_id=job.job_id)
+        if job.state == ParseJobState.PENDING:
+            claimed = self.claim_job(job_id=job.job_id)
+            if claimed is None:
+                raise RuntimeError(f"job {job.job_id} could not be claimed; refusing to execute")
+            job = claimed
+            claim_token = job.claim_token
+        elif claim_token is None and job.claim_token:
+            claim_token = job.claim_token
+        attempt = int(job.attempt_count or 0)
+        if attempt <= 0:
+            attempt = self._increment_attempt(job_id=job.job_id)
         request = ParseRequest(
             doc_id=job.doc_id,
             file_path=job.file_path,
@@ -377,7 +387,11 @@ class ParseRuntime:
         )
         try:
             if job.state == ParseJobState.PENDING:
-                self.job_store.update_state(job_id=job.job_id, state=ParseJobState.PARSING)
+                self._update_job_state(
+                    job_id=job.job_id,
+                    state=ParseJobState.PARSING,
+                    claim_token=claim_token,
+                )
                 self.event_logger.log(
                     "state_changed",
                     job_id=job.job_id,
@@ -389,12 +403,17 @@ class ParseRuntime:
                 blocks = self._normalize_pdf_part_blocks(request=request, blocks=blocks)
             self._record_ocr_observability(request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request):
+                self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
                 self.job_store.save_blocks(
                     doc_id=request.doc_id,
                     blocks=blocks,
                     tenant_id=request.tenant_id,
                 )
-            self.job_store.update_state(job_id=job.job_id, state=ParseJobState.STRUCTURING)
+            self._update_job_state(
+                job_id=job.job_id,
+                state=ParseJobState.STRUCTURING,
+                claim_token=claim_token,
+            )
             self.event_logger.log(
                 "state_changed",
                 job_id=job.job_id,
@@ -404,7 +423,11 @@ class ParseRuntime:
 
             document = self._load_document_for_request(request, blocks=blocks)
             chunks = tuple(self._load_chunks_for_request(request, blocks=blocks, document=document))
-            self.job_store.update_state(job_id=job.job_id, state=ParseJobState.EMBEDDING)
+            self._update_job_state(
+                job_id=job.job_id,
+                state=ParseJobState.EMBEDDING,
+                claim_token=claim_token,
+            )
             self.event_logger.log(
                 "state_changed",
                 job_id=job.job_id,
@@ -421,11 +444,13 @@ class ParseRuntime:
                 document=document,
                 chunks=chunks,
             )
+            self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
             self.job_store.save_chunks(
                 doc_id=request.doc_id,
                 chunks=chunks,
                 tenant_id=request.tenant_id,
             )
+            self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
             self.index.upsert(
                 doc_id=request.doc_id,
                 chunks=chunks,
@@ -433,7 +458,12 @@ class ParseRuntime:
                 document=document,
                 index_manifest=index_manifest,
             )
-            final_job = self.job_store.update_state(job_id=job.job_id, state=ParseJobState.DONE)
+            final_job = self._update_job_state(
+                job_id=job.job_id,
+                state=ParseJobState.DONE,
+                claim_token=claim_token,
+                clear_claim=True,
+            )
             outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
             if _is_pdf_part_request(request):
                 self.refresh_partitioned_parent(
@@ -452,17 +482,25 @@ class ParseRuntime:
             )
             self.product_adapter.after_parse(outcome=outcome)
             return outcome
-        except Exception as exc:
+        except RuntimeError as exc:
+            if str(exc) == "stale_claim":
+                raise
             max_attempts = max(1, int(self.settings.runtime.max_attempts))
             if attempt >= max_attempts:
                 dead_letter = getattr(self.job_store, "mark_dead_letter", None)
                 if callable(dead_letter):
-                    failed_job = dead_letter(job_id=job.job_id, reason=str(exc))
+                    failed_job = dead_letter(
+                        job_id=job.job_id,
+                        reason=str(exc),
+                        expected_claim_token=claim_token,
+                    )
                 else:
-                    failed_job = self.job_store.update_state(
+                    failed_job = self._update_job_state(
                         job_id=job.job_id,
                         state=ParseJobState.FAILED,
                         failure_reason=str(exc),
+                        claim_token=claim_token,
+                        clear_claim=True,
                     )
                 self.event_logger.log(
                     "dead_letter",
@@ -473,12 +511,65 @@ class ParseRuntime:
                 )
             else:
                 if self._should_retry_failed_job():
-                    failed_job = self._schedule_retry(job=job, attempt=attempt, error=exc)
+                    failed_job = self._schedule_retry(job=job, attempt=attempt, error=exc, claim_token=claim_token)
                 else:
-                    failed_job = self.job_store.update_state(
+                    failed_job = self._update_job_state(
                         job_id=job.job_id,
                         state=ParseJobState.FAILED,
                         failure_reason=str(exc),
+                        claim_token=claim_token,
+                        clear_claim=True,
+                    )
+                    self.event_logger.log(
+                        "failed",
+                        job_id=job.job_id,
+                        doc_id=job.doc_id,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+            if _job_kind(job) == _PDF_PART_JOB_KIND:
+                self.refresh_partitioned_parent(
+                    doc_id=str(job.options.get("source_doc_id") or job.options.get("parent_doc_id") or ""),
+                    tenant_id=job.tenant_id,
+                    parent_job_id=str(job.options.get("parent_job_id") or ""),
+                )
+            self.product_adapter.on_failure(request=request, job=failed_job, error=exc)
+            raise
+        except Exception as exc:
+            max_attempts = max(1, int(self.settings.runtime.max_attempts))
+            if attempt >= max_attempts:
+                dead_letter = getattr(self.job_store, "mark_dead_letter", None)
+                if callable(dead_letter):
+                    failed_job = dead_letter(
+                        job_id=job.job_id,
+                        reason=str(exc),
+                        expected_claim_token=claim_token,
+                    )
+                else:
+                    failed_job = self._update_job_state(
+                        job_id=job.job_id,
+                        state=ParseJobState.FAILED,
+                        failure_reason=str(exc),
+                        claim_token=claim_token,
+                        clear_claim=True,
+                    )
+                self.event_logger.log(
+                    "dead_letter",
+                    job_id=job.job_id,
+                    doc_id=job.doc_id,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+            else:
+                if self._should_retry_failed_job():
+                    failed_job = self._schedule_retry(job=job, attempt=attempt, error=exc, claim_token=claim_token)
+                else:
+                    failed_job = self._update_job_state(
+                        job_id=job.job_id,
+                        state=ParseJobState.FAILED,
+                        failure_reason=str(exc),
+                        claim_token=claim_token,
+                        clear_claim=True,
                     )
                     self.event_logger.log(
                         "failed",
@@ -499,7 +590,14 @@ class ParseRuntime:
     def _should_retry_failed_job(self) -> bool:
         return str(self.settings.runtime.execution_mode).strip().lower() == "queue-worker"
 
-    def _schedule_retry(self, *, job, attempt: int, error: Exception):
+    def _schedule_retry(
+        self,
+        *,
+        job,
+        attempt: int,
+        error: Exception,
+        claim_token: str | None = None,
+    ):
         delay = _retry_delay_seconds(
             attempt,
             base_seconds=self.settings.runtime.retry_backoff_seconds,
@@ -510,14 +608,17 @@ class ParseRuntime:
         options["next_attempt_at"] = next_attempt_at
         options["retry_delay_s"] = delay
         options["last_error"] = str(error)
-        update_options = getattr(self.job_store, "update_options", None)
-        if callable(update_options):
-            update_options(job_id=job.job_id, options=options)
-        retry_job = self.job_store.update_state(
+        retry_job = self._update_job_state(
             job_id=job.job_id,
             state=ParseJobState.PENDING,
             failure_reason=f"retry_scheduled:{type(error).__name__}:{error}",
+            claim_token=claim_token,
+            clear_claim=True,
+            next_attempt_at=next_attempt_at,
         )
+        update_options = getattr(self.job_store, "update_options", None)
+        if callable(update_options):
+            update_options(job_id=job.job_id, options=options)
         self.event_logger.log(
             "retry",
             job_id=job.job_id,
@@ -551,6 +652,44 @@ class ParseRuntime:
             return 1
         job.attempt_count = int(job.attempt_count or 0) + 1
         return job.attempt_count
+
+    def claim_job(self, *, job_id: str):
+        claim_job = getattr(self.job_store, "claim_job", None)
+        if not callable(claim_job):
+            return None
+        pending = self.job_store.get_job(job_id=job_id)
+        if pending is None:
+            return None
+        return claim_job(
+            job_id=job_id,
+            lease_expires_at=_lease_expires_at_for_job(pending, self.settings.runtime),
+        )
+
+    def _update_job_state(
+        self,
+        *,
+        job_id: str,
+        state: ParseJobState,
+        failure_reason: str | None = None,
+        claim_token: str | None = None,
+        clear_claim: bool = False,
+        next_attempt_at: str | None = None,
+    ):
+        return self.job_store.update_state(
+            job_id=job_id,
+            state=state,
+            failure_reason=failure_reason,
+            expected_claim_token=claim_token,
+            clear_claim=clear_claim,
+            next_attempt_at=next_attempt_at,
+        )
+
+    def _ensure_active_claim(self, *, job_id: str, claim_token: str | None) -> None:
+        if claim_token is None:
+            return
+        current = self.job_store.get_job(job_id=job_id)
+        if current is None or current.claim_token != claim_token or current.state not in _ACTIVE_PART_STATES:
+            raise RuntimeError("stale_claim")
 
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
@@ -651,7 +790,11 @@ class ParseRuntime:
                 quota_units=source_job.quota_units,
             )
         )
-        parent_job = self.job_store.update_state(job_id=parent_job.job_id, state=ParseJobState.PARTIAL)
+        parent_job = self._update_job_state(
+            job_id=parent_job.job_id,
+            state=ParseJobState.PARTIAL,
+            clear_claim=True,
+        )
 
         part_jobs = []
         for spec in part_specs:
@@ -798,10 +941,11 @@ class ParseRuntime:
         cancelled = False
         job = child_job
         if child_job.state in cancellable_states:
-            job = self.job_store.update_state(
+            job = self._update_job_state(
                 job_id=child_job.job_id,
                 state=ParseJobState.FAILED,
                 failure_reason="cancelled",
+                clear_claim=True,
             )
             cancelled = True
             self.refresh_partitioned_parent(
@@ -950,7 +1094,11 @@ class ParseRuntime:
             )
         )
         if parent_job.state != new_state:
-            parent_job = self.job_store.update_state(job_id=parent_job.job_id, state=new_state)
+            parent_job = self._update_job_state(
+                job_id=parent_job.job_id,
+                state=new_state,
+                clear_claim=True,
+            )
         return parent_job
 
     def _start_pdf_part_job(
@@ -1903,11 +2051,19 @@ class ParseRuntime:
         for candidate in pending_jobs:
             if not _part_claim_allowed(candidate, active_counts):
                 continue
-            claimed = claim_job(job_id=candidate.job_id)
+            claimed = claim_job(
+                job_id=candidate.job_id,
+                lease_expires_at=_lease_expires_at_for_job(candidate, self.settings.runtime),
+            )
             if claimed is None:
                 continue
             if _part_claim_over_limit(claimed, tuple(self.list_jobs())):
-                self.job_store.update_state(job_id=claimed.job_id, state=ParseJobState.PENDING)
+                self._update_job_state(
+                    job_id=claimed.job_id,
+                    state=ParseJobState.PENDING,
+                    claim_token=claimed.claim_token,
+                    clear_claim=True,
+                )
                 continue
             return claimed
         return None
@@ -1928,15 +2084,21 @@ class ParseRuntime:
             if attempt >= max(1, int(self.settings.runtime.max_attempts)):
                 dead_letter = getattr(self.job_store, "mark_dead_letter", None)
                 if callable(dead_letter):
-                    updated = dead_letter(job_id=job.job_id, reason=str(error))
+                    updated = dead_letter(
+                        job_id=job.job_id,
+                        reason=str(error),
+                        expected_claim_token=job.claim_token,
+                    )
                 else:
-                    updated = self.job_store.update_state(
+                    updated = self._update_job_state(
                         job_id=job.job_id,
                         state=ParseJobState.FAILED,
                         failure_reason=str(error),
+                        claim_token=job.claim_token,
+                        clear_claim=True,
                     )
             else:
-                updated = self._schedule_retry(job=job, attempt=attempt, error=error)
+                updated = self._schedule_retry(job=job, attempt=attempt, error=error, claim_token=job.claim_token)
             self.event_aggregator.record_event(
                 "job_timeout",
                 tenant_id=job.tenant_id or "default",
@@ -2421,6 +2583,9 @@ def _job_ready_for_attempt(job: Any, *, now: datetime) -> bool:
 
 
 def _next_attempt_at(job: Any) -> datetime | None:
+    column_value = _parse_iso_datetime(getattr(job, "next_attempt_at", None))
+    if column_value is not None:
+        return column_value
     options = getattr(job, "options", {}) or {}
     if not isinstance(options, dict):
         return None
@@ -2441,6 +2606,13 @@ def _iso_after_seconds(delay_seconds: float) -> str:
     return target.isoformat()
 
 
+def _lease_expires_at_for_job(job: Any, runtime_settings: Any) -> str | None:
+    timeout_seconds = _timeout_seconds_for_job(job, runtime_settings)
+    if timeout_seconds <= 0:
+        return None
+    return _iso_after_seconds(timeout_seconds)
+
+
 def _timeout_seconds_for_job(job: Any, runtime_settings: Any) -> int:
     if _job_kind(job) == _PDF_PART_JOB_KIND:
         part_timeout = int(getattr(runtime_settings, "part_timeout_seconds", 0) or 0)
@@ -2450,6 +2622,9 @@ def _timeout_seconds_for_job(job: Any, runtime_settings: Any) -> int:
 
 
 def _job_exceeded_timeout(job: Any, *, now: datetime, timeout_seconds: int) -> bool:
+    lease_expires_at = _parse_iso_datetime(getattr(job, "lease_expires_at", None))
+    if lease_expires_at is not None:
+        return now >= lease_expires_at
     updated_at = _parse_iso_datetime(getattr(job, "updated_at", None))
     if updated_at is None:
         return False

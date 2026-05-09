@@ -109,7 +109,7 @@ log_path = "var/logs/job_events.jsonl"
 | `max_workers` | `2` | 正整数 | inline 后台 job 执行线程数。同步 `/parse` 和 `/parse/batch` 仍在请求内完成。 |
 | `max_inflight_jobs` | `0` | `0` 或正整数 | inline job 背压上限；`0` 表示自动取 `max_workers * 4`。超过时返回 `429 too_many_inflight_jobs`。 |
 | `max_active_parts_per_doc` | `0` | `0` 或正整数 | 单文档 active part 限流，`0` 表示不额外限制；inline 与 queue-worker 模式均会跳过已达上限的同文档 part，生产建议按 worker 总量设为 `2-4`。 |
-| `job_timeout_seconds` | `0` | `0` 或正整数 | queue-worker 软超时回收阈值；`0` 表示关闭。超时不会强杀正在运行的解析器，只会把 stale active job 重新排队或 dead-letter。 |
+| `job_timeout_seconds` | `0` | `0` 或正整数 | queue-worker 软超时回收阈值；`0` 表示关闭。超时不会强杀正在运行的解析器，只会把过期 active job 重新排队或 dead-letter。 |
 | `part_timeout_seconds` | `0` | `0` 或正整数 | PDF part job 专用软超时；未设置时回退到 `job_timeout_seconds`。 |
 | `retry_backoff_seconds` | `1.0` | 非负数 | queue-worker job 失败后重新进入 pending 前的指数退避基准。 |
 | `retry_backoff_max_seconds` | `60.0` | 非负数 | 指数退避上限，避免长时间阻塞同一个失败任务。 |
@@ -123,6 +123,8 @@ log_path = "var/logs/job_events.jsonl"
 | `quota_default_limit_units` | `0` | 非负整数 | 默认 quota 上限；`0` 表示未设置默认硬限。 |
 | `max_attempts` | `3` | 正整数 | Worker 模式下 job 最大尝试次数；未达到上限的失败 job 会按退避时间回到 `pending`，达到上限后写入 dead-letter。 |
 | `log_path` | `var/logs/job_events.jsonl` | 路径 | 运行事件日志路径。 |
+
+调度内部会为每次 claim 写入 `claim_token / claimed_at / lease_expires_at / next_attempt_at`。这些字段会出现在 job 查询 payload 中，宿主通常只需要透传或忽略；中台会用 `claim_token` 拒绝超时回收后的旧 worker 写回，避免旧 attempt 把新 attempt 的状态或产物覆盖掉。
 
 生产建议：
 
@@ -658,7 +660,7 @@ POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
 }
 ```
 
-取消接口只保证尚未运行的 part：持久化状态为 `pending`，inline runner 内部队列中的 part 也会先移出队列再转为 `cancelled`；如果 part 已在运行中，不强杀 worker 进程，会返回当前状态，让运行态自然结束或由软 timeout/复跑策略处理。
+取消接口只保证尚未运行的 part：持久化状态为 `pending`，inline runner 内部队列中的 part 也会先移出队列再转为 `cancelled`；如果 part 已在运行中，不强杀 worker 进程，会返回当前状态。运行态 job 的软 timeout 会使当前 `claim_token` 失效，旧 worker 后续写回会被拒绝，再由复跑或下一次 attempt 接管。
 
 宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑第一版已经能重跑指定页段；本轮生产增强继续补齐了批量复跑、取消和限流，后续再推进只重建受影响 part 的 embedding/index。
 

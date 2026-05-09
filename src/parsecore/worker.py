@@ -17,7 +17,7 @@ class QueueWorker:
         if job is None:
             return None
         try:
-            return self.runtime.execute(job_id=job.job_id)
+            return self.runtime.execute(job_id=job.job_id, claim_token=job.claim_token)
         except Exception:
             return None
 

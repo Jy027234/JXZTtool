@@ -249,7 +249,7 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 | `target_pages_per_part` | 100-300 | 普通文本型 PDF 先用较大页段，减少调度开销。 |
 | `ocr_heavy_pages_per_part` | 20-50 | OCR 密集或扫描件降低页段大小，避免单 part 长尾。 |
 | `max_active_parts_per_doc` | 2-4 | 单文档内限流，防止一个 17000 页任务吃满 worker。 |
-| `part_timeout_seconds` | 按 profile 配置 | queue-worker 软超时回收阈值；超时后按 `max_attempts` 和退避策略重试或 dead-letter，文档保留 partial 状态。 |
+| `part_timeout_seconds` | 按 profile 配置 | queue-worker 软超时回收阈值；超时后当前 `claim_token` 失效，再按 `max_attempts` 和退避策略重试或 dead-letter，文档保留 partial 状态。 |
 | `merge_checkpoint_parts` | 10-20 | 每完成一批 part 刷新一次 manifest 和质量摘要。 |
 
 中等改造步骤：
@@ -261,7 +261,7 @@ GET  /v1/parse/documents/{doc_id}/parts/{part_id}/runs/{run_id}
 5. 文档状态区分 `running / partial / done / failed`：只要部分 part 成功，宿主就可以读取 partial structured 结果和异常 part 列表。
 6. 异常 part 通过上一节规划接口复跑，优先只对失败页段启用 OCR、多引擎或更小页段，不默认全量重跑。
 
-已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。本轮生产增强已补齐单文档 active part 限流 `max_active_parts_per_doc`、批量复跑 `/parts/rerun`、尚未运行 part 取消 `/parts/{part_id}/cancel`、queue-worker 失败退避和 job/part 软超时。仍需增强：只重建受影响 part 的 embedding/index layer。
+已落地边界：`profile=large-pdf`、同步 413 分流、异步上传与 job、PDF 物理页段切分、part 子 job、父文档 `partial` 状态、part 级结果合并、part 级复跑、structured 读取、质量信号和 profile_resolution。本轮生产增强已补齐单文档 active part 限流 `max_active_parts_per_doc`、批量复跑 `/parts/rerun`、尚未运行 part 取消 `/parts/{part_id}/cancel`、queue-worker 失败退避、job/part 软超时和 `claim_token` 防旧 worker 写回。仍需增强：只重建受影响 part 的 embedding/index layer。
 
 ### Phase 5：导出与人工复核
 
