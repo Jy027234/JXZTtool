@@ -13,6 +13,8 @@ poll_interval_ms = 500
 # api_key_env = "PARSECORE_API_KEY"
 # 50 MiB request file guard for /parse and /parse/batch; set 0 to disable.
 max_upload_bytes = 52428800
+# Optional guard for /parse/uploads and /v1/parse/uploads; 0 keeps the async bridge open for large files.
+staged_upload_max_bytes = 0
 # Keep /v1/parse/jobs from reading arbitrary host paths. Use /parse/uploads or
 # place server-side files under storage.object_store when this is false.
 allow_external_file_paths = false

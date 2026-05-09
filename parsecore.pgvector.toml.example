@@ -9,6 +9,8 @@ max_inflight_jobs = 0
 poll_interval_ms = 500
 # Gray-release default: reject files above 50 MiB before parser execution.
 max_upload_bytes = 52428800
+# Optional guard for /parse/uploads and /v1/parse/uploads; 0 keeps the async bridge open for large files.
+staged_upload_max_bytes = 0
 # Keep /v1/parse/jobs from reading arbitrary host paths. Use /parse/uploads or
 # place server-side files under storage.object_store when this is false.
 allow_external_file_paths = false

@@ -25,15 +25,26 @@ from .api_responses import batch_error_response as _batch_error_response
 from .api_responses import error_response as _error_response
 from .api_support import (
     _api_key_unauthorized_response,
+    _document_too_large_for_sync_detail,
     _estimated_base64_decoded_size,
     _extract_api_key,
     _exceeds_upload_limit,
     _file_too_large_detail,
     _max_upload_bytes,
+    _max_staged_upload_bytes,
     _trace_id_for_request,
 )
+from .export_jobs import create_export_package, export_file_path, load_export_manifest
+from .exports import export_structured_projection
 from .models import ParseRequest
+from .parts import PART_STATE_FILTERS, document_parts_projection
+from .profiles import describe_parse_profiles, resolve_parse_profile
 from .runtime import ParseRuntime, QuotaExceededError
+
+
+_SYNC_ASYNC_RECOMMENDATION_MESSAGE = (
+    "Document is too large for synchronous parsing; use the asynchronous upload/job flow"
+)
 
 
 class ApiRoutes:
@@ -56,10 +67,13 @@ class ApiRoutes:
             Route("/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse", self.parse_upload, methods=["POST"]),
             Route("/v1/runtime", self.describe, methods=["GET"]),
+            Route("/v1/parse/profiles", self.parse_profiles, methods=["GET"]),
             Route("/v1/parse/uploads", self.stage_upload, methods=["POST"]),
             Route("/v1/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse/jobs", self.create_job, methods=["POST"]),
             Route("/v1/parse/jobs", self.list_jobs, methods=["GET"]),
+            Route("/v1/parse/export-jobs/{export_id}", self.get_export_job, methods=["GET"]),
+            Route("/v1/parse/export-jobs/{export_id}/download", self.download_export_file, methods=["GET"]),
             Route("/v1/parse/quotas/usage", self.quota_usage, methods=["GET"]),
             Route("/v1/parse/metrics", self.runtime_metrics, methods=["GET"]),
             Route("/v1/parse/indexes/metrics", self.index_metrics, methods=["GET"]),
@@ -68,6 +82,11 @@ class ApiRoutes:
             Route("/v1/parse/dashboard", self.tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/exports", self.export_document, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/export-jobs", self.create_export_job, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/parts", self.get_document_parts, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/parts/plan", self.plan_document_parts, methods=["POST"]),
+            Route("/v1/parse/documents/{doc_id}/parts/{part_id}/rerun", self.rerun_document_part, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}", self.get_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/search", self.search_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/structure-search", self.search_document_structure, methods=["GET"]),
@@ -119,6 +138,9 @@ class ApiRoutes:
         runtime_obj: ParseRuntime = request.app.state.runtime
         return JSONResponse(runtime_obj.describe())
 
+    async def parse_profiles(self, request: Request) -> JSONResponse:
+        return JSONResponse(describe_parse_profiles())
+
     async def create_job(self, request: Request) -> JSONResponse:
         payload = await request.json()
         doc_id = str(payload.get("doc_id") or "").strip()
@@ -166,11 +188,22 @@ class ApiRoutes:
                 message="Invalid quota_units",
                 status_code=400,
             )
+        raw_options = dict(payload.get("options") or {})
+        file_name = str(payload.get("file_name") or raw_options.get("file_name") or Path(file_path).name)
+        media_type = _resolve_media_type(file_name, payload.get("media_type"))
+        options, _profile = _profile_options(
+            raw_options,
+            media_type=media_type,
+            file_name=file_name,
+            file_size_bytes=_safe_file_size(file_path),
+            requested_profile=payload.get("profile"),
+        )
+        options.setdefault("file_name", file_name)
         parse_request = ParseRequest(
             doc_id=doc_id,
             file_path=file_path,
-            media_type=payload.get("media_type"),
-            options=dict(payload.get("options") or {}),
+            media_type=media_type,
+            options=options,
             tenant_id=str(payload.get("tenant_id") or "default"),
             quota_key=str(payload.get("quota_key") or "default"),
             quota_units=quota_units,
@@ -227,16 +260,27 @@ class ApiRoutes:
             )
         runtime_obj: ParseRuntime = request.app.state.runtime
         max_upload_bytes = _max_upload_bytes(runtime_obj)
+        raw_options = dict(payload.get("options") or {})
+        media_type = _resolve_media_type(file_name, payload.get("media_type"))
+        force_sync = _force_sync_requested(payload, raw_options)
         estimated_size = _estimated_base64_decoded_size(file_base64)
+        estimated_profile = _resolve_request_profile(
+            raw_options,
+            media_type=media_type,
+            file_name=file_name,
+            file_size_bytes=estimated_size,
+            requested_profile=payload.get("profile"),
+        )
         if _exceeds_upload_limit(estimated_size, max_upload_bytes):
             return _batch_error_response(
                 request,
-                code="file_too_large",
-                message="File exceeds configured upload limit",
+                code="document_too_large_for_sync",
+                message=_SYNC_ASYNC_RECOMMENDATION_MESSAGE,
                 status_code=413,
-                detail=_file_too_large_detail(
+                detail=_document_too_large_for_sync_detail(
                     actual_bytes=estimated_size,
                     limit_bytes=max_upload_bytes,
+                    profile=estimated_profile,
                 ),
             )
         try:
@@ -267,19 +311,45 @@ class ApiRoutes:
         if _exceeds_upload_limit(len(file_bytes), max_upload_bytes):
             return _batch_error_response(
                 request,
-                code="file_too_large",
-                message="File exceeds configured upload limit",
+                code="document_too_large_for_sync",
+                message=_SYNC_ASYNC_RECOMMENDATION_MESSAGE,
                 status_code=413,
-                detail=_file_too_large_detail(
+                detail=_document_too_large_for_sync_detail(
                     actual_bytes=len(file_bytes),
                     limit_bytes=max_upload_bytes,
+                    profile=_resolve_request_profile(
+                        raw_options,
+                        media_type=media_type,
+                        file_name=file_name,
+                        file_size_bytes=len(file_bytes),
+                        requested_profile=payload.get("profile"),
+                    ),
                 ),
             )
 
-        suffix = Path(file_name).suffix or ".bin"
-        media_type = payload.get("media_type")
-        options = dict(payload.get("options") or {})
+        options, profile = _profile_options(
+            raw_options,
+            media_type=media_type,
+            file_name=file_name,
+            file_size_bytes=len(file_bytes),
+            requested_profile=payload.get("profile"),
+        )
+        if bool(profile.get("recommended_async")) and not force_sync:
+            return _batch_error_response(
+                request,
+                code="document_too_large_for_sync",
+                message=_SYNC_ASYNC_RECOMMENDATION_MESSAGE,
+                status_code=413,
+                detail=_document_too_large_for_sync_detail(
+                    actual_bytes=len(file_bytes),
+                    limit_bytes=max_upload_bytes,
+                    profile=profile,
+                ),
+            )
         options["enable_ocr"] = enable_ocr
+        options["file_name"] = file_name
+        if force_sync:
+            options["force_sync"] = True
         submission_path: str | None = None
         delete_after_submit = False
         try:
@@ -359,6 +429,8 @@ class ApiRoutes:
         file_name = str(getattr(upload, "filename", None) or "unknown")
         media_type = _resolve_media_type(file_name, getattr(upload, "content_type", None))
         enable_ocr = _coerce_bool(form.get("enable_ocr"), default=False)
+        requested_profile = form.get("profile") or form.get("parse_profile")
+        force_sync = _force_sync_requested(form, {})
         try:
             content = await upload.read()
             if not content:
@@ -373,12 +445,38 @@ class ApiRoutes:
             if _exceeds_upload_limit(len(content), max_upload_bytes):
                 return _error_response(
                     request,
-                    code="file_too_large",
-                    message="File exceeds configured upload limit",
+                    code="document_too_large_for_sync",
+                    message=_SYNC_ASYNC_RECOMMENDATION_MESSAGE,
                     status_code=413,
-                    detail=_file_too_large_detail(
+                    detail=_document_too_large_for_sync_detail(
                         actual_bytes=len(content),
                         limit_bytes=max_upload_bytes,
+                        profile=_resolve_request_profile(
+                            {},
+                            media_type=media_type,
+                            file_name=file_name,
+                            file_size_bytes=len(content),
+                            requested_profile=requested_profile,
+                        ),
+                    ),
+                )
+            profile_options, profile = _profile_options(
+                {},
+                media_type=media_type,
+                file_name=file_name,
+                file_size_bytes=len(content),
+                requested_profile=requested_profile,
+            )
+            if bool(profile.get("recommended_async")) and not force_sync:
+                return _error_response(
+                    request,
+                    code="document_too_large_for_sync",
+                    message=_SYNC_ASYNC_RECOMMENDATION_MESSAGE,
+                    status_code=413,
+                    detail=_document_too_large_for_sync_detail(
+                        actual_bytes=len(content),
+                        limit_bytes=max_upload_bytes,
+                        profile=profile,
                     ),
                 )
 
@@ -396,7 +494,11 @@ class ApiRoutes:
             tenant_id = str(form.get("tenant_id") or "default")
             quota_key = str(form.get("quota_key") or "default")
             doc_id = str(form.get("doc_id") or Path(file_name).stem or "upload-doc")
-            options = {"enable_ocr": enable_ocr}
+            options = dict(profile_options)
+            options["enable_ocr"] = enable_ocr
+            options["file_name"] = file_name
+            if force_sync:
+                options["force_sync"] = True
             submission_path: str | None = None
             delete_after_submit = False
             try:
@@ -483,6 +585,7 @@ class ApiRoutes:
         media_type = _resolve_media_type(file_name, getattr(upload, "content_type", None))
         enable_ocr = _coerce_bool(form.get("enable_ocr"), default=False)
         create_job = _coerce_bool(form.get("create_job"), default=False)
+        requested_profile = form.get("profile") or form.get("parse_profile")
         try:
             content = await upload.read()
             if not content:
@@ -492,18 +595,25 @@ class ApiRoutes:
                     message="Empty file",
                     status_code=400,
                 )
-            max_upload_bytes = _max_upload_bytes(runtime_obj)
+            max_upload_bytes = _max_staged_upload_bytes(runtime_obj)
             if _exceeds_upload_limit(len(content), max_upload_bytes):
                 return _error_response(
                     request,
                     code="file_too_large",
-                    message="File exceeds configured upload limit",
+                    message="File exceeds configured staged upload limit",
                     status_code=413,
                     detail=_file_too_large_detail(
                         actual_bytes=len(content),
                         limit_bytes=max_upload_bytes,
                     ),
                 )
+            profile_options, profile = _profile_options(
+                {"enable_ocr": enable_ocr, "file_name": file_name},
+                media_type=media_type,
+                file_name=file_name,
+                file_size_bytes=len(content),
+                requested_profile=requested_profile,
+            )
 
             quota_units_raw = form.get("quota_units", 1)
             try:
@@ -542,7 +652,7 @@ class ApiRoutes:
                     doc_id=doc_id,
                     file_path=submission_path,
                     media_type=media_type,
-                    options={"enable_ocr": enable_ocr, "file_name": file_name},
+                    options=profile_options,
                     tenant_id=tenant_id,
                     quota_key=quota_key,
                     quota_units=quota_units,
@@ -585,6 +695,10 @@ class ApiRoutes:
             "quota_key": quota_key,
             "quota_units": quota_units,
             "enable_ocr": enable_ocr,
+            "profile": profile.get("profile", "default"),
+            "profile_source": profile.get("source", "auto"),
+            "profile_reasons": list(profile.get("reasons") or []),
+            "profile_recommended_async": bool(profile.get("recommended_async")),
             "parsecore_server_file_path": submission_path,
             "create_job": create_job,
         }
@@ -758,6 +872,192 @@ class ApiRoutes:
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         return JSONResponse(_document_quality_projection(snapshot))
+
+    async def export_document(self, request: Request) -> Response:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        dataset = str(request.query_params.get("dataset") or "tables")
+        export_format = str(request.query_params.get("format") or "jsonl")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        payload = _document_projection(snapshot, projection="structured")
+        try:
+            exported = export_structured_projection(
+                payload,
+                dataset=dataset,
+                format=export_format,
+                as_bytes=True,
+            )
+        except ValueError as exc:
+            code = str(exc) or "invalid_export"
+            if code == "invalid_export_dataset":
+                return _error_response(
+                    request,
+                    code=code,
+                    message="Invalid export dataset",
+                    status_code=400,
+                    detail={"allowed": ["tables", "quality_signals", "parse_units"]},
+                )
+            if code == "invalid_export_format":
+                return _error_response(
+                    request,
+                    code=code,
+                    message="Invalid export format",
+                    status_code=400,
+                    detail={"allowed": ["jsonl", "csv", "tsv"]},
+                )
+            return _error_response(
+                request,
+                code=code,
+                message="Invalid export payload",
+                status_code=500,
+            )
+
+        headers = {
+            "content-disposition": f"attachment; filename=\"{exported['filename']}\"",
+        }
+        return Response(
+            content=exported["content"],
+            media_type=str(exported["content_type"]),
+            headers=headers,
+        )
+
+    async def get_document_parts(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        state_filter = request.query_params.getlist("state")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        payload = _document_projection(snapshot, projection="structured")
+        try:
+            return JSONResponse(document_parts_projection(payload, state_filter=state_filter))
+        except ValueError as exc:
+            code = str(exc) or "invalid_parts_payload"
+            if code == "invalid_part_state":
+                return _error_response(
+                    request,
+                    code=code,
+                    message="Invalid part state filter",
+                    status_code=400,
+                    detail={"allowed": sorted(PART_STATE_FILTERS)},
+                )
+            return _error_response(
+                request,
+                code=code,
+                message="Invalid parts payload",
+                status_code=500,
+            )
+
+    async def plan_document_parts(self, request: Request) -> JSONResponse:
+        payload = await _optional_json_payload(request)
+        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        try:
+            result = request.app.state.runner.plan_pdf_parts(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
+                target_pages_per_part=_optional_int(payload.get("target_pages_per_part")),
+                ocr_heavy_pages_per_part=_optional_int(payload.get("ocr_heavy_pages_per_part")),
+                profile=payload.get("profile"),
+            )
+        except LookupError:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        except ValueError as exc:
+            code = str(exc) or "invalid_part_plan"
+            status = 400
+            message = "Invalid PDF part plan"
+            if code == "document_not_pdf":
+                message = "Document is not a PDF"
+            if code == "invalid_pdf":
+                message = "Invalid PDF"
+            return _error_response(request, code=code, message=message, status_code=status)
+        except QuotaExceededError as exc:
+            _record_quota_exceeded_event(request, request.app.state.runtime, exc)
+            return self._quota_error_response(request, exc)
+        return JSONResponse(_to_payload(result), status_code=202)
+
+    async def rerun_document_part(self, request: Request) -> JSONResponse:
+        payload = await _optional_json_payload(request)
+        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        try:
+            result = request.app.state.runner.rerun_pdf_part(
+                doc_id=request.path_params["doc_id"],
+                part_id=request.path_params["part_id"],
+                tenant_id=tenant_id,
+                profile=payload.get("profile"),
+            )
+        except LookupError:
+            return _error_response(request, code="part_not_found", message="Part not found", status_code=404)
+        except ValueError as exc:
+            return _error_response(
+                request,
+                code=str(exc) or "invalid_part_rerun",
+                message="Invalid part rerun",
+                status_code=400,
+            )
+        except QuotaExceededError as exc:
+            _record_quota_exceeded_event(request, request.app.state.runtime, exc)
+            return self._quota_error_response(request, exc)
+        return JSONResponse(_to_payload(result), status_code=202)
+
+    async def create_export_job(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        payload = await _optional_json_payload(request)
+        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        export_payload = _document_projection(snapshot, projection="structured")
+        export_payload["tenant_id"] = tenant_id
+        try:
+            manifest = create_export_package(
+                export_payload,
+                _export_root(runtime_obj),
+                formats=_formats_payload(payload.get("formats")),
+                includes=_includes_payload(payload.get("include") or payload.get("includes")),
+                filters=dict(payload.get("filters") or {}),
+            )
+        except ValueError as exc:
+            return _error_response(
+                request,
+                code=str(exc) or "invalid_export_job",
+                message="Invalid export job",
+                status_code=400,
+            )
+        manifest["download_endpoint"] = f"/v1/parse/export-jobs/{manifest['export_id']}/download"
+        return JSONResponse(manifest, status_code=202)
+
+    async def get_export_job(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        try:
+            manifest = load_export_manifest(_export_root(runtime_obj), request.path_params["export_id"])
+        except (FileNotFoundError, ValueError):
+            return _error_response(request, code="export_not_found", message="Export job not found", status_code=404)
+        manifest["download_endpoint"] = f"/v1/parse/export-jobs/{manifest['export_id']}/download"
+        return JSONResponse(manifest)
+
+    async def download_export_file(self, request: Request) -> Response:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        export_id = request.path_params["export_id"]
+        filename = str(request.query_params.get("file") or "manifest.json")
+        try:
+            manifest = load_export_manifest(_export_root(runtime_obj), export_id)
+            path = export_file_path(_export_root(runtime_obj), export_id, filename)
+        except (FileNotFoundError, ValueError):
+            return _error_response(request, code="export_not_found", message="Export file not found", status_code=404)
+        if not path.exists() or not path.is_file():
+            return _error_response(request, code="export_not_found", message="Export file not found", status_code=404)
+        content_type = "application/json; charset=utf-8" if filename == "manifest.json" else "application/octet-stream"
+        for entry in tuple(manifest.get("files") or ()):
+            if isinstance(entry, dict) and entry.get("path") == filename:
+                content_type = str(entry.get("content_type") or content_type)
+                break
+        return Response(
+            content=path.read_bytes(),
+            media_type=content_type,
+            headers={"content-disposition": f"attachment; filename=\"{Path(filename).name}\""},
+        )
 
     async def search_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
@@ -1005,6 +1305,128 @@ class ApiRoutes:
                 )
             raise
         return JSONResponse(_to_payload(job), status_code=202)
+
+
+def _profile_options(
+    options: dict[str, Any],
+    *,
+    media_type: str | None,
+    file_name: str | None,
+    file_size_bytes: int | None,
+    requested_profile: Any = None,
+    page_count: int | None = None,
+    table_count: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    normalized = dict(options or {})
+    requested = _requested_profile(normalized, requested_profile)
+    resolved = resolve_parse_profile(
+        media_type=media_type,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        page_count=page_count,
+        table_count=table_count,
+        requested_profile=requested,
+    )
+    normalized["profile"] = str(resolved.get("profile") or "default")
+    normalized["requested_profile"] = requested or "auto"
+    normalized["profile_source"] = str(resolved.get("source") or "auto")
+    normalized["profile_reasons"] = list(resolved.get("reasons") or [])
+    normalized["profile_recommended_async"] = bool(resolved.get("recommended_async"))
+    normalized["profile_limits"] = dict(resolved.get("limits") or {})
+    normalized["profile_known"] = bool(resolved.get("profile_known", True))
+    if resolved.get("profile_warning"):
+        normalized["profile_warning"] = str(resolved["profile_warning"])
+    return normalized, resolved
+
+
+async def _optional_json_payload(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return {}
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _formats_payload(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    return None
+
+
+def _includes_payload(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return None
+
+
+def _export_root(runtime_obj: ParseRuntime) -> Path:
+    root = _resolve_local_object_store_root(runtime_obj)
+    if root is None:
+        raise ValueError("export_requires_local_object_store")
+    export_root = root / "_exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    return export_root
+
+
+def _resolve_request_profile(
+    options: dict[str, Any],
+    *,
+    media_type: str | None,
+    file_name: str | None,
+    file_size_bytes: int | None,
+    requested_profile: Any = None,
+    page_count: int | None = None,
+    table_count: int | None = None,
+) -> dict[str, Any]:
+    requested = _requested_profile(options, requested_profile)
+    return resolve_parse_profile(
+        media_type=media_type,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        page_count=page_count,
+        table_count=table_count,
+        requested_profile=requested,
+    )
+
+
+def _requested_profile(options: dict[str, Any], requested_profile: Any = None) -> str | None:
+    for candidate in (
+        requested_profile,
+        options.get("profile") if isinstance(options, dict) else None,
+        options.get("parse_profile") if isinstance(options, dict) else None,
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _force_sync_requested(payload: Any, options: dict[str, Any]) -> bool:
+    for key in ("force_sync", "allow_sync_large_document"):
+        if hasattr(payload, "get") and _coerce_bool(payload.get(key), default=False):
+            return True
+        if isinstance(options, dict) and _coerce_bool(options.get(key), default=False):
+            return True
+    return False
+
+
+def _safe_file_size(file_path: str) -> int | None:
+    try:
+        return Path(file_path).stat().st_size
+    except OSError:
+        return None
 
 
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:

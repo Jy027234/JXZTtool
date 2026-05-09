@@ -107,6 +107,13 @@ def _max_upload_bytes(runtime: Any) -> int:
         return 0
 
 
+def _max_staged_upload_bytes(runtime: Any) -> int:
+    try:
+        return max(0, int(getattr(runtime.settings.runtime, "staged_upload_max_bytes", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _exceeds_upload_limit(actual_bytes: int, limit_bytes: int) -> bool:
     return limit_bytes > 0 and actual_bytes > limit_bytes
 
@@ -115,6 +122,30 @@ def _file_too_large_detail(*, actual_bytes: int, limit_bytes: int) -> dict[str, 
     return {
         "actual_bytes": actual_bytes,
         "limit_bytes": limit_bytes,
+    }
+
+
+def _document_too_large_for_sync_detail(
+    *,
+    actual_bytes: int,
+    limit_bytes: int,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_profile = dict(profile or {})
+    return {
+        "actual_bytes": actual_bytes,
+        "limit_bytes": limit_bytes,
+        "recommended_endpoint": "/v1/parse/uploads",
+        "recommended_job_endpoint": "/v1/parse/jobs",
+        "profile": "auto",
+        "resolved_profile": resolved_profile.get("profile", "default"),
+        "profile_source": resolved_profile.get("source", "auto"),
+        "profile_reasons": list(resolved_profile.get("reasons") or []),
+        "profile_limits": dict(resolved_profile.get("limits") or {}),
+        "profile_known": bool(resolved_profile.get("profile_known", True)),
+        "profile_warning": resolved_profile.get("profile_warning"),
+        "can_force_sync": True,
+        "force_sync_param_names": ["force_sync", "allow_sync_large_document"],
     }
 
 

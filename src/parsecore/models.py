@@ -15,6 +15,7 @@ class ParseJobState(str, Enum):
     PARSING = "parsing"
     STRUCTURING = "structuring"
     EMBEDDING = "embedding"
+    PARTIAL = "partial"
     DONE = "done"
     FAILED = "failed"
 

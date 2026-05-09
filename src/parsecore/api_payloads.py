@@ -5,6 +5,7 @@ from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
 from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
+from .profiles import resolve_parse_profile
 from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 
 
@@ -162,6 +163,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
         "doc_id": doc_id,
         "parse_run_id": str(getattr(job, "job_id", "") or ""),
         "profile": _profile_for_document(job=job, pages=pages, tables=tables),
+        "profile_resolution": _profile_resolution_for_document(job=job, pages=pages, tables=tables),
         "state": _state_value(getattr(job, "state", None)),
         "compat_pages": pages,
         "pages": structured_pages,
@@ -195,6 +197,7 @@ def _document_quality_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "doc_id": structured["doc_id"],
         "parse_run_id": structured["parse_run_id"],
         "profile": structured["profile"],
+        "profile_resolution": structured["profile_resolution"],
         "state": structured["state"],
         "quality": structured["quality"],
         "raw_quality": structured["raw_quality"],
@@ -291,6 +294,11 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
             "sheet_table_index",
             "table_title",
             "hidden_sheet",
+            "header_values",
+            "merged_cells",
+            "has_formula",
+            "formula_count",
+            "truncated",
             "cells_truncated",
             "cells_total",
             "cells_preview_rows",
@@ -426,6 +434,92 @@ def _quality_signals(
                     detail={"cols": cols, "common_cols": common_cols},
                 )
             )
+        if bool(table.get("cells_truncated")):
+            signals.append(
+                _quality_signal(
+                    code="table_cells_truncated",
+                    severity="warning",
+                    message=_quality_signal_message("table_cells_truncated"),
+                    page_number=page_number,
+                    table_id=table_id,
+                    detail={
+                        "cells_total": table.get("cells_total"),
+                        "cells_preview_rows": table.get("cells_preview_rows"),
+                    },
+                )
+            )
+        if bool(table.get("truncated")):
+            signals.append(
+                _quality_signal(
+                    code="table_source_truncated",
+                    severity="warning",
+                    message=_quality_signal_message("table_source_truncated"),
+                    page_number=page_number,
+                    table_id=table_id,
+                )
+            )
+        if bool(table.get("hidden_sheet")):
+            signals.append(
+                _quality_signal(
+                    code="table_hidden_sheet",
+                    severity="info",
+                    message=_quality_signal_message("table_hidden_sheet"),
+                    page_number=page_number,
+                    table_id=table_id,
+                )
+            )
+        merged_cells = table.get("merged_cells")
+        if isinstance(merged_cells, list) and merged_cells:
+            signals.append(
+                _quality_signal(
+                    code="table_merged_cells",
+                    severity="info",
+                    message=_quality_signal_message("table_merged_cells"),
+                    page_number=page_number,
+                    table_id=table_id,
+                    detail={"merged_cells": list(merged_cells)},
+                )
+            )
+        if bool(table.get("has_formula")):
+            signals.append(
+                _quality_signal(
+                    code="table_formula_cells",
+                    severity="info",
+                    message=_quality_signal_message("table_formula_cells"),
+                    page_number=page_number,
+                    table_id=table_id,
+                    detail={"formula_count": table.get("formula_count")},
+                )
+            )
+        header_values = table.get("header_values")
+        if isinstance(header_values, list) and header_values:
+            header_texts = [str(value or "").strip() for value in header_values]
+            blank_columns = [index for index, value in enumerate(header_texts) if not value]
+            if blank_columns and len(blank_columns) < len(header_texts):
+                signals.append(
+                    _quality_signal(
+                        code="table_header_blank_cells",
+                        severity="warning",
+                        message=_quality_signal_message("table_header_blank_cells"),
+                        page_number=page_number,
+                        table_id=table_id,
+                        row_index=0,
+                        detail={"col_indexes": blank_columns},
+                    )
+                )
+            duplicate_headers = _duplicate_header_values(header_texts)
+            if duplicate_headers:
+                signals.append(
+                    _quality_signal(
+                        code="table_header_duplicate_values",
+                        severity="warning",
+                        message=_quality_signal_message("table_header_duplicate_values"),
+                        page_number=page_number,
+                        table_id=table_id,
+                        row_index=0,
+                        detail={"values": duplicate_headers},
+                    )
+                )
     return signals
 
 
@@ -464,7 +558,27 @@ def _quality_signal_message(code: str) -> str:
         "table_header_missing": "Table header row is empty",
         "table_ragged_rows": "Table rows have inconsistent column counts",
         "table_empty_ratio_high": "Table has a high ratio of empty cells",
+        "table_cells_truncated": "Table cell metadata was truncated",
+        "table_source_truncated": "Table source range was truncated by parser limits",
+        "table_hidden_sheet": "Table comes from a hidden sheet",
+        "table_merged_cells": "Table contains merged cells",
+        "table_formula_cells": "Table contains formula cells",
+        "table_header_blank_cells": "Table header row has blank cells",
+        "table_header_duplicate_values": "Table header row has duplicate values",
     }.get(code, code)
+
+
+def _duplicate_header_values(header_values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in header_values:
+        normalized = value.strip().lower()
+        if not normalized:
+            continue
+        if normalized in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(normalized)
+    return duplicates
 
 
 def _quality_signal_summary(signals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -522,6 +636,35 @@ def _parse_units(
     tables: list[dict[str, Any]],
     quality_signals: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    partition_parts = snapshot.get("partition_parts")
+    if isinstance(partition_parts, list):
+        units: list[dict[str, Any]] = []
+        for index, part in enumerate(partition_parts, start=1):
+            if not isinstance(part, dict):
+                continue
+            part_id = str(part.get("part_id") or part.get("parse_unit_id") or f"part-{index}")
+            page_start = _safe_int(part.get("page_start"), default=1)
+            page_end = _safe_int(part.get("page_end"), default=page_start)
+            units.append(
+                {
+                    "parse_unit_id": str(part.get("parse_unit_id") or part_id),
+                    "part_id": part_id,
+                    "source_doc_id": str(part.get("source_doc_id") or snapshot.get("doc_id") or ""),
+                    "part_doc_id": str(part.get("part_doc_id") or part_id),
+                    "part_index": _safe_int(part.get("part_index"), default=index),
+                    "source_type": str(part.get("source_type") or ""),
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "state": _state_value(part.get("state")),
+                    "job_id": part.get("job_id"),
+                    "table_count": _safe_int(part.get("table_count"), default=0),
+                    "quality_signal_count": _safe_int(part.get("quality_signal_count"), default=0),
+                    "rerun_supported": bool(part.get("rerun_supported", False)),
+                }
+            )
+        if units:
+            return units
+
     job = snapshot.get("job")
     doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", ""))
     page_numbers = [_safe_int(page.get("page_number"), default=1) for page in pages]
@@ -549,17 +692,68 @@ def _profile_for_document(
     pages: list[dict[str, Any]],
     tables: list[dict[str, Any]],
 ) -> str:
+    return str(_profile_resolution_for_document(job=job, pages=pages, tables=tables)["resolved_profile"])
+
+
+def _profile_resolution_for_document(
+    *,
+    job: Any,
+    pages: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+) -> dict[str, Any]:
     options = getattr(job, "options", {}) or {}
+    file_name = None
+    requested_profile = None
     if isinstance(options, dict):
-        explicit = str(options.get("profile") or options.get("parse_profile") or "").strip()
-        if explicit:
-            return explicit
+        file_name = str(options.get("file_name") or "").strip() or None
+        requested_profile = str(options.get("requested_profile") or options.get("profile") or options.get("parse_profile") or "").strip() or None
+        if options.get("profile_source"):
+            profile = str(options.get("profile") or "default")
+            return _profile_resolution_payload(
+                requested_profile=requested_profile,
+                resolved={
+                    "profile": profile,
+                    "source": str(options.get("profile_source") or "auto"),
+                    "reasons": list(options.get("profile_reasons") or []),
+                    "recommended_async": bool(options.get("profile_recommended_async")),
+                    "limits": dict(options.get("profile_limits") or {}),
+                    "profile_known": bool(options.get("profile_known", True)),
+                    "profile_warning": options.get("profile_warning"),
+                },
+            )
     media_type = str(getattr(job, "media_type", "") or "").lower()
-    if "pdf" in media_type and len(pages) >= 100:
-        return "large-pdf"
-    if tables and len(tables) >= max(2, len(pages) // 2):
-        return "table-heavy"
-    return "default"
+    resolved = resolve_parse_profile(
+        media_type=media_type,
+        file_name=file_name,
+        file_size_bytes=None,
+        page_count=len(pages),
+        table_count=len(tables),
+        requested_profile=requested_profile,
+    )
+    return _profile_resolution_payload(
+        requested_profile=requested_profile,
+        resolved=resolved,
+    )
+
+
+def _profile_resolution_payload(
+    *,
+    requested_profile: str | None,
+    resolved: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "requested_profile": requested_profile or "auto",
+        "resolved_profile": str(resolved.get("profile") or "default"),
+        "source": str(resolved.get("source") or "auto"),
+        "reasons": list(resolved.get("reasons") or []),
+        "recommended_async": bool(resolved.get("recommended_async")),
+        "limits": dict(resolved.get("limits") or {}),
+        "profile_known": bool(resolved.get("profile_known", True)),
+    }
+    warning = resolved.get("profile_warning")
+    if warning:
+        payload["profile_warning"] = str(warning)
+    return payload
 
 
 def _common_table_col_count(tables: list[dict[str, Any]]) -> int:

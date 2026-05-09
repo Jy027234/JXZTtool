@@ -458,6 +458,7 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(staged_payload["state"], "staged")
                 self.assertIn("parsecore_server_file_path", staged_payload)
                 self.assertTrue(Path(staged_payload["parsecore_server_file_path"]).exists())
+                self.assertEqual(staged_payload["profile"], "default")
 
                 created = client.post(
                     "/v1/parse/jobs",
@@ -476,6 +477,7 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(created_payload["doc_id"], "doc-bridge-001")
                 self.assertEqual(created_payload["tenant_id"], "tenant-alpha")
                 self.assertEqual(created_payload["quota_units"], 2)
+                self.assertEqual(created_payload["options"]["profile"], "default")
 
                 final_job = None
                 for _ in range(20):
@@ -510,6 +512,73 @@ class ParseApiTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(created.status_code, 202)
+
+    def test_create_job_persists_top_level_profile_in_options(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("profiled.txt", "profile alpha")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-profile-001",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                        "profile": "table-heavy",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 202)
+            payload = response.json()
+            self.assertEqual(payload["options"]["profile"], "table-heavy")
+            self.assertEqual(payload["options"]["requested_profile"], "table-heavy")
+            self.assertEqual(payload["options"]["profile_source"], "requested")
+            self.assertTrue(payload["options"]["profile_known"])
+
+    def test_create_job_reports_unknown_profile_without_rejecting(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            document_path = workspace.create_text_file("profile-typo.txt", "profile typo")
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-profile-typo",
+                        "file_path": str(document_path),
+                        "media_type": "text/plain",
+                        "profile": "large_pdf",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 202)
+            options = response.json()["options"]
+            self.assertEqual(options["profile"], "large_pdf")
+            self.assertFalse(options["profile_known"])
+            self.assertEqual(options["profile_warning"], "unknown_profile")
+
+    def test_parse_profiles_endpoint_describes_supported_profiles(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.get("/v1/parse/profiles")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["default_profile"], "default")
+            self.assertEqual(payload["auto_profile"], "auto")
+            self.assertIn("large-pdf", payload["supported_profiles"])
+            self.assertIn("scan-pdf", payload["recommended_async_profiles"])
+            self.assertEqual(payload["default_auto_rule_thresholds"]["max_page_count"], 500)
+            self.assertTrue(
+                any(
+                    profile["name"] == "large-pdf" and profile["recommended_async"]
+                    for profile in payload["profiles"]
+                )
+            )
+
+            runtime = client.get("/v1/runtime")
+            self.assertEqual(runtime.status_code, 200)
+            self.assertIn("table-heavy", runtime.json()["profiles"]["supported_profiles"])
 
     def test_upload_bridge_rejects_non_local_object_store(self) -> None:
         with TemporaryWorkspace(REMOTE_OBJECT_STORE_UPLOAD_CONFIG) as workspace:
@@ -557,6 +626,22 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(current_payload["doc_id"], "doc-bridge-002")
                 self.assertIn(current_payload["state"], {ParseJobState.PENDING.value, ParseJobState.PARSING.value, ParseJobState.STRUCTURING.value, ParseJobState.DONE.value})
 
+    def test_upload_bridge_uses_staged_limit_and_resolves_profile(self) -> None:
+        with TemporaryWorkspace(LIMITED_UPLOAD_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse/uploads",
+                    data={"doc_id": "doc-large-stage", "profile": "auto"},
+                    files={"file": ("ledger.xlsx", b"12345", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                )
+
+            self.assertEqual(response.status_code, 201)
+            payload = response.json()
+            self.assertEqual(payload["profile"], "excel-ledger")
+            self.assertEqual(payload["profile_source"], "auto")
+            self.assertTrue(Path(payload["parsecore_server_file_path"]).exists())
+
     def test_upload_bridge_requires_dedicated_api_key_when_configured(self) -> None:
         with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
             with patch.dict(os.environ, {"PARSECORE_UPLOAD_BRIDGE_API_KEY": "bridge-secret"}, clear=False):
@@ -582,6 +667,10 @@ class ParseApiTests(unittest.TestCase):
 
                     runtime_endpoint = client.get("/v1/runtime")
                     self.assertEqual(runtime_endpoint.status_code, 200)
+
+                    profiles_endpoint = client.get("/v1/parse/profiles")
+                    self.assertEqual(profiles_endpoint.status_code, 200)
+                    self.assertIn("default", profiles_endpoint.json()["supported_profiles"])
 
     def test_create_app_fails_fast_when_upload_bridge_api_key_env_is_empty(self) -> None:
         with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
@@ -638,6 +727,16 @@ class ParseApiTests(unittest.TestCase):
                     )
                     self.assertEqual(authorized.status_code, 200)
                     self.assertEqual(authorized.json()["runtime"]["api_auth_enabled"], True)
+
+                    unauthorized_profiles = client.get("/v1/parse/profiles")
+                    self.assertEqual(unauthorized_profiles.status_code, 401)
+
+                    authorized_profiles = client.get(
+                        "/v1/parse/profiles",
+                        headers={"x-api-key": "test-secret"},
+                    )
+                    self.assertEqual(authorized_profiles.status_code, 200)
+                    self.assertIn("large-pdf", authorized_profiles.json()["supported_profiles"])
 
     def test_api_key_accepts_bearer_authorization_header(self) -> None:
         with TemporaryWorkspace(API_KEY_PROTECTED_CONFIG) as workspace:
@@ -1084,6 +1183,9 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(payload["schema_version"], "2026-06")
                 self.assertEqual(payload["projection"], "structured")
                 self.assertEqual(payload["profile"], "table-heavy")
+                self.assertEqual(payload["profile_resolution"]["resolved_profile"], "table-heavy")
+                self.assertEqual(payload["profile_resolution"]["source"], "requested")
+                self.assertTrue(payload["profile_resolution"]["profile_known"])
                 self.assertNotIn("blocks", payload)
                 self.assertEqual(len(payload["tables"]), 1)
                 table = payload["tables"][0]
@@ -1096,7 +1198,85 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(quality.status_code, 200)
                 quality_payload = quality.json()
                 self.assertEqual(quality_payload["projection"], "quality")
+                self.assertEqual(quality_payload["profile_resolution"]["resolved_profile"], "table-heavy")
                 self.assertGreaterEqual(quality_payload["quality_summary"]["total"], 1)
+
+                parts = client.get("/v1/parse/documents/doc-table-v2/parts")
+                self.assertEqual(parts.status_code, 200)
+                parts_payload = parts.json()
+                self.assertEqual(parts_payload["projection"], "parts")
+                self.assertEqual(parts_payload["part_summary"]["total"], 1)
+                self.assertEqual(parts_payload["part_summary"]["warning_parts"], 1)
+                self.assertEqual(parts_payload["parts"][0]["state"], "warning")
+                self.assertIn("table_ragged_rows", parts_payload["parts"][0]["quality_signal_codes"])
+                self.assertFalse(parts_payload["parts"][0]["rerun_supported"])
+
+                filtered_parts = client.get(
+                    "/v1/parse/documents/doc-table-v2/parts",
+                    params={"state": "warning|failed"},
+                )
+                self.assertEqual(filtered_parts.status_code, 200)
+                self.assertEqual(filtered_parts.json()["part_summary"]["filtered"], 1)
+
+                invalid_part_filter = client.get(
+                    "/v1/parse/documents/doc-table-v2/parts",
+                    params={"state": "cancelled"},
+                )
+                self.assertEqual(invalid_part_filter.status_code, 400)
+                self.assertEqual(invalid_part_filter.json()["code"], "invalid_part_state")
+
+                exported_tables = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "tables", "format": "csv"},
+                )
+                self.assertEqual(exported_tables.status_code, 200)
+                self.assertEqual(exported_tables.headers["content-type"], "text/csv; charset=utf-8")
+                self.assertIn("doc-table-v2-tables.csv", exported_tables.headers["content-disposition"])
+                self.assertIn("table_id", exported_tables.text)
+                self.assertIn("doc-table-v2:p1:t1", exported_tables.text)
+
+                exported_signals = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "quality_signals", "format": "jsonl"},
+                )
+                self.assertEqual(exported_signals.status_code, 200)
+                self.assertEqual(exported_signals.headers["content-type"], "application/x-ndjson; charset=utf-8")
+                self.assertIn('"code":"table_ragged_rows"', exported_signals.text)
+
+                invalid_export = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "pages", "format": "jsonl"},
+                )
+                self.assertEqual(invalid_export.status_code, 400)
+                self.assertEqual(invalid_export.json()["code"], "invalid_export_dataset")
+
+                export_job = client.post(
+                    "/v1/parse/documents/doc-table-v2/export-jobs",
+                    json={
+                        "include": ["tables", "quality_signals"],
+                        "formats": {"tables": "csv", "quality_signals": "jsonl"},
+                        "filters": {"severity": ["warning"]},
+                    },
+                )
+                self.assertEqual(export_job.status_code, 202)
+                export_payload = export_job.json()
+                self.assertEqual(export_payload["state"], "done")
+                self.assertEqual(export_payload["doc_id"], "doc-table-v2")
+                self.assertEqual(
+                    [(item["dataset"], item["format"]) for item in export_payload["files"]],
+                    [("tables", "csv"), ("quality_signals", "jsonl")],
+                )
+
+                export_manifest = client.get(f"/v1/parse/export-jobs/{export_payload['export_id']}")
+                self.assertEqual(export_manifest.status_code, 200)
+                self.assertEqual(export_manifest.json()["export_id"], export_payload["export_id"])
+
+                export_download = client.get(
+                    f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
+                    params={"file": "quality_signals.jsonl"},
+                )
+                self.assertEqual(export_download.status_code, 200)
+                self.assertIn("table_ragged_rows", export_download.text)
 
                 compat = client.get(
                     "/v1/parse/documents/doc-table-v2",
@@ -1106,10 +1286,91 @@ class ParseApiTests(unittest.TestCase):
                 compat_payload = compat.json()
                 self.assertEqual(compat_payload["schema_version"], "2026-04")
                 self.assertEqual(compat_payload["projection"], "compat")
+                self.assertNotIn("profile_resolution", compat_payload)
                 self.assertIn("pages", compat_payload)
 
+    def test_pdf_parts_plan_endpoint_creates_child_jobs_and_parent_read_model(self) -> None:
+        with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
+            document_path = workspace.create_pdf("partitioned-api.pdf", [["one"], ["two"], ["three"]])
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-pdf-api-parts",
+                        "file_path": str(document_path),
+                        "media_type": "application/pdf",
+                        "profile": "large-pdf",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                source_job_id = created.json()["job_id"]
+                for _ in range(30):
+                    current = client.get(f"/v1/parse/jobs/{source_job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    if current.json()["state"] == ParseJobState.DONE.value:
+                        break
+
+                planned = client.post(
+                    "/v1/parse/documents/doc-pdf-api-parts/parts/plan",
+                    json={"target_pages_per_part": 2},
+                )
+                self.assertEqual(planned.status_code, 202)
+                plan_payload = planned.json()
+                self.assertEqual(plan_payload["total_pages"], 3)
+                self.assertEqual(len(plan_payload["parts"]), 2)
+                parent_job_id = plan_payload["parent_job"]["job_id"]
+
+                parent = None
+                for _ in range(50):
+                    current = client.get(f"/v1/parse/jobs/{parent_job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    parent = current.json()
+                    if parent["state"] == ParseJobState.DONE.value:
+                        break
+                    time.sleep(0.05)
+
+                self.assertIsNotNone(parent)
+                assert parent is not None
+                self.assertEqual(parent["state"], ParseJobState.DONE.value)
+
+                parts = client.get("/v1/parse/documents/doc-pdf-api-parts/parts")
+                self.assertEqual(parts.status_code, 200)
+                parts_payload = parts.json()
+                self.assertEqual(parts_payload["part_summary"]["total"], 2)
+                self.assertEqual(parts_payload["part_summary"]["states"], {"done": 2})
+                self.assertTrue(all(part["rerun_supported"] for part in parts_payload["parts"]))
+
+                structured = client.get(
+                    "/v1/parse/documents/doc-pdf-api-parts",
+                    params={"projection": "structured"},
+                )
+                self.assertEqual(structured.status_code, 200)
+                structured_payload = structured.json()
+                self.assertEqual([page["page_number"] for page in structured_payload["pages"]], [1, 2, 3])
+                self.assertEqual(len(structured_payload["parse_units"]), 2)
+
+                rerun = client.post(
+                    "/v1/parse/documents/doc-pdf-api-parts/parts/doc-pdf-api-parts-part-2/rerun"
+                )
+                self.assertEqual(rerun.status_code, 202)
+                rerun_job_id = rerun.json()["job"]["job_id"]
+                for _ in range(30):
+                    current = client.get(f"/v1/parse/jobs/{rerun_job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    if current.json()["state"] == ParseJobState.DONE.value:
+                        break
+                    time.sleep(0.05)
+                rerun_parts = client.get("/v1/parse/documents/doc-pdf-api-parts/parts")
+                self.assertEqual(rerun_parts.status_code, 200)
+                part_two = next(
+                    part for part in rerun_parts.json()["parts"] if part["part_id"] == "doc-pdf-api-parts-part-2"
+                )
+                self.assertEqual(part_two["state"], "done")
+                self.assertEqual(part_two["job_id"], rerun_job_id)
+
                 invalid = client.get(
-                    "/v1/parse/documents/doc-table-v2",
+                    "/v1/parse/documents/doc-pdf-api-parts",
                     params={"projection": "future"},
                 )
                 self.assertEqual(invalid.status_code, 400)
@@ -1364,10 +1625,46 @@ class ParseApiTests(unittest.TestCase):
             body = response.json()
             self.assertFalse(body["success"])
             self.assertEqual(body["parser_used"], "none")
-            self.assertEqual(body["code"], "file_too_large")
-            self.assertEqual(body["message"], "File exceeds configured upload limit")
+            self.assertEqual(body["code"], "document_too_large_for_sync")
+            self.assertEqual(body["message"], "Document is too large for synchronous parsing; use the asynchronous upload/job flow")
             self.assertEqual(body["detail"]["actual_bytes"], 5)
             self.assertEqual(body["detail"]["limit_bytes"], 4)
+            self.assertEqual(body["detail"]["recommended_endpoint"], "/v1/parse/uploads")
+            self.assertEqual(body["detail"]["recommended_job_endpoint"], "/v1/parse/jobs")
+            self.assertEqual(body["detail"]["profile"], "auto")
+
+    def test_parse_batch_profile_can_recommend_async_before_hard_limit(self) -> None:
+        encoded = base64.b64encode(b"alpha").decode("ascii")
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                blocked = client.post(
+                    "/v1/parse/batch",
+                    json={
+                        "file_base64": encoded,
+                        "file_name": "manual.txt",
+                        "media_type": "text/plain",
+                        "profile": "large-pdf",
+                    },
+                )
+                forced = client.post(
+                    "/v1/parse/batch",
+                    json={
+                        "file_base64": encoded,
+                        "file_name": "manual.txt",
+                        "media_type": "text/plain",
+                        "profile": "large-pdf",
+                        "force_sync": True,
+                    },
+                )
+
+            self.assertEqual(blocked.status_code, 413)
+            blocked_body = blocked.json()
+            self.assertFalse(blocked_body["success"])
+            self.assertEqual(blocked_body["code"], "document_too_large_for_sync")
+            self.assertEqual(blocked_body["detail"]["resolved_profile"], "large-pdf")
+            self.assertEqual(forced.status_code, 200)
+            self.assertTrue(forced.json()["success"])
 
     def test_parse_upload_endpoint_rejects_oversized_file(self) -> None:
         with TemporaryWorkspace(LIMITED_UPLOAD_API_CONFIG) as workspace:
@@ -1381,11 +1678,35 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 413)
             self.assertIn("x-trace-id", response.headers)
             body = response.json()
-            self.assertEqual(body["error"], "file_too_large")
-            self.assertEqual(body["code"], "file_too_large")
-            self.assertEqual(body["message"], "File exceeds configured upload limit")
+            self.assertEqual(body["error"], "document_too_large_for_sync")
+            self.assertEqual(body["code"], "document_too_large_for_sync")
+            self.assertEqual(body["message"], "Document is too large for synchronous parsing; use the asynchronous upload/job flow")
             self.assertEqual(body["detail"]["actual_bytes"], 5)
             self.assertEqual(body["detail"]["limit_bytes"], 4)
+            self.assertEqual(body["detail"]["recommended_endpoint"], "/v1/parse/uploads")
+            self.assertEqual(body["detail"]["recommended_job_endpoint"], "/v1/parse/jobs")
+            self.assertEqual(body["detail"]["profile"], "auto")
+
+    def test_parse_upload_profile_can_recommend_async_before_hard_limit(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                blocked = client.post(
+                    "/v1/parse",
+                    data={"profile": "large-pdf"},
+                    files={"file": ("manual.txt", b"alpha", "text/plain")},
+                )
+                forced = client.post(
+                    "/v1/parse",
+                    data={"profile": "large-pdf", "force_sync": "true"},
+                    files={"file": ("manual.txt", b"alpha", "text/plain")},
+                )
+
+            self.assertEqual(blocked.status_code, 413)
+            blocked_body = blocked.json()
+            self.assertEqual(blocked_body["code"], "document_too_large_for_sync")
+            self.assertEqual(blocked_body["detail"]["resolved_profile"], "large-pdf")
+            self.assertEqual(forced.status_code, 200)
 
     def test_parse_batch_endpoint_returns_429_when_quota_exceeded(self) -> None:
         with TemporaryWorkspace(QUOTA_ENFORCED_API_CONFIG) as workspace:

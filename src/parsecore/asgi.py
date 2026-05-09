@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
+import threading
 from starlette.applications import Starlette
 
 from .api_health import health_service_details as _base_health_service_details
@@ -43,6 +44,8 @@ class BackgroundParseRunner:
         self.runtime = runtime
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="parsecore")
         self.inflight: dict[str, Future[ParseOutcome]] = {}
+        self.queued_job_ids: list[str] = []
+        self._lock = threading.Lock()
         configured_limit = int(max_inflight_jobs)
         if configured_limit > 0:
             self.max_inflight_jobs = configured_limit
@@ -57,34 +60,61 @@ class BackgroundParseRunner:
     def submit(self, request: ParseRequest) -> ParseJob:
         self._assert_capacity()
         job = self.runtime.start(request)
-        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
-        self.inflight[job.job_id] = future
-        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        self._submit_existing_job(job)
         return job
 
     def restart_latest(self, *, doc_id: str, tenant_id: str | None = None) -> ParseJob:
         self._assert_capacity()
         job = self.runtime.restart_latest(doc_id=doc_id, tenant_id=tenant_id)
-        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
-        self.inflight[job.job_id] = future
-        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        self._submit_existing_job(job)
         return job
 
     def rechunk_latest(self, *, doc_id: str, tenant_id: str | None = None) -> ParseJob:
         self._assert_capacity()
         job = self.runtime.rechunk_latest(doc_id=doc_id, tenant_id=tenant_id)
-        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
-        self.inflight[job.job_id] = future
-        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        self._submit_existing_job(job)
         return job
 
     def reembed_latest(self, *, doc_id: str, tenant_id: str | None = None) -> ParseJob:
         self._assert_capacity()
         job = self.runtime.reembed_latest(doc_id=doc_id, tenant_id=tenant_id)
-        future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
-        self.inflight[job.job_id] = future
-        future.add_done_callback(lambda _: self.inflight.pop(job.job_id, None))
+        self._submit_existing_job(job)
         return job
+
+    def plan_pdf_parts(self, **kwargs) -> dict[str, object]:
+        result = self.runtime.start_pdf_part_jobs(**kwargs)
+        for job in tuple(result.get("part_jobs", ())):
+            self._submit_existing_job(job, allow_queue=True)
+        result["submitted_job_ids"] = list(self.inflight)
+        result["queued_job_ids"] = list(self.queued_job_ids)
+        return result
+
+    def rerun_pdf_part(self, **kwargs) -> dict[str, object]:
+        result = self.runtime.rerun_pdf_part(**kwargs)
+        job = result.get("job")
+        if isinstance(job, ParseJob):
+            self._submit_existing_job(job, allow_queue=True)
+        return result
+
+    def _submit_existing_job(self, job: ParseJob, *, allow_queue: bool = False) -> None:
+        with self._lock:
+            if len(self.inflight) >= self.max_inflight_jobs:
+                if allow_queue:
+                    self.queued_job_ids.append(job.job_id)
+                    return
+                raise RuntimeError("too_many_inflight_jobs")
+            future = self.executor.submit(self.runtime.execute, job_id=job.job_id)
+            self.inflight[job.job_id] = future
+            future.add_done_callback(lambda _future, job_id=job.job_id: self._job_done(job_id))
+
+    def _job_done(self, job_id: str) -> None:
+        with self._lock:
+            self.inflight.pop(job_id, None)
+            while self.queued_job_ids and len(self.inflight) < self.max_inflight_jobs:
+                next_job_id = self.queued_job_ids.pop(0)
+                future = self.executor.submit(self.runtime.execute, job_id=next_job_id)
+                self.inflight[next_job_id] = future
+                future.add_done_callback(lambda _future, queued_id=next_job_id: self._job_done(queued_id))
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=True)
@@ -105,6 +135,12 @@ class QueueSubmissionRunner:
 
     def reembed_latest(self, *, doc_id: str, tenant_id: str | None = None) -> ParseJob:
         return self.runtime.reembed_latest(doc_id=doc_id, tenant_id=tenant_id)
+
+    def plan_pdf_parts(self, **kwargs) -> dict[str, object]:
+        return self.runtime.start_pdf_part_jobs(**kwargs)
+
+    def rerun_pdf_part(self, **kwargs) -> dict[str, object]:
+        return self.runtime.rerun_pdf_part(**kwargs)
 
     def shutdown(self) -> None:
         return None

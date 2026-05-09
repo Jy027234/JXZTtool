@@ -16,6 +16,7 @@ mode = "embedded-sdk"
 execution_mode = "inline"
 max_workers = 1
 poll_interval_ms = 500
+staged_upload_max_bytes = 104857600
 api_key_env = "PARSECORE_API_KEY"
 
 [storage]
@@ -89,6 +90,7 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.providers.ocr.max_retries, 4)
         self.assertEqual(settings.runtime.api_key_env, "PARSECORE_API_KEY")
         self.assertFalse(settings.runtime.allow_external_file_paths)
+        self.assertEqual(settings.runtime.staged_upload_max_bytes, 104857600)
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},

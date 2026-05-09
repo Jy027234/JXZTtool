@@ -88,6 +88,7 @@ max_workers = 2
 max_inflight_jobs = 0
 poll_interval_ms = 500
 max_upload_bytes = 52428800
+staged_upload_max_bytes = 0
 allow_external_file_paths = false
 quota_enforce = false
 quota_window_hours = 24
@@ -103,7 +104,8 @@ log_path = "var/logs/job_events.jsonl"
 | `max_workers` | `2` | 正整数 | inline 后台 job 执行线程数。同步 `/parse` 和 `/parse/batch` 仍在请求内完成。 |
 | `max_inflight_jobs` | `0` | `0` 或正整数 | inline job 背压上限；`0` 表示自动取 `max_workers * 4`。超过时返回 `429 too_many_inflight_jobs`。 |
 | `poll_interval_ms` | `1000` | 正整数 | Worker 拉取待处理 job 的轮询间隔。 |
-| `max_upload_bytes` | `0` | 字节数 | `/parse` 与 `/parse/batch` 上传保护；`0` 表示不限制。推荐生产保留 50 MiB 或按业务调整。 |
+| `max_upload_bytes` | `0` | 字节数 | `/parse`、`/v1/parse`、`/parse/batch`、`/v1/parse/batch` 同步上传保护；`0` 表示不限制。推荐生产保留 50 MiB 或按业务调整。 |
+| `staged_upload_max_bytes` | `0` | 字节数 | `/parse/uploads` 与 `/v1/parse/uploads` 桥接暂存上限；`0` 表示不限制，用于承接同步入口拒绝的大文件。 |
 | `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
 | `quota_enforce` | `false` | bool | 开启后按租户和 `quota_key` 做硬限校验。 |
@@ -115,7 +117,8 @@ log_path = "var/logs/job_events.jsonl"
 生产建议：
 
 - 面向外部或跨团队调用时启用 `runtime.api_key_env`。
-- 保留 `max_upload_bytes`，避免超大文件直接压垮 API 进程。
+- 保留 `max_upload_bytes`，避免超大文件直接压垮同步 API 进程。
+- 需要承接大文件时保持 `staged_upload_max_bytes = 0`，或设为明显高于同步阈值的业务上限。
 - 保持 `allow_external_file_paths = false`，跨服务提交文件优先使用 `/parse/uploads` 或 `/v1/parse/uploads`。
 - 大文件、并发或长耗时解析使用 `queue-worker`。
 - 灰度初期把 `max_workers` 和 `max_inflight_jobs` 设保守，再根据 `/v1/parse/metrics` 调整。
@@ -141,9 +144,34 @@ Invoke-RestMethod -Headers $headers http://127.0.0.1:8090/v1/runtime
 ```toml
 [runtime]
 max_upload_bytes = 52428800
+staged_upload_max_bytes = 0
 ```
 
-超过上限时同步上传接口返回 `413 file_too_large`，响应中包含实际大小和限制大小。
+超过同步上限时，`/parse`、`/v1/parse`、`/parse/batch`、`/v1/parse/batch` 返回 `413 document_too_large_for_sync`。响应中保留 `actual_bytes / limit_bytes`，并追加：
+
+```json
+{
+  "recommended_endpoint": "/v1/parse/uploads",
+  "recommended_job_endpoint": "/v1/parse/jobs",
+  "profile": "auto",
+  "resolved_profile": "large-pdf",
+  "can_force_sync": true,
+  "force_sync_param_names": ["force_sync", "allow_sync_large_document"]
+}
+```
+
+`/parse/uploads` 与 `/v1/parse/uploads` 使用 `staged_upload_max_bytes` 控制桥接暂存大小；默认 `0` 表示不限制，因此同步入口拒绝的大文件仍能进入异步 job 链路。生产面向外部开放时，建议同时设置 `staged_upload_api_key_env` 与业务侧文件大小上限。
+
+宿主产品推荐处理流程：
+
+1. 小文件沿用原同步入口，并默认传 `profile=auto`。
+2. 收到 `413 document_too_large_for_sync` 后，记录 `actual_bytes / limit_bytes / resolved_profile / trace_id`，把同一文件转交 `/v1/parse/uploads`。
+3. 上传桥接返回 `parsecore_server_file_path` 后，调用 `/v1/parse/jobs`，继续传 `profile=auto` 或响应中建议的显式 profile。
+4. 轮询 job 完成后，读取 `/v1/parse/documents/{doc_id}?projection=structured`，把 `tables / quality_signals / parse_units` 落到宿主 JSON 字段。
+
+宿主可通过 `GET /v1/parse/profiles` 或 `/v1/runtime` 的 `profiles` 字段发现支持的 profile、auto 阈值和推荐异步 profile。`projection=structured` 和 `/quality` 会返回 `profile_resolution`，包含 `requested_profile / resolved_profile / source / reasons / recommended_async / limits / profile_known`。如果请求传了未知 profile，系统保持兼容不拒绝，并通过 `profile_warning=unknown_profile` 暴露风险。
+
+`max_upload_bytes` 和 `staged_upload_max_bytes` 是两层不同保护：前者保护同步 API 响应时长和内存，后者保护桥接暂存入口容量。低成本接入时通常保留同步 50 MiB 阈值，并让 `staged_upload_max_bytes = 0` 或设置为更高的业务上限；这样宿主只需要在 413 分支切换链路，不需要提前准确判断每种文件大小。
 
 `/v1/parse/jobs` 本地路径边界：
 
@@ -523,6 +551,97 @@ Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/quality"
 ```
 
 `compat` 用于旧 parser-service 消费方；`structured` 返回 `schema_version = "2026-06"`，并包含 `tables / cells / quality_signals / parse_units`；`full` 在 structured 基础上额外带 `job / blocks / chunks`，适合调试和后续人工复核。
+
+projection 落地后的下一步是把解析策略从读取参数中拆出来，在异步 job 创建时传 `profile`：
+
+```powershell
+$body = @{
+  doc_id = "demo-doc"
+  file_path = "D:/app/uploads/demo.pdf"
+  profile = "auto"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http://127.0.0.1:8090/v1/parse/jobs
+```
+
+推荐口径：
+
+- 默认接入传 `profile=auto`，由中台按文件类型、大小、页数、表格密度和 OCR 信号选择策略。
+- 表格密集文件传 `profile=table-heavy`，重点验收 `projection=structured` 下的 `tables / cells / quality_signals`。
+- 超大 PDF、长页数 PDF 或同步接口返回 `413 document_too_large_for_sync` 的文件传 `profile=large-pdf`，走 `/v1/parse/uploads + /v1/parse/jobs` 异步链路，再轮询 job 并读取 `projection=structured`。
+- `profile` 控制解析执行策略，`projection` 控制结果返回形态；不要用 `projection=full` 代替 profile 灰度。
+
+当前 `profile=auto` 是宿主侧最省改造的默认值：调用方只需要传一个稳定参数，中台会按文件扩展名、media type、大小和入口上下文解析为 effective profile，并把结果写入 job options 或 413 detail。宿主可先只记录 `profile / resolved_profile`，等灰度样本足够后再对少数文件类型显式覆盖。
+
+profile 建议用法：
+
+| profile | 适用样本 | 宿主接入建议 |
+| --- | --- | --- |
+| `auto` | 默认入口 | 新接入统一使用，便于中台持续升级路由规则。 |
+| `table-heavy` | PDF/DOCX 中表格密集、表头稳定性重要 | 优先双写 `tables` 和 `quality_signals`，观察表格信号密度。 |
+| `large-pdf` | 超过同步阈值、长页数 PDF、已知慢样本 | 默认走异步上传和 job 轮询，不再压同步 HTTP。 |
+| `ocr-heavy` | 文字层质量差、OCR fallback 多的 PDF | 重点观察 OCR trace 和 `ocr_failed_page` 类信号。 |
+| `excel-ledger` | `.xls/.xlsx/.xlsm` 台账、明细表 | 验证 sheet、cell range、merged cells 和截断信号。 |
+| `scan-pdf` | 扫描件或图片型 PDF | 走异步优先，避免同步请求长时间占用连接。 |
+
+`quality_signals` 后续会保持追加式扩展。宿主 schema 建议把它当数组 JSON 存储，不要只按当前 code 建固定列；消费时按 `code / severity / page_number / table_id / row_index / col_index / bbox` 做宽松解析，未知 code 默认展示或记录，不阻断主流程。
+
+## 导出中心与复跑规划
+
+当前版本已提供同步导出 MVP，适合中小结果集或排查场景：
+
+```powershell
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=tables&format=csv" -OutFile tables.csv
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=quality_signals&format=jsonl" -OutFile quality_signals.jsonl
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=parse_units&format=tsv" -OutFile parse_units.tsv
+```
+
+支持参数：
+
+- `dataset=tables|quality_signals|parse_units`
+- `format=jsonl|csv|tsv`
+- `tenant_id=...` 可选，默认 `default`
+
+CSV/TSV 会把嵌套字段如 `cells/detail/warnings` 稳定序列化成 JSON 字符串。当前也已提供异步导出包 MVP：
+
+```text
+POST /v1/parse/documents/{doc_id}/export-jobs
+GET  /v1/parse/export-jobs/{export_id}
+GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
+```
+
+异步包第一版会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
+
+当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
+
+```powershell
+Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts/plan" -Body '{"target_pages_per_part":200}' -ContentType "application/json"
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts" | ConvertFrom-Json
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts?state=warning|failed" | ConvertFrom-Json
+Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts/demo-doc-part-3/rerun"
+```
+
+`/parts/plan` 会基于最新 PDF job 轻量探测页数，生成物理 part PDF 和子 job。每个子 job 使用独立 `part_doc_id`，避免覆盖父文档；子 part 完成后会刷新父文档的 blocks/chunks、structured projection、`parse_units` 和 part 状态。`/parts` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`。
+
+文档级重跑仍保留：
+
+```text
+POST /v1/parse/documents/{doc_id}/reparse
+POST /v1/parse/documents/{doc_id}/rechunk
+POST /v1/parse/documents/{doc_id}/re-embed
+```
+
+宿主仍建议把 `quality_signals` 与 `parse_units` 原样落 JSON，避免把复跑粒度写死为整文档。part 级复跑第一版已经能重跑指定页段；后续会继续增强批量复跑、取消、限流和只重建受影响 part 的 embedding/index。
+
+## 超长 PDF 配置口径
+
+17000 页 PDF 的当前推荐接入方式是异步分流，而不是同步强跑：
+
+1. 同步入口保持 `max_upload_bytes`，收到 `413 document_too_large_for_sync` 后切到 `/v1/parse/uploads + /v1/parse/jobs`。
+2. 创建 job 时传 `profile=auto` 或显式 `profile=large-pdf`。
+3. 读取 `projection=structured`，把 `parse_units / quality_signals / profile_resolution` 落库。
+4. 在宿主侧把这类任务标记为长任务，轮询间隔和超时策略与普通小文件区分。
+
+PDF 页段调度第一版已经落地：先轻量探测页数，再生成连续页段 `parse_units`，按 `target_pages_per_part` 分批解析并增量合并结果。建议默认普通文本页段 100-300 页、OCR 密集页段 20-50 页。超大生产任务建议优先在 queue-worker 模式运行，避免 inline 服务一次性排入过多后台 part。
 
 如果启用了 API key：
 

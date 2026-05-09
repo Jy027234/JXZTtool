@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,9 +13,13 @@ from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, 
 from .events import JobEventLogger
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
 from .ocr_trace import build_ocr_decision_trace
+from .pdf_parts import child_doc_id, create_pdf_part_file, detect_pdf_page_count, plan_pdf_parts
 from .pipelines import ParsedDocumentArtifact, PipelineRegistry
+from .profiles import describe_parse_profiles
 
 
+_PDF_PARENT_JOB_KIND = "pdf_parent"
+_PDF_PART_JOB_KIND = "pdf_part"
 _RERUN_CHUNKS_ONLY_MODE = "rerun_chunks_only"
 _RERUN_EMBEDDINGS_ONLY_MODE = "rerun_embeddings_only"
 _SEARCH_VECTOR_WEIGHT = 0.7
@@ -276,6 +281,7 @@ class ParseRuntime:
                 "max_upload_bytes": self.settings.runtime.max_upload_bytes,
                 "max_inflight_jobs": self.settings.runtime.max_inflight_jobs,
                 "allow_external_file_paths": self.settings.runtime.allow_external_file_paths,
+                "staged_upload_max_bytes": self.settings.runtime.staged_upload_max_bytes,
                 "api_auth_enabled": bool(str(self.settings.runtime.api_key_env).strip()),
             },
             "translation": {
@@ -289,6 +295,7 @@ class ParseRuntime:
             },
             "product_adapter": self.settings.product_adapter,
             "parsers": [parser.name for parser in self.parsers],
+            "profiles": describe_parse_profiles(),
             "index_layers": ["primary", "structure", "high_precision"],
             "embedding_tiers": ["small", "large"],
         }
@@ -345,6 +352,8 @@ class ParseRuntime:
                     state=ParseJobState.PARSING.value,
                 )
             blocks = self._load_blocks_for_request(request)
+            if _is_pdf_part_request(request):
+                blocks = self._normalize_pdf_part_blocks(request=request, blocks=blocks)
             self._record_ocr_observability(request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request):
                 self.job_store.save_blocks(
@@ -370,6 +379,8 @@ class ParseRuntime:
                 state=ParseJobState.EMBEDDING.value,
             )
             chunks = tuple(self._embed_chunks(doc_id=request.doc_id, chunks=chunks))
+            if _is_pdf_part_request(request):
+                chunks = self._normalize_pdf_part_chunks(request=request, chunks=chunks)
 
             index_manifest = self._build_index_manifest(
                 request=request,
@@ -391,6 +402,12 @@ class ParseRuntime:
             )
             final_job = self.job_store.update_state(job_id=job.job_id, state=ParseJobState.DONE)
             outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
+            if _is_pdf_part_request(request):
+                self.refresh_partitioned_parent(
+                    doc_id=str(request.options.get("source_doc_id") or request.options.get("parent_doc_id") or ""),
+                    tenant_id=request.tenant_id,
+                    parent_job_id=str(request.options.get("parent_job_id") or ""),
+                )
             self.event_logger.log(
                 "completed",
                 job_id=job.job_id,
@@ -457,9 +474,25 @@ class ParseRuntime:
         if latest_job is None:
             blocks: tuple[Any, ...] = ()
             chunks: tuple[Any, ...] = ()
+            partition_parts: list[dict[str, Any]] = []
         else:
+            partition_parts = self.partition_parts_for_document(
+                doc_id=doc_id,
+                tenant_id=latest_job.tenant_id,
+                parent_job_id=(
+                    latest_job.job_id
+                    if _job_kind(latest_job) == _PDF_PARENT_JOB_KIND
+                    else None
+                ),
+            )
             blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
             chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=latest_job.tenant_id))
+            if _job_kind(latest_job) == _PDF_PARENT_JOB_KIND and partition_parts and not blocks:
+                blocks, chunks = self._merged_partition_artifacts(
+                    parent_doc_id=doc_id,
+                    tenant_id=latest_job.tenant_id,
+                    parent_job_id=latest_job.job_id,
+                )
         describe_document = getattr(self.index, "describe_document", None)
         index_manifest = None
         if callable(describe_document):
@@ -476,7 +509,439 @@ class ParseRuntime:
             "blocks": blocks,
             "chunks": chunks,
             "index_manifest": index_manifest,
+            "partition_parts": partition_parts,
         }
+
+    def start_pdf_part_jobs(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        target_pages_per_part: int | None = None,
+        ocr_heavy_pages_per_part: int | None = None,
+        profile: str | None = None,
+    ) -> dict[str, Any]:
+        source_job = self._resolve_latest_non_partition_job(doc_id=doc_id, tenant_id=tenant_id)
+        if source_job is None:
+            raise LookupError(f"No parse job found for doc_id={doc_id!r}")
+        if not _is_pdf_job(source_job):
+            raise ValueError("document_not_pdf")
+
+        total_pages = detect_pdf_page_count(source_job.file_path)
+        parent_options = dict(source_job.options)
+        effective_profile = str(profile or parent_options.get("profile") or "large-pdf")
+        part_specs = plan_pdf_parts(
+            doc_id,
+            total_pages,
+            target_pages_per_part=target_pages_per_part,
+            ocr_heavy_pages_per_part=ocr_heavy_pages_per_part,
+            profile=effective_profile,
+            options=parent_options,
+        )
+        parent_options.update(
+            {
+                "job_kind": _PDF_PARENT_JOB_KIND,
+                "partitioned": True,
+                "source_doc_id": doc_id,
+                "source_job_id": source_job.job_id,
+                "total_pages": total_pages,
+                "target_pages_per_part": target_pages_per_part,
+                "ocr_heavy_pages_per_part": ocr_heavy_pages_per_part,
+                "profile": effective_profile,
+                "part_specs": part_specs,
+            }
+        )
+        parent_job = self.start(
+            ParseRequest(
+                doc_id=doc_id,
+                file_path=source_job.file_path,
+                media_type=source_job.media_type,
+                options=parent_options,
+                tenant_id=source_job.tenant_id,
+                quota_key=source_job.quota_key,
+                quota_units=source_job.quota_units,
+            )
+        )
+        parent_job = self.job_store.update_state(job_id=parent_job.job_id, state=ParseJobState.PARTIAL)
+
+        part_jobs = []
+        for spec in part_specs:
+            part_jobs.append(
+                self._start_pdf_part_job(
+                    source_job=source_job,
+                    parent_job=parent_job,
+                    spec=spec,
+                    profile=effective_profile,
+                )
+            )
+        parent_job = self.refresh_partitioned_parent(
+            doc_id=doc_id,
+            tenant_id=source_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        )
+        return {
+            "doc_id": doc_id,
+            "tenant_id": source_job.tenant_id,
+            "parent_job": parent_job,
+            "total_pages": total_pages,
+            "parts": self.partition_parts_for_document(
+                doc_id=doc_id,
+                tenant_id=source_job.tenant_id,
+                parent_job_id=parent_job.job_id,
+            ),
+            "part_jobs": tuple(part_jobs),
+        }
+
+    def rerun_pdf_part(
+        self,
+        *,
+        doc_id: str,
+        part_id: str,
+        tenant_id: str | None = None,
+        profile: str | None = None,
+    ) -> dict[str, Any]:
+        parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        if parent_job is None:
+            raise LookupError(f"No partitioned parse job found for doc_id={doc_id!r}")
+        specs = _part_specs_from_job(parent_job)
+        matching = [spec for spec in specs if str(spec.get("part_id")) == str(part_id)]
+        if not matching:
+            raise LookupError(f"No part found for part_id={part_id!r}")
+        source_job_id = str(parent_job.options.get("source_job_id") or "")
+        source_job = self.job_store.get_job(job_id=source_job_id) if source_job_id else None
+        if source_job is None:
+            source_job = parent_job
+        part_job = self._start_pdf_part_job(
+            source_job=source_job,
+            parent_job=parent_job,
+            spec=matching[0],
+            profile=str(profile or parent_job.options.get("profile") or source_job.options.get("profile") or "large-pdf"),
+            rerun=True,
+        )
+        self.refresh_partitioned_parent(
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        )
+        return {
+            "doc_id": doc_id,
+            "tenant_id": parent_job.tenant_id,
+            "part_id": part_id,
+            "job": part_job,
+        }
+
+    def partition_parts_for_document(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        parent_job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        parent_job = (
+            self.job_store.get_job(job_id=parent_job_id)
+            if parent_job_id
+            else self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        )
+        if parent_job is None:
+            return []
+        specs = _part_specs_from_job(parent_job)
+        child_jobs = self._latest_pdf_part_jobs(
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        )
+        child_by_part_id = {
+            str(job.options.get("part_id") or ""): job
+            for job in child_jobs
+            if str(job.options.get("part_id") or "")
+        }
+        parts: list[dict[str, Any]] = []
+        for index, spec in enumerate(specs, start=1):
+            part_id = str(spec.get("part_id") or child_doc_id(doc_id, index))
+            child = child_by_part_id.get(part_id)
+            part_doc_id = str(spec.get("part_doc_id") or part_id)
+            page_start = _safe_int_runtime(spec.get("page_start"), default=1)
+            page_end = _safe_int_runtime(spec.get("page_end"), default=page_start)
+            table_count = 0
+            if child is not None and child.state == ParseJobState.DONE:
+                table_count = sum(
+                    1
+                    for block in self.job_store.get_blocks(doc_id=child.doc_id, tenant_id=child.tenant_id)
+                    if str(getattr(getattr(block, "type", None), "value", getattr(block, "type", ""))) == "table"
+                )
+            parts.append(
+                {
+                    "parse_unit_id": part_id,
+                    "part_id": part_id,
+                    "source_doc_id": doc_id,
+                    "part_doc_id": child.doc_id if child is not None else part_doc_id,
+                    "part_index": _safe_int_runtime(spec.get("part_index"), default=index),
+                    "source_type": str(parent_job.media_type or ""),
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "page_count": _safe_int_runtime(spec.get("page_count"), default=max(1, page_end - page_start + 1)),
+                    "state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
+                    "raw_state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
+                    "job_id": child.job_id if child is not None else None,
+                    "attempts": int(getattr(child, "attempt_count", 0) or 0) if child is not None else 0,
+                    "table_count": table_count,
+                    "quality_signal_count": 0,
+                    "rerun_supported": True,
+                    "last_error": getattr(child, "failure_reason", None) if child is not None else None,
+                }
+            )
+        return parts
+
+    def refresh_partitioned_parent(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        parent_job_id: str | None = None,
+    ):
+        if not doc_id:
+            return None
+        parent_job = (
+            self.job_store.get_job(job_id=parent_job_id)
+            if parent_job_id
+            else self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
+        )
+        if parent_job is None:
+            return None
+        blocks, chunks = self._merged_partition_artifacts(
+            parent_doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            parent_job_id=parent_job.job_id,
+        )
+        if blocks or chunks:
+            existing_blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
+            if len(blocks) >= len(existing_blocks):
+                self.job_store.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=parent_job.tenant_id)
+                self.job_store.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=parent_job.tenant_id)
+                index_manifest = self._derive_index_manifest_from_snapshot(
+                    job=parent_job,
+                    blocks=blocks,
+                    chunks=chunks,
+                )
+                self.index.upsert(
+                    doc_id=doc_id,
+                    chunks=chunks,
+                    tenant_id=parent_job.tenant_id,
+                    document=None,
+                    index_manifest=index_manifest,
+                )
+        new_state = self._partition_parent_state(
+            self._latest_pdf_part_jobs(
+                doc_id=doc_id,
+                tenant_id=parent_job.tenant_id,
+                parent_job_id=parent_job.job_id,
+            )
+        )
+        if parent_job.state != new_state:
+            parent_job = self.job_store.update_state(job_id=parent_job.job_id, state=new_state)
+        return parent_job
+
+    def _start_pdf_part_job(
+        self,
+        *,
+        source_job: Any,
+        parent_job: Any,
+        spec: dict[str, Any],
+        profile: str,
+        rerun: bool = False,
+    ):
+        part_id = str(spec.get("part_id") or child_doc_id(parent_job.doc_id, spec.get("part_index") or 1))
+        part_doc_id = str(spec.get("part_doc_id") or part_id)
+        page_start = _safe_int_runtime(spec.get("page_start"), default=1)
+        page_end = _safe_int_runtime(spec.get("page_end"), default=page_start)
+        part_file = self._pdf_part_file_path(
+            source_path=source_job.file_path,
+            parent_doc_id=parent_job.doc_id,
+            parent_job_id=parent_job.job_id,
+            part_id=part_id,
+        )
+        part_file.parent.mkdir(parents=True, exist_ok=True)
+        create_pdf_part_file(source_job.file_path, str(part_file), page_start, page_end)
+        options = dict(source_job.options)
+        options.update(
+            {
+                "job_kind": _PDF_PART_JOB_KIND,
+                "partitioned": True,
+                "source_doc_id": parent_job.doc_id,
+                "parent_doc_id": parent_job.doc_id,
+                "parent_job_id": parent_job.job_id,
+                "source_job_id": source_job.job_id,
+                "part_id": part_id,
+                "part_doc_id": part_doc_id,
+                "part_index": _safe_int_runtime(spec.get("part_index"), default=1),
+                "page_start": page_start,
+                "page_end": page_end,
+                "page_count": max(1, page_end - page_start + 1),
+                "page_offset": page_start - 1,
+                "profile": profile,
+                "rerun": bool(rerun),
+            }
+        )
+        return self.start(
+            ParseRequest(
+                doc_id=part_doc_id,
+                file_path=str(part_file),
+                media_type=source_job.media_type,
+                options=options,
+                tenant_id=source_job.tenant_id,
+                quota_key=source_job.quota_key,
+                quota_units=source_job.quota_units,
+            )
+        )
+
+    def _pdf_part_file_path(
+        self,
+        *,
+        source_path: str,
+        parent_doc_id: str,
+        parent_job_id: str,
+        part_id: str,
+    ) -> Path:
+        source = Path(source_path)
+        return source.parent / "_parsecore_parts" / _safe_path_segment(parent_doc_id) / parent_job_id / f"{_safe_path_segment(part_id)}.pdf"
+
+    def _latest_partition_parent_job(self, *, doc_id: str, tenant_id: str | None = None):
+        for job in self.list_jobs(doc_id=doc_id, tenant_id=tenant_id):
+            if _job_kind(job) == _PDF_PARENT_JOB_KIND:
+                return job
+        return None
+
+    def _resolve_latest_non_partition_job(self, *, doc_id: str, tenant_id: str | None = None):
+        for job in self.list_jobs(doc_id=doc_id, tenant_id=tenant_id):
+            if _job_kind(job) != _PDF_PARENT_JOB_KIND:
+                return job
+        return None
+
+    def _latest_pdf_part_jobs(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        parent_job_id: str | None,
+    ) -> tuple[Any, ...]:
+        latest_by_part: dict[str, Any] = {}
+        for job in self.list_jobs(tenant_id=tenant_id):
+            options = getattr(job, "options", {}) or {}
+            if str(options.get("job_kind") or "") != _PDF_PART_JOB_KIND:
+                continue
+            if str(options.get("source_doc_id") or options.get("parent_doc_id") or "") != doc_id:
+                continue
+            if parent_job_id and str(options.get("parent_job_id") or "") != parent_job_id:
+                continue
+            part_id = str(options.get("part_id") or job.doc_id)
+            if part_id and part_id not in latest_by_part:
+                latest_by_part[part_id] = job
+        return tuple(
+            sorted(
+                latest_by_part.values(),
+                key=lambda item: _safe_int_runtime((getattr(item, "options", {}) or {}).get("part_index"), default=0),
+            )
+        )
+
+    def _merged_partition_artifacts(
+        self,
+        *,
+        parent_doc_id: str,
+        tenant_id: str,
+        parent_job_id: str,
+    ) -> tuple[tuple[Any, ...], tuple[Chunk, ...]]:
+        child_jobs = self._latest_pdf_part_jobs(
+            doc_id=parent_doc_id,
+            tenant_id=tenant_id,
+            parent_job_id=parent_job_id,
+        )
+        merged_blocks: list[Any] = []
+        merged_chunks: list[Chunk] = []
+        block_id_map: dict[str, str] = {}
+        for job in child_jobs:
+            if job.state != ParseJobState.DONE:
+                continue
+            for block in self.job_store.get_blocks(doc_id=job.doc_id, tenant_id=job.tenant_id):
+                merged_id = f"{parent_doc_id}:merged:{getattr(block, 'block_id', len(merged_blocks) + 1)}"
+                block_id_map[str(getattr(block, "block_id", ""))] = merged_id
+                metadata = dict(getattr(block, "metadata", {}) or {})
+                metadata.setdefault("part_doc_id", job.doc_id)
+                metadata.setdefault("part_id", str((job.options or {}).get("part_id") or job.doc_id))
+                merged_blocks.append(
+                    replace(
+                        block,
+                        block_id=merged_id,
+                        doc_id=parent_doc_id,
+                        metadata=metadata,
+                    )
+                )
+            for chunk in self.job_store.get_chunks(doc_id=job.doc_id, tenant_id=job.tenant_id):
+                merged_chunk_id = f"{parent_doc_id}:merged:{chunk.chunk_id}"
+                merged_block_ids = tuple(block_id_map.get(str(block_id), str(block_id)) for block_id in chunk.block_ids)
+                merged_chunks.append(
+                    replace(
+                        chunk,
+                        chunk_id=merged_chunk_id,
+                        doc_id=parent_doc_id,
+                        block_ids=merged_block_ids,
+                    )
+                )
+        return tuple(merged_blocks), tuple(merged_chunks)
+
+    def _normalize_pdf_part_blocks(self, *, request: ParseRequest, blocks: Sequence[Any]) -> tuple[Any, ...]:
+        options = request.options or {}
+        part_id = str(options.get("part_id") or request.doc_id)
+        page_offset = _safe_int_runtime(options.get("page_offset"), default=0)
+        normalized = []
+        for index, block in enumerate(blocks, start=1):
+            old_id = str(getattr(block, "block_id", f"blk-{index}"))
+            metadata = dict(getattr(block, "metadata", {}) or {})
+            if metadata.get("page") is not None:
+                metadata["page"] = _safe_int_runtime(metadata.get("page"), default=1) + page_offset
+            metadata.update(
+                {
+                    "part_id": part_id,
+                    "part_doc_id": request.doc_id,
+                    "source_doc_id": str(options.get("source_doc_id") or ""),
+                    "parent_job_id": str(options.get("parent_job_id") or ""),
+                    "page_start": _safe_int_runtime(options.get("page_start"), default=1),
+                    "page_end": _safe_int_runtime(options.get("page_end"), default=1),
+                }
+            )
+            normalized.append(
+                replace(
+                    block,
+                    block_id=f"{part_id}:{old_id}",
+                    doc_id=request.doc_id,
+                    metadata=metadata,
+                )
+            )
+        return tuple(normalized)
+
+    def _normalize_pdf_part_chunks(self, *, request: ParseRequest, chunks: Sequence[Chunk]) -> tuple[Chunk, ...]:
+        part_id = str((request.options or {}).get("part_id") or request.doc_id)
+        normalized = []
+        for index, chunk in enumerate(chunks, start=1):
+            chunk_id = str(chunk.chunk_id or f"chk-{index}")
+            normalized.append(
+                replace(
+                    chunk,
+                    chunk_id=f"{part_id}:{chunk_id}",
+                    doc_id=request.doc_id,
+                )
+            )
+        return tuple(normalized)
+
+    @staticmethod
+    def _partition_parent_state(child_jobs: Sequence[Any]) -> ParseJobState:
+        if not child_jobs:
+            return ParseJobState.PARTIAL
+        states = [job.state for job in child_jobs]
+        if all(state == ParseJobState.DONE for state in states):
+            return ParseJobState.DONE
+        if all(state == ParseJobState.FAILED for state in states):
+            return ParseJobState.FAILED
+        return ParseJobState.PARTIAL
 
     def _derive_index_manifest_from_snapshot(
         self,
@@ -1623,6 +2088,47 @@ def _percentile(sorted_values: Sequence[float], ratio: float) -> float:
     target = max(0.0, min(1.0, float(ratio)))
     index = int(round(target * (len(sorted_values) - 1)))
     return float(sorted_values[index])
+
+
+def _job_kind(job: Any) -> str:
+    options = getattr(job, "options", {}) or {}
+    if not isinstance(options, dict):
+        return ""
+    return str(options.get("job_kind") or "").strip()
+
+
+def _is_pdf_job(job: Any) -> bool:
+    media_type = str(getattr(job, "media_type", "") or "").lower()
+    suffix = Path(str(getattr(job, "file_path", "") or "")).suffix.lower()
+    return media_type == "application/pdf" or suffix == ".pdf"
+
+
+def _is_pdf_part_request(request: ParseRequest) -> bool:
+    return str((request.options or {}).get("job_kind") or "") == _PDF_PART_JOB_KIND
+
+
+def _part_specs_from_job(job: Any) -> list[dict[str, Any]]:
+    options = getattr(job, "options", {}) or {}
+    raw_specs = options.get("part_specs") if isinstance(options, dict) else None
+    if not isinstance(raw_specs, list):
+        return []
+    specs: list[dict[str, Any]] = []
+    for spec in raw_specs:
+        if isinstance(spec, dict):
+            specs.append(dict(spec))
+    return specs
+
+
+def _safe_int_runtime(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_path_segment(value: Any) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-._")
+    return normalized or "document"
 
 
 def _filter_jobs_by_since_hours(jobs: Sequence[Any], *, since_hours: float | None) -> tuple[Any, ...]:

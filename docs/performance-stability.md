@@ -30,6 +30,7 @@ API 同步入口支持运行时文件大小保护：
 ```toml
 [runtime]
 max_upload_bytes = 52428800
+staged_upload_max_bytes = 0
 ```
 
 覆盖入口：
@@ -39,7 +40,43 @@ max_upload_bytes = 52428800
 - `POST /parse/batch`
 - `POST /v1/parse/batch`
 
-超过限制时返回 `413 file_too_large`，响应会带 `actual_bytes / limit_bytes`，便于宿主系统记录和提示。设置为 `0` 表示关闭限制。
+超过同步限制时返回 `413 document_too_large_for_sync`，响应会带 `actual_bytes / limit_bytes`、`recommended_endpoint=/v1/parse/uploads`、`recommended_job_endpoint=/v1/parse/jobs`、`can_force_sync` 和 `force_sync_param_names`，便于宿主系统记录并切换异步链路。设置为 `0` 表示关闭同步上传大小限制。
+
+桥接上传入口 `/parse/uploads` 和 `/v1/parse/uploads` 使用 `staged_upload_max_bytes`。默认 `0` 表示不限制，用于承接大文件异步任务；对公网开放时建议同时启用 `staged_upload_api_key_env`，并按业务上限设置暂存大小。
+
+推荐宿主 client 把 `document_too_large_for_sync` 视为可恢复分流信号，而不是解析失败：
+
+```text
+同步提交 profile=auto
+  -> 2xx：按原兼容字段消费，必要时补读 projection=structured
+  -> 413 document_too_large_for_sync：上传到 /v1/parse/uploads
+      -> 用 parsecore_server_file_path 创建 /v1/parse/jobs
+      -> 轮询 job
+      -> 读取 projection=structured
+```
+
+这样宿主不需要提前维护复杂文件分类规则，只要保留一条 413 分支即可承接大文件。`staged_upload_max_bytes` 应高于 `max_upload_bytes`；若两者设成相同值，大文件会同时被同步入口和桥接入口拒绝，宿主就只能回到外部对象存储或人工拆分。
+
+宿主启动时可调用 `GET /v1/parse/profiles` 读取支持的 profile 和 auto 阈值；文档完成后用 `profile_resolution` 回写 resolved profile、reasons 和 profile warning，便于后续按租户、文件类型和 profile 聚合稳定性。
+
+## Profile 自动路由与质量信号
+
+`profile=auto` 是灰度默认值。当前路由主要按文件扩展名、media type、文件大小和入口上下文选择 effective profile：
+
+- `large-pdf`：同步超限、长页数或已知慢 PDF，优先异步。
+- `table-heavy`：表格密集 PDF/DOCX，重点观察表结构和表头信号。
+- `excel-ledger`：Excel 台账，重点观察 sheet、cell range、merged cells 和截断信号。
+- `ocr-heavy` / `scan-pdf`：扫描件、图片型文档或 OCR fallback 多的样本。
+- `default`：无法判断或普通小文件。
+
+性能和稳定性观测不要只看耗时，也要把 `quality_signals` 纳入灰度面板。第一阶段建议统计：
+
+- 每百页 signal 数、warning/error 占比。
+- 按 `profile / parser / media_type / tenant_id` 聚合的 signal 密度。
+- `table_header_missing / empty_table / truncated_table / ocr_failed_page / low_text_density` 等高频 code。
+- 同一文档在 `profile=auto` 与显式 profile 下的 signal 差异。
+
+后续 quality_signals 会继续追加页级、表格级、单元格级和动作建议字段。宿主告警应按 `severity` 和已知 `code` 做白名单策略，未知 code 先记录和展示，不应导致解析主流程失败。
 
 ## API 鉴权
 
@@ -112,6 +149,75 @@ PARSECORE_PERF_HISTORY_DIR=/var/lib/parsecore/perf-history
 ```
 
 如果 runner 无持久磁盘，仍可通过手工注入 `PARSECORE_PREVIOUS_PERF_REPORT` 路径启用一次性的对比模式，但这种方式不适合作为长期趋势口径。
+
+## 17000 页 PDF 中等改造路线
+
+当前已落地的能力包括同步入口保护、`profile=large-pdf` 异步分流、job 轮询、structured projection、`parse_units`、`quality_signals`，以及 PDF 页段调度第一版。中台现在可以把长 PDF 切成物理 part PDF，分别创建子 job，子 part 完成后刷新父文档 partial/structured 读模型。
+
+当前第一版执行口径：
+
+1. `POST /v1/parse/documents/{doc_id}/parts/plan`：读取最新 PDF job，探测页数，生成连续 `parse_units` 和子 part job。
+2. 子 part 使用独立 `part_doc_id` 解析，防止覆盖父文档 blocks/chunks。
+3. 父 job 进入 `partial`，子 part 完成后合并已完成 part 的 blocks/chunks 并刷新父 structured projection。
+4. `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`：只重跑指定页段，其他 part 结果保留。
+5. 普通文本型 PDF 建议 100-300 页/part；OCR 密集样本建议 20-50 页/part。
+
+仍需增强的生产能力：
+
+- 单文档 active parts 限流和取消。
+- part timeout、批量 failed-only rerun 和指数退避。
+- 只对变更 part 的 chunks 重建 embedding/index layer，避免 17000 页复跑时全量 re-embed。
+
+性能验收建议新增三组指标：
+
+- 调度指标：`parts_total / parts_done / parts_failed / active_parts / partial_available_at_s`。
+- 长尾指标：`part_elapsed_p50/p90/p99`、最慢 part 页段、part timeout 次数。
+- 合并指标：manifest 刷新耗时、增量 chunks 数、增量 embedding 耗时。
+
+异常 part 视图与复跑接口规划为：
+
+```text
+GET  /v1/parse/documents/{doc_id}/parts
+POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun
+POST /v1/parse/documents/{doc_id}/parts/rerun
+```
+
+当前已落地 `GET /v1/parse/documents/{doc_id}/parts` 和 `POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun`。复跑触发条件建议先来自 `quality_signals`，例如 `ocr_failed_page / truncated_table / low_text_density`。后续应继续支持按 signal 批量复跑，并优先只调整该 part 的 profile 或 OCR 策略，不默认对整份 PDF 开多引擎。
+
+## 导出与排查包
+
+导出中心同步 MVP 已落地。当前排查建议直接导出：
+
+```text
+GET /v1/parse/documents/{doc_id}/exports?dataset=tables&format=csv
+GET /v1/parse/documents/{doc_id}/exports?dataset=quality_signals&format=jsonl
+GET /v1/parse/documents/{doc_id}/exports?dataset=parse_units&format=tsv
+```
+
+宿主侧临时导出建议拆成三类：
+
+- 机器消费：把 `pages / tables / quality_signals / parse_units` 转成 JSONL，每行保留 `doc_id / parse_run_id / parse_unit_id / page_number`。
+- 运营排查：把 `tables` 和 `quality_signals` 转成 CSV/TSV，按 severity、page range、table_id 筛选。
+- 深挖包：只在问题单需要时附带 `ocr_decision_trace`、raw cells、异常页截图或 parser trace，避免默认导出过大。
+
+超大结果集可走已落地的异步导出包 MVP：
+
+```text
+POST /v1/parse/documents/{doc_id}/export-jobs
+GET  /v1/parse/export-jobs/{export_id}
+GET  /v1/parse/export-jobs/{export_id}/download?file=...
+```
+
+第一期已经支持 `jsonl/csv/tsv` 和 manifest；`parquet`、截图包、raw cells 和完整 trace 包可以等 part 调度与复跑接口稳定后再补。
+
+只读 part 视图也已作为排障入口落地：
+
+```text
+GET /v1/parse/documents/{doc_id}/parts
+GET /v1/parse/documents/{doc_id}/parts?state=warning|failed
+```
+
+它会把 `parse_units + quality_signals` 合并成 `part_id / page_range / state / quality_signal_codes / severity_counts`，并通过 `rerun_supported=false` 明确当前仍未支持 part 级执行复跑。
 
 ## 监控与告警口径
 

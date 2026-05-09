@@ -26,6 +26,7 @@ class RuntimeSettings:
     max_upload_bytes: int = 0
     max_inflight_jobs: int = 0
     allow_external_file_paths: bool = False
+    staged_upload_max_bytes: int = 0
     staged_upload_retention_seconds: int = 86400
     quota_enforce: bool = False
     quota_window_hours: float = 24.0
@@ -212,6 +213,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             max_upload_bytes=int(runtime.get("max_upload_bytes", 0)),
             max_inflight_jobs=int(runtime.get("max_inflight_jobs", 0)),
             allow_external_file_paths=bool(runtime.get("allow_external_file_paths", False)),
+            staged_upload_max_bytes=int(runtime.get("staged_upload_max_bytes", 0)),
             staged_upload_retention_seconds=int(runtime.get("staged_upload_retention_seconds", 86400)),
             quota_enforce=bool(runtime.get("quota_enforce", False)),
             quota_window_hours=float(runtime.get("quota_window_hours", 24.0)),

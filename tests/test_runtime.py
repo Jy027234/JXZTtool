@@ -6,6 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from parsecore.api_payloads import _document_projection
 from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
@@ -1373,3 +1374,70 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertEqual(mode, "keyword-fallback")
         self.assertTrue(hits_with_mode)
+
+    def test_partitioned_pdf_jobs_merge_parent_document_and_parts(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("partitioned.pdf", [["one"], ["two"], ["three"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-partitioned",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+
+            planned = runtime.start_pdf_part_jobs(
+                doc_id="doc-partitioned",
+                target_pages_per_part=2,
+            )
+
+            self.assertEqual(planned["parent_job"].state, ParseJobState.PARTIAL)
+            self.assertEqual(len(planned["part_jobs"]), 2)
+            self.assertEqual(
+                [job.doc_id for job in planned["part_jobs"]],
+                ["doc-partitioned-part-1", "doc-partitioned-part-2"],
+            )
+
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+
+            snapshot = runtime.get_document(doc_id="doc-partitioned")
+            self.assertEqual(snapshot["job"].state, ParseJobState.DONE)
+            self.assertEqual(len(snapshot["partition_parts"]), 2)
+            self.assertTrue(all(part["state"] == "done" for part in snapshot["partition_parts"]))
+
+            payload = _document_projection(snapshot, projection="structured")
+            self.assertEqual(payload["state"], "done")
+            self.assertEqual([unit["page_start"] for unit in payload["parse_units"]], [1, 3])
+            self.assertEqual([page["page_number"] for page in payload["pages"]], [1, 2, 3])
+            self.assertEqual([page["text"] for page in payload["pages"]], ["one", "two", "three"])
+
+    def test_rerun_pdf_part_creates_replacement_child_job(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("rerun-part.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-rerun-part",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-rerun-part", target_pages_per_part=1)
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+
+            rerun = runtime.rerun_pdf_part(
+                doc_id="doc-rerun-part",
+                part_id="doc-rerun-part-part-2",
+            )
+            runtime.execute(job_id=rerun["job"].job_id)
+
+            parts = runtime.partition_parts_for_document(doc_id="doc-rerun-part")
+            part_two = next(part for part in parts if part["part_id"] == "doc-rerun-part-part-2")
+            self.assertEqual(part_two["state"], "done")
+            self.assertEqual(part_two["attempts"], 1)
+            self.assertNotEqual(part_two["job_id"], planned["part_jobs"][1].job_id)
