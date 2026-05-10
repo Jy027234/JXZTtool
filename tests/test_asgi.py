@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import Future
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -1367,9 +1368,16 @@ class ParseApiTests(unittest.TestCase):
                 self.assertIn('"record_id"', exported_records.text)
                 self.assertIn('"Bolt"', exported_records.text)
 
-                invalid_export = client.get(
+                exported_pages = client.get(
                     "/v1/parse/documents/doc-table-v2/exports",
                     params={"dataset": "pages", "format": "jsonl"},
+                )
+                self.assertEqual(exported_pages.status_code, 200)
+                self.assertIn('"page_number":1', exported_pages.text)
+
+                invalid_export = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "images", "format": "jsonl"},
                 )
                 self.assertEqual(invalid_export.status_code, 400)
                 self.assertEqual(invalid_export.json()["code"], "invalid_export_dataset")
@@ -1377,8 +1385,14 @@ class ParseApiTests(unittest.TestCase):
                 export_job = client.post(
                     "/v1/parse/documents/doc-table-v2/export-jobs",
                     json={
-                        "include": ["tables", "quality_signals", "records"],
-                        "formats": {"tables": "csv", "quality_signals": "jsonl", "records": "jsonl"},
+                        "include": ["pages", "lines", "tables", "quality_signals", "records"],
+                        "formats": {
+                            "pages": "jsonl",
+                            "lines": "csv",
+                            "tables": "csv",
+                            "quality_signals": "jsonl",
+                            "records": "jsonl",
+                        },
                         "filters": {"severity": ["warning"]},
                     },
                 )
@@ -1388,7 +1402,13 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(export_payload["doc_id"], "doc-table-v2")
                 self.assertEqual(
                     [(item["dataset"], item["format"]) for item in export_payload["files"]],
-                    [("tables", "csv"), ("quality_signals", "jsonl"), ("records", "jsonl")],
+                    [
+                        ("pages", "jsonl"),
+                        ("lines", "csv"),
+                        ("tables", "csv"),
+                        ("quality_signals", "jsonl"),
+                        ("records", "jsonl"),
+                    ],
                 )
 
                 export_manifest = client.get(f"/v1/parse/export-jobs/{export_payload['export_id']}")
@@ -1396,7 +1416,10 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(export_manifest.json()["export_id"], export_payload["export_id"])
                 self.assertEqual(export_manifest.json()["manifest_schema_version"], "2026-05")
                 self.assertEqual(export_manifest.json()["tenant_id"], "default")
-                self.assertEqual(export_manifest.json()["request"]["include"], ["tables", "quality_signals", "records"])
+                self.assertEqual(
+                    export_manifest.json()["request"]["include"],
+                    ["pages", "lines", "tables", "quality_signals", "records"],
+                )
                 self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
                 self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
 
@@ -1480,6 +1503,13 @@ class ParseApiTests(unittest.TestCase):
                 )
                 self.assertEqual(continuation_records.status_code, 200)
                 self.assertEqual(continuation_records.json()["total"], 1)
+                field_records = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/records",
+                    params={"field.certificate_or_project_no": "PMA0013-01-XN"},
+                )
+                self.assertEqual(field_records.status_code, 200)
+                self.assertEqual(field_records.json()["total"], 1)
+                self.assertEqual(field_records.json()["items"][0]["row_number"], 2)
 
                 exported_records = client.get(
                     "/v1/parse/documents/doc-pdf-catalog-records/exports",
@@ -1488,6 +1518,25 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(exported_records.status_code, 200)
                 self.assertIn('"source":"text-block"', exported_records.text)
                 self.assertIn("PMA0013-01-XN", exported_records.text)
+                filtered_export = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/exports",
+                    params={
+                        "dataset": "records",
+                        "format": "jsonl",
+                        "field.certificate_or_project_no": "PMA0013-01-XN",
+                    },
+                )
+                self.assertEqual(filtered_export.status_code, 200)
+                filtered_lines = [json.loads(line) for line in filtered_export.text.splitlines()]
+                self.assertEqual([line["row_number"] for line in filtered_lines], [2])
+
+                exported_lines = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/exports",
+                    params={"dataset": "lines", "format": "csv"},
+                )
+                self.assertEqual(exported_lines.status_code, 200)
+                self.assertIn("line_id", exported_lines.text)
+                self.assertIn("PMA0013-01-XN", exported_lines.text)
 
                 sqlite_export = client.get(
                     "/v1/parse/documents/doc-pdf-catalog-records/exports",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from datetime import date
 import re
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from .models import Block, BlockType, ParseOutcome
 from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
@@ -241,6 +241,7 @@ def _document_records_projection(
     query: str | None = None,
     table_id: str | None = None,
     quality_signal: str | None = None,
+    field_filters: Mapping[str, Any] | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
@@ -252,6 +253,7 @@ def _document_records_projection(
         query=query,
         table_id=table_id,
         quality_signal=quality_signal,
+        field_filters=field_filters,
         page_start=page_start,
         page_end=page_end,
     )
@@ -277,34 +279,75 @@ def _document_records_projection(
     }
 
 
-def _document_view_rows(snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _document_view_rows(
+    snapshot: dict[str, Any],
+    *,
+    view_types: Iterable[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    requested = _requested_document_view_types(view_types)
+    persisted = _persisted_document_view_rows(snapshot)
+    if all(view_type in persisted for view_type in requested):
+        return {view_type: persisted[view_type] for view_type in requested}
+
     structured = _document_projection(snapshot, projection="structured")
-    records = _records_from_snapshot(snapshot)
-    return {
-        "pages": [dict(page) for page in structured.get("pages", []) if isinstance(page, dict)],
-        "lines": _structured_lines_from_blocks(
-            tuple(snapshot.get("blocks") or ()),
-            doc_id=str(structured.get("doc_id") or snapshot.get("doc_id") or ""),
-            parse_run_id=str(structured.get("parse_run_id") or ""),
-        ),
-        "records": [dict(record) for record in records],
-    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    if "pages" in requested:
+        pages = persisted.get("pages")
+        if pages is None:
+            pages = [dict(page) for page in structured.get("pages", []) if isinstance(page, dict)]
+        result["pages"] = pages
+    if "lines" in requested:
+        lines = persisted.get("lines")
+        if lines is None:
+            lines = _structured_lines_from_blocks(
+                tuple(snapshot.get("blocks") or ()),
+                doc_id=str(structured.get("doc_id") or snapshot.get("doc_id") or ""),
+                parse_run_id=str(structured.get("parse_run_id") or ""),
+            )
+        result["lines"] = lines
+    if "records" in requested:
+        records = persisted.get("records")
+        if records is None:
+            records = [dict(record) for record in _records_from_snapshot(snapshot)]
+        result["records"] = records
+    return result
+
+
+def _requested_document_view_types(view_types: Iterable[str] | None) -> tuple[str, ...]:
+    if view_types is None:
+        return ("pages", "lines", "records")
+    requested: list[str] = []
+    for view_type in view_types:
+        normalized = str(view_type or "").strip().lower()
+        if normalized not in {"pages", "lines", "records"} or normalized in requested:
+            continue
+        requested.append(normalized)
+    return tuple(requested) or ("pages", "lines", "records")
+
+
+def _persisted_document_view_rows(snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    document_views = snapshot.get("document_views")
+    if not isinstance(document_views, dict):
+        return {}
+    persisted: dict[str, list[dict[str, Any]]] = {}
+    for view_type in ("pages", "lines", "records"):
+        rows = document_views.get(view_type)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        persisted[view_type] = [dict(row) for row in rows if isinstance(row, dict)]
+    return persisted
 
 
 def _persisted_records_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]] | None:
+    persisted = _persisted_document_view_rows(snapshot)
+    if "records" in persisted:
+        return persisted["records"]
     document_views = snapshot.get("document_views")
     if not isinstance(document_views, dict):
         return None
-    records = document_views.get("records")
-    if not isinstance(records, (list, tuple)):
-        if any(document_views.get(key) for key in ("pages", "lines")):
-            return []
-        return None
-    persisted: list[dict[str, Any]] = []
-    for record in records:
-        if isinstance(record, dict):
-            persisted.append(dict(record))
-    return persisted
+    if any(document_views.get(key) for key in ("pages", "lines")):
+        return []
+    return None
 
 
 def _structured_lines_from_blocks(
@@ -906,12 +949,14 @@ def _filter_records(
     query: str | None,
     table_id: str | None,
     quality_signal: str | None,
+    field_filters: Mapping[str, Any] | None,
     page_start: int | None,
     page_end: int | None,
 ) -> list[dict[str, Any]]:
     normalized_query = str(query or "").strip().lower()
     normalized_table_id = str(table_id or "").strip()
     normalized_quality_signal = str(quality_signal or "").strip()
+    normalized_field_filters = _normalize_field_filters(field_filters)
     start = int(page_start) if page_start is not None else None
     end = int(page_end) if page_end is not None else None
     if start is not None and end is not None and start > end:
@@ -924,6 +969,8 @@ def _filter_records(
         if normalized_quality_signal and normalized_quality_signal not in {
             str(code or "") for code in list(record.get("quality_signal_codes") or [])
         }:
+            continue
+        if normalized_field_filters and not _record_matches_field_filters(record, normalized_field_filters):
             continue
         record_start = _safe_int(record.get("page_start"), default=1)
         record_end = _safe_int(record.get("page_end"), default=record_start)
@@ -944,6 +991,39 @@ def _filter_records(
                 continue
         filtered.append(record)
     return filtered
+
+
+def _normalize_field_filters(field_filters: Mapping[str, Any] | None) -> dict[str, str]:
+    if not isinstance(field_filters, Mapping):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in field_filters.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        normalized[key] = str(raw_value or "").strip()
+    return normalized
+
+
+def _record_matches_field_filters(record: dict[str, Any], field_filters: Mapping[str, str]) -> bool:
+    fields = record.get("fields")
+    if not isinstance(fields, dict):
+        return False
+    for field_name, expected in field_filters.items():
+        if field_name not in fields:
+            return False
+        value = fields.get(field_name)
+        if expected and expected.lower() not in _field_value_text(value).lower():
+            return False
+        if not expected and not _field_value_text(value).strip():
+            return False
+    return True
+
+
+def _field_value_text(value: Any) -> str:
+    if isinstance(value, (dict, list, tuple)):
+        return _jsonish_text(value)
+    return str(value or "")
 
 
 def _jsonish_text(value: Any) -> str:

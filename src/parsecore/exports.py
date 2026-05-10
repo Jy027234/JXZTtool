@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-ExportDataset = Literal["tables", "quality_signals", "parse_units", "records"]
+ExportDataset = Literal["pages", "lines", "tables", "quality_signals", "parse_units", "records"]
 ExportFormat = Literal["jsonl", "csv", "tsv", "xlsx", "sqlite"]
 
-EXPORT_DATASETS = {"tables", "quality_signals", "parse_units", "records"}
+EXPORT_DATASETS = {"pages", "lines", "tables", "quality_signals", "parse_units", "records"}
 EXPORT_FORMATS = {"jsonl", "csv", "tsv", "xlsx", "sqlite"}
 
 

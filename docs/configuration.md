@@ -612,6 +612,8 @@ profile 建议用法：
 当前版本已提供同步导出 MVP，适合中小结果集或排查场景：
 
 ```powershell
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=pages&format=jsonl" -OutFile pages.jsonl
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=lines&format=csv" -OutFile lines.csv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=tables&format=csv" -OutFile tables.csv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=quality_signals&format=jsonl" -OutFile quality_signals.jsonl
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=parse_units&format=tsv" -OutFile parse_units.tsv
@@ -622,7 +624,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 
 支持参数：
 
-- `dataset=tables|quality_signals|parse_units|records`
+- `dataset=pages|lines|tables|quality_signals|parse_units|records`
 - `format=jsonl|csv|tsv|sqlite|xlsx`
 - `tenant_id=...` 可选，默认 `default`
 
@@ -633,9 +635,11 @@ GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0
 GET /v1/parse/documents/{doc_id}/records?query=TC001A
 GET /v1/parse/documents/{doc_id}/records?page_start=2000&page_end=2300
 GET /v1/parse/documents/{doc_id}/records?quality_signal=column_shift_suspected
+GET /v1/parse/documents/{doc_id}/records?field.certificate_or_project_no=PMA0013-01-XN
+GET /v1/parse/documents/{doc_id}/records?field=holder_or_name_start&value=重庆
 ```
 
-CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
+同步导出已把 `pages / lines / tables / quality_signals / parse_units / records` 都纳入正式 dataset。同步 records 导出也可带相同的 `query / page_start / page_end / quality_signal / field.*` 参数，用于直接下载筛选后的 records。CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
 
 ```text
 POST /v1/parse/documents/{doc_id}/export-jobs
@@ -643,7 +647,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
+异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / parse_units / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 

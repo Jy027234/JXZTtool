@@ -19,6 +19,7 @@ from .api_payloads import (
     _document_projection,
     _document_quality_projection,
     _document_records_projection,
+    _document_view_rows,
     _parse_success_response,
     _to_payload,
 )
@@ -36,7 +37,7 @@ from .api_support import (
     _trace_id_for_request,
 )
 from .export_jobs import create_export_package, export_file_path, load_export_manifest
-from .exports import export_structured_projection
+from .exports import EXPORT_DATASETS, EXPORT_FORMATS, export_structured_projection
 from .models import ParseRequest
 from .parts import PART_STATE_FILTERS, document_parts_projection
 from .pdf_parts import detect_pdf_page_count
@@ -906,6 +907,7 @@ class ApiRoutes:
                     query=request.query_params.get("query"),
                     table_id=request.query_params.get("table_id"),
                     quality_signal=request.query_params.get("quality_signal"),
+                    field_filters=_record_field_filters(request),
                     page_start=page_start,
                     page_end=page_end,
                 )
@@ -934,9 +936,28 @@ class ApiRoutes:
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
-        payload = _document_projection(snapshot, projection="structured")
-        if dataset.strip().lower() == "records":
-            payload["records"] = _document_records_projection(snapshot, limit=None, offset=0)["items"]
+        normalized_dataset = dataset.strip().lower()
+        if normalized_dataset in {"pages", "lines"}:
+            payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+            payload[normalized_dataset] = _document_view_rows(
+                snapshot,
+                view_types=(normalized_dataset,),
+            ).get(normalized_dataset, [])
+        elif normalized_dataset == "records":
+            payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+            payload["records"] = _document_records_projection(
+                snapshot,
+                limit=None,
+                offset=0,
+                query=request.query_params.get("query"),
+                table_id=request.query_params.get("table_id"),
+                quality_signal=request.query_params.get("quality_signal"),
+                field_filters=_record_field_filters(request),
+                page_start=_optional_int(request.query_params.get("page_start")),
+                page_end=_optional_int(request.query_params.get("page_end")),
+            )["items"]
+        else:
+            payload = _document_projection(snapshot, projection="structured")
         try:
             exported = export_structured_projection(
                 payload,
@@ -952,7 +973,7 @@ class ApiRoutes:
                     code=code,
                     message="Invalid export dataset",
                     status_code=400,
-                    detail={"allowed": ["tables", "quality_signals", "parse_units", "records"]},
+                    detail={"allowed": sorted(EXPORT_DATASETS)},
                 )
             if code == "invalid_export_format":
                 return _error_response(
@@ -960,7 +981,7 @@ class ApiRoutes:
                     code=code,
                     message="Invalid export format",
                     status_code=400,
-                    detail={"allowed": ["jsonl", "csv", "tsv", "xlsx", "sqlite"]},
+                    detail={"allowed": sorted(EXPORT_FORMATS)},
                 )
             return _error_response(
                 request,
@@ -1111,12 +1132,23 @@ class ApiRoutes:
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
-        export_payload = _document_projection(snapshot, projection="structured")
-        export_payload["tenant_id"] = tenant_id
         try:
             includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
             formats = _formats_payload(payload.get("formats"))
-            if includes and "records" in {str(item).strip().lower() for item in includes}:
+            normalized_includes = {str(item).strip().lower() for item in includes or ()}
+            view_only_export = bool(normalized_includes) and not (normalized_includes - {"pages", "lines"})
+            if view_only_export:
+                export_payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+            else:
+                export_payload = _document_projection(snapshot, projection="structured")
+                export_payload["tenant_id"] = tenant_id
+            if normalized_includes & {"pages", "lines"}:
+                view_names = tuple(name for name in ("pages", "lines") if name in normalized_includes)
+                views = _document_view_rows(snapshot, view_types=view_names)
+                for dataset_name in ("pages", "lines"):
+                    if dataset_name in normalized_includes:
+                        export_payload[dataset_name] = views.get(dataset_name, [])
+            if includes and "records" in normalized_includes:
                 export_payload["records"] = _document_records_projection(snapshot, limit=None, offset=0)["items"]
             manifest = create_export_package(
                 export_payload,
@@ -1458,6 +1490,33 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _minimal_export_payload(snapshot: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    job = snapshot.get("job")
+    options = getattr(job, "options", {}) if job is not None else {}
+    profile = options.get("profile") if isinstance(options, dict) else None
+    return {
+        "doc_id": str(snapshot.get("doc_id") or getattr(job, "doc_id", "") or ""),
+        "parse_run_id": str(getattr(job, "job_id", "") or ""),
+        "tenant_id": tenant_id,
+        "profile": str(profile or "") if profile is not None else None,
+    }
+
+
+def _record_field_filters(request: Request) -> dict[str, str]:
+    filters: dict[str, str] = {}
+    field_name = str(request.query_params.get("field") or request.query_params.get("field_name") or "").strip()
+    if field_name:
+        filters[field_name] = str(request.query_params.get("value") or "")
+    for key, value in request.query_params.multi_items():
+        key_text = str(key)
+        if not key_text.startswith("field."):
+            continue
+        name = key_text[len("field."):].strip()
+        if name:
+            filters[name] = str(value or "")
+    return filters
 
 
 def _formats_payload(value: Any) -> dict[str, str] | None:

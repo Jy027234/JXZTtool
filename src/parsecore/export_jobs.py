@@ -129,9 +129,11 @@ def _export_specs(
 def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
     filtered = deepcopy(payload)
     severity_filter = _severity_filter(filters.get("severity"))
+    quality_signal_filter = _string_filter(filters.get("quality_signal") or filters.get("quality_signals"))
+    field_filters = _field_filters(filters)
     page_range = _page_range(filters.get("page_range"))
 
-    for dataset in ("tables", "quality_signals", "parse_units", "records"):
+    for dataset in ("pages", "lines", "tables", "quality_signals", "parse_units", "records"):
         rows = filtered.get(dataset)
         if not isinstance(rows, list):
             continue
@@ -141,6 +143,24 @@ def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[
                 row
                 for row in kept
                 if not isinstance(row, dict) or str(row.get("severity")) in severity_filter
+            ]
+        if dataset == "quality_signals" and quality_signal_filter is not None:
+            kept = [
+                row
+                for row in kept
+                if not isinstance(row, dict) or str(row.get("code")) in quality_signal_filter
+            ]
+        if dataset == "records" and quality_signal_filter is not None:
+            kept = [
+                row
+                for row in kept
+                if not isinstance(row, dict) or _record_has_quality_signal(row, quality_signal_filter)
+            ]
+        if dataset == "records" and field_filters:
+            kept = [
+                row
+                for row in kept
+                if not isinstance(row, dict) or _record_matches_fields(row, field_filters)
             ]
         if page_range is not None:
             kept = [
@@ -154,11 +174,60 @@ def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[
 
 
 def _severity_filter(raw: Any) -> set[str] | None:
+    return _string_filter(raw)
+
+
+def _string_filter(raw: Any) -> set[str] | None:
     if raw is None:
         return None
     if isinstance(raw, str):
         return {raw}
-    return {str(value) for value in raw}
+    if isinstance(raw, (list, tuple, set)):
+        return {str(value) for value in raw}
+    return {str(raw)}
+
+
+def _field_filters(filters: dict[str, Any]) -> dict[str, str]:
+    raw = filters.get("fields")
+    if raw is None:
+        raw = filters.get("field_filters")
+    normalized: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            field_name = str(key or "").strip()
+            if field_name:
+                normalized[field_name] = str(value or "").strip()
+    field_name = str(filters.get("field") or filters.get("field_name") or "").strip()
+    if field_name:
+        normalized[field_name] = str(filters.get("value") or "").strip()
+    return normalized
+
+
+def _record_has_quality_signal(row: dict[str, Any], allowed: set[str]) -> bool:
+    return bool({str(code or "") for code in list(row.get("quality_signal_codes") or [])} & allowed)
+
+
+def _record_matches_fields(row: dict[str, Any], field_filters: dict[str, str]) -> bool:
+    fields = row.get("fields")
+    if not isinstance(fields, dict):
+        return False
+    for field_name, expected in field_filters.items():
+        if field_name not in fields:
+            return False
+        value = fields.get(field_name)
+        if expected and expected.lower() not in _field_text(value).lower():
+            return False
+        if not expected and not _field_text(value).strip():
+            return False
+    return True
+
+
+def _field_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(str(item or "") for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item or "") for item in value)
+    return str(value or "")
 
 
 def _page_range(raw: Any) -> tuple[int, int] | None:

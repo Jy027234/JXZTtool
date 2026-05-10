@@ -112,6 +112,28 @@ class StructuredProjectionExportTests(unittest.TestCase):
         self.assertEqual(rows[0]["record_id"], "rec-1")
         self.assertEqual(rows[0]["fields"]["certificate"], "TC001A")
 
+    def test_exports_pages_and_lines_as_first_class_datasets(self) -> None:
+        payload = {
+            "doc_id": "doc-view",
+            "pages": [
+                {"page_number": 1, "page_type": "body", "text": "Alpha"},
+                {"page_number": 2, "page_type": "body", "text": "Beta"},
+            ],
+            "lines": [
+                {"line_id": "l1", "page_number": 1, "line_index": 1, "text": "Alpha"},
+                {"line_id": "l2", "page_number": 2, "line_index": 1, "text": "Beta"},
+            ],
+        }
+
+        pages = export_structured_projection(payload, dataset="pages", format="jsonl")
+        lines = export_structured_projection(payload, dataset="lines", format="csv")
+
+        self.assertEqual(pages["filename"], "doc-view-pages.jsonl")
+        self.assertEqual([json.loads(line)["page_number"] for line in str(pages["content"]).splitlines()], [1, 2])
+        self.assertEqual(lines["filename"], "doc-view-lines.csv")
+        rows = list(csv.DictReader(io.StringIO(str(lines["content"]))))
+        self.assertEqual([row["line_id"] for row in rows], ["l1", "l2"])
+
     @unittest.skipUnless(importlib.util.find_spec("openpyxl"), "openpyxl not installed")
     def test_exports_records_as_xlsx(self) -> None:
         from openpyxl import load_workbook
@@ -175,7 +197,7 @@ class StructuredProjectionExportTests(unittest.TestCase):
 
     def test_rejects_invalid_dataset_and_format(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid_export_dataset"):
-            export_structured_projection({}, dataset="pages", format="csv")
+            export_structured_projection({}, dataset="images", format="csv")
 
         with self.assertRaisesRegex(ValueError, "invalid_export_format"):
             export_structured_projection({}, dataset="tables", format="parquet")

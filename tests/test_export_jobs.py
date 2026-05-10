@@ -129,6 +129,88 @@ class ExportPackageTests(unittest.TestCase):
             ).splitlines()
             self.assertEqual([json.loads(line)["record_id"] for line in record_lines], ["rec-2"])
 
+    def test_custom_export_package_can_include_pages_and_lines(self) -> None:
+        payload = {
+            "schema_version": "2026-06",
+            "doc_id": "doc-views",
+            "pages": [
+                {"page_number": 1, "text": "Alpha"},
+                {"page_number": 2, "text": "Beta"},
+            ],
+            "lines": [
+                {"line_id": "l1", "page_number": 1, "text": "Alpha"},
+                {"line_id": "l2", "page_number": 2, "text": "Beta"},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["pages", "lines"],
+                formats={"pages": "jsonl", "lines": "csv"},
+                filters={"page_range": {"start": 2, "end": 2}},
+            )
+
+            self.assertEqual(manifest["request"]["include"], ["pages", "lines"])
+            self.assertEqual(
+                [(entry["dataset"], entry["records"]) for entry in manifest["files"]],
+                [("pages", 1), ("lines", 1)],
+            )
+            page_lines = export_file_path(tmp, manifest["export_id"], "pages.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([json.loads(line)["page_number"] for line in page_lines], [2])
+            lines_content = export_file_path(tmp, manifest["export_id"], "lines.csv").read_text(encoding="utf-8")
+            line_rows = list(csv.DictReader(io.StringIO(lines_content)))
+            self.assertEqual([row["line_id"] for row in line_rows], ["l2"])
+
+    def test_export_filters_records_by_quality_signal_and_fields(self) -> None:
+        payload = {
+            "schema_version": "2026-06",
+            "doc_id": "doc-record-filters",
+            "quality_signals": [
+                {"code": "column_shift_suspected", "severity": "warning", "record_id": "rec-2"},
+                {"code": "record_field_missing", "severity": "warning", "record_id": "rec-1"},
+            ],
+            "records": [
+                {
+                    "record_id": "rec-1",
+                    "page_start": 1,
+                    "fields": {"certificate_or_project_no": "TC001A", "holder": "alpha"},
+                    "quality_signal_codes": ["record_field_missing"],
+                },
+                {
+                    "record_id": "rec-2",
+                    "page_start": 2,
+                    "fields": {"certificate_or_project_no": "PMA0013-01-XN", "holder": "beta"},
+                    "quality_signal_codes": ["column_shift_suspected"],
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["quality_signals", "records"],
+                formats={"quality_signals": "jsonl", "records": "jsonl"},
+                filters={
+                    "quality_signal": "column_shift_suspected",
+                    "fields": {"certificate_or_project_no": "PMA0013"},
+                },
+            )
+
+            signal_lines = export_file_path(tmp, manifest["export_id"], "quality_signals.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            record_lines = export_file_path(tmp, manifest["export_id"], "records.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([json.loads(line)["code"] for line in signal_lines], ["column_shift_suspected"])
+            self.assertEqual([json.loads(line)["record_id"] for line in record_lines], ["rec-2"])
+            self.assertEqual(manifest["files"][1]["records"], 1)
+
     def test_custom_export_package_can_write_records_sqlite(self) -> None:
         payload = {
             "schema_version": "2026-06",
@@ -161,7 +243,7 @@ class ExportPackageTests(unittest.TestCase):
     def test_custom_invalid_dataset_and_format_raise_value_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "invalid_export_dataset"):
-                create_export_package({}, tmp, includes=["pages"])
+                create_export_package({}, tmp, includes=["images"])
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "invalid_export_format"):

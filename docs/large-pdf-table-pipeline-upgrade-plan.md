@@ -337,8 +337,15 @@ default_exports = ["sqlite", "jsonl", "csv", "xlsx"]
 2026-05-10 第二轮继续落地：
 
 - records 质量信号新增 `column_shift_suspected` 与 `date_parse_failed`，可标记日期出现在非日期字段、日期字段无法解析、证件编号/日期顺序异常等疑似错位情况。
-- records 查询新增 `quality_signal` 过滤参数，可直接读取疑似错列、字段缺失、续行等记录集合。
+- records 查询新增 `quality_signal` 与字段级过滤参数，可直接读取疑似错列、字段缺失、续行，或指定证件号/持有人等字段的记录集合。
+- 同步 records 导出复用 records 查询过滤参数；异步 export job filters 新增 `quality_signal` 和 `fields/field_filters`，保证查询结果与导出包可按同一口径收敛。
 - document views 新增 `replace_document_views_by_prefix`，PDF part 增量刷新时会优先按 `doc_id:merged:{part_id}:` 前缀局部替换 `pages / lines / records`，为单 part 复跑后不重建全量视图打底。
+
+2026-05-10 第三轮继续落地：
+
+- `pages / lines` 已升级为同步导出和异步 export job 的正式 dataset，可按 `jsonl/csv/tsv/sqlite/xlsx` 输出。
+- export job 的 `page_range` 过滤已覆盖 `pages / lines / tables / quality_signals / parse_units / records`，方便按页段抽取原始行、结构化记录和质量信号。
+- 同步/异步导出显式请求 `pages / lines` 时会优先读取持久化 document views，缺失时再回退到 block 投影，避免大文档重复现场聚合。
 
 ## 风险与应对
 
@@ -356,7 +363,7 @@ default_exports = ["sqlite", "jsonl", "csv", "xlsx"]
 - [x] worker 不再直接解析 partitioned 父 job。
 - [x] 可产出并持久化 pages、lines、records 三层数据。
 - [x] records 支持分页查询和关键词查询。
-- [x] 可导出 Excel、SQLite、CSV、JSONL。
+- [x] 可导出 pages、lines、records、tables、quality signals 和 parse units，格式覆盖 Excel、SQLite、CSV、TSV、JSONL。
 - [x] 质量报告包含列错位、字段缺失、日期异常、边界不确定等基础信号。
 - [ ] 异常 part 可单独复跑，非异常 part 结果保持不变。
 - [ ] perf baseline 能对比页数、行数、记录数、章节分布、耗时和导出结果。

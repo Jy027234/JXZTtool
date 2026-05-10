@@ -157,6 +157,15 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(record["fields"]["latest_date"], "2025-01-10")
         self.assertIn("row_continuation_detected", record["quality_signal_codes"])
 
+        field_payload = _document_records_projection(
+            snapshot,
+            field_filters={"certificate_or_project_no": "PMA0013"},
+            limit=10,
+            offset=0,
+        )
+        self.assertEqual(field_payload["total"], 1)
+        self.assertEqual(field_payload["items"][0]["row_number"], 2)
+
     def test_record_quality_signals_detect_shifted_columns_and_bad_dates(self) -> None:
         job = SimpleNamespace(
             job_id="job-record-quality",
