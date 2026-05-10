@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from parsecore.exports import export_structured_projection
+from parsecore.exports import export_structured_projection, write_structured_projection
 
 
 class StructuredProjectionExportTests(unittest.TestCase):
@@ -133,6 +133,29 @@ class StructuredProjectionExportTests(unittest.TestCase):
         self.assertEqual(lines["filename"], "doc-view-lines.csv")
         rows = list(csv.DictReader(io.StringIO(str(lines["content"]))))
         self.assertEqual([row["line_id"] for row in rows], ["l1", "l2"])
+
+    def test_writes_projection_directly_to_disk(self) -> None:
+        payload = {
+            "doc_id": "doc-stream",
+            "records": [
+                {"record_id": "rec-1", "page_start": 1, "fields": {"name": "alpha"}},
+                {"record_id": "rec-2", "page_start": 2, "fields": {"name": "beta"}},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path = Path(tmp) / "records.jsonl"
+            csv_path = Path(tmp) / "records.csv"
+
+            jsonl = write_structured_projection(payload, dataset="records", format="jsonl", path=jsonl_path)
+            csv_result = write_structured_projection(payload, dataset="records", format="csv", path=csv_path)
+
+            self.assertEqual(jsonl["content_type"], "application/x-ndjson; charset=utf-8")
+            self.assertEqual(jsonl["bytes"], jsonl_path.stat().st_size)
+            self.assertEqual([json.loads(line)["record_id"] for line in jsonl_path.read_text(encoding="utf-8").splitlines()], ["rec-1", "rec-2"])
+            self.assertEqual(csv_result["content_type"], "text/csv; charset=utf-8")
+            rows = list(csv.DictReader(io.StringIO(csv_path.read_text(encoding="utf-8"))))
+            self.assertEqual([row["record_id"] for row in rows], ["rec-1", "rec-2"])
 
     @unittest.skipUnless(importlib.util.find_spec("openpyxl"), "openpyxl not installed")
     def test_exports_records_as_xlsx(self) -> None:

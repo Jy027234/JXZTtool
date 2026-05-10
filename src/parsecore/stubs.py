@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
 from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
+from .record_filters import collect_record_query
 
 
 def _utc_now() -> str:
@@ -480,6 +481,36 @@ class InMemoryJobStore(JobStore):
 
     def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, object], ...]:
         return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def query_document_records(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+        query: str | None = None,
+        table_id: str | None = None,
+        quality_signal: str | None = None,
+        field_filters: Mapping[str, object] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Mapping[str, object]:
+        key = ((tenant_id or "default"), doc_id, "records")
+        records = self.get_document_records(doc_id=doc_id, tenant_id=tenant_id)
+        result = collect_record_query(
+            records,
+            limit=limit,
+            offset=offset,
+            query=query,
+            table_id=table_id,
+            quality_signal=quality_signal,
+            field_filters=field_filters,
+            page_start=page_start,
+            page_end=page_end,
+        )
+        result["persisted"] = key in self.document_views_by_doc
+        return result
 
     def _get_document_view_items(
         self,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from parsecore.bootstrap import _build_index, _build_job_store
@@ -13,6 +15,31 @@ class BootstrapRoutingTests(unittest.TestCase):
     def test_sqlite_url_returns_sqlite_store(self) -> None:
         store = _build_job_store("sqlite:///./var/test_routing.db")
         self.assertIsInstance(store, SQLiteJobStore)
+
+    def test_sqlite_store_queries_document_records_page(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = SQLiteJobStore(f"sqlite:///{(Path(tmp) / 'store.db').as_posix()}")
+            store.save_document_views(
+                doc_id="doc-records",
+                records=[
+                    {"record_id": "record-1", "page_start": 1, "fields": {"name": "alpha"}},
+                    {"record_id": "record-2", "page_start": 2, "fields": {"name": "beta"}},
+                    {"record_id": "record-3", "page_start": 3, "fields": {"name": "beta"}},
+                ],
+            )
+
+            page = store.query_document_records(
+                doc_id="doc-records",
+                query="beta",
+                page_start=2,
+                page_end=3,
+                limit=1,
+                offset=1,
+            )
+
+            self.assertTrue(page["persisted"])
+            self.assertEqual(page["total"], 2)
+            self.assertEqual(page["items"][0]["record_id"], "record-3")
 
     def test_memory_url_returns_inmemory_store(self) -> None:
         self.assertIsInstance(_build_job_store("memory://"), InMemoryJobStore)
@@ -40,6 +67,22 @@ class BootstrapRoutingTests(unittest.TestCase):
         self.assertEqual(tenant_a["records"][0]["record_id"], "record-1")
         self.assertEqual(tenant_b["records"][0]["record_id"], "record-2")
         self.assertEqual(store.get_document_records(doc_id="doc-views", tenant_id="missing"), ())
+
+        page = store.query_document_records(
+            doc_id="doc-views",
+            tenant_id="tenant-a",
+            query="alpha",
+            field_filters={"name": "alpha"},
+            limit=1,
+            offset=0,
+        )
+        self.assertTrue(page["persisted"])
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["record_id"], "record-1")
+
+        missing = store.query_document_records(doc_id="doc-views", tenant_id="missing")
+        self.assertFalse(missing["persisted"])
+        self.assertEqual(missing["total"], 0)
 
     def test_inmemory_store_replaces_document_views_by_part_prefix(self) -> None:
         store = InMemoryJobStore()

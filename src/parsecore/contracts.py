@@ -205,6 +205,21 @@ class JobStore(Protocol):
         tenant_id: str | None = None,
     ) -> Sequence[Mapping[str, Any]]: ...
 
+    def query_document_records(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+        query: str | None = None,
+        table_id: str | None = None,
+        quality_signal: str | None = None,
+        field_filters: Mapping[str, Any] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Mapping[str, Any]: ...
+
     def record_layer_search_hit(
         self,
         *,

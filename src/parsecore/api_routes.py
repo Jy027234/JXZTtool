@@ -18,7 +18,6 @@ from .api_payloads import (
     _batch_success_response,
     _document_projection,
     _document_quality_projection,
-    _document_records_projection,
     _document_view_rows,
     _parse_success_response,
     _to_payload,
@@ -891,27 +890,26 @@ class ApiRoutes:
     async def get_document_records(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         tenant_id = str(request.query_params.get("tenant_id") or "default")
-        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
-        if snapshot["job"] is None:
-            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         try:
             limit = max(1, min(1000, int(request.query_params.get("limit", "100"))))
             offset = max(0, int(request.query_params.get("offset", "0")))
             page_start = _optional_int(request.query_params.get("page_start"))
             page_end = _optional_int(request.query_params.get("page_end"))
-            return JSONResponse(
-                _document_records_projection(
-                    snapshot,
-                    limit=limit,
-                    offset=offset,
-                    query=request.query_params.get("query"),
-                    table_id=request.query_params.get("table_id"),
-                    quality_signal=request.query_params.get("quality_signal"),
-                    field_filters=_record_field_filters(request),
-                    page_start=page_start,
-                    page_end=page_end,
-                )
+            records_payload = runtime_obj.get_document_records_projection(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
+                limit=limit,
+                offset=offset,
+                query=request.query_params.get("query"),
+                table_id=request.query_params.get("table_id"),
+                quality_signal=request.query_params.get("quality_signal"),
+                field_filters=_record_field_filters(request),
+                page_start=page_start,
+                page_end=page_end,
             )
+            if records_payload is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+            return JSONResponse(records_payload)
         except ValueError as exc:
             code = str(exc) or "invalid_records_query"
             if code == "invalid_page_range":
@@ -933,20 +931,24 @@ class ApiRoutes:
         tenant_id = str(request.query_params.get("tenant_id") or "default")
         dataset = str(request.query_params.get("dataset") or "tables")
         export_format = str(request.query_params.get("format") or "jsonl")
-        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
-        if snapshot["job"] is None:
-            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         normalized_dataset = dataset.strip().lower()
         if normalized_dataset in {"pages", "lines"}:
+            snapshot = runtime_obj.get_document(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
+                document_view_types=(normalized_dataset,),
+            )
+            if snapshot["job"] is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
             payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
             payload[normalized_dataset] = _document_view_rows(
                 snapshot,
                 view_types=(normalized_dataset,),
             ).get(normalized_dataset, [])
         elif normalized_dataset == "records":
-            payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
-            payload["records"] = _document_records_projection(
-                snapshot,
+            records_payload = runtime_obj.get_document_records_projection(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
                 limit=None,
                 offset=0,
                 query=request.query_params.get("query"),
@@ -955,8 +957,15 @@ class ApiRoutes:
                 field_filters=_record_field_filters(request),
                 page_start=_optional_int(request.query_params.get("page_start")),
                 page_end=_optional_int(request.query_params.get("page_end")),
-            )["items"]
+            )
+            if records_payload is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+            payload = _minimal_export_payload_from_records(records_payload, tenant_id=tenant_id)
+            payload["records"] = records_payload["items"]
         else:
+            snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+            if snapshot["job"] is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
             payload = _document_projection(snapshot, projection="structured")
         try:
             exported = export_structured_projection(
@@ -1129,27 +1138,44 @@ class ApiRoutes:
         runtime_obj: ParseRuntime = request.app.state.runtime
         payload = await _optional_json_payload(request)
         tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
-        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
-        if snapshot["job"] is None:
-            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         try:
             includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
             formats = _formats_payload(payload.get("formats"))
             normalized_includes = {str(item).strip().lower() for item in includes or ()}
-            view_only_export = bool(normalized_includes) and not (normalized_includes - {"pages", "lines"})
+            view_names = tuple(name for name in ("pages", "lines") if name in normalized_includes)
+            snapshot = runtime_obj.get_document(
+                doc_id=request.path_params["doc_id"],
+                tenant_id=tenant_id,
+                document_view_types=view_names or None,
+            )
+            if snapshot["job"] is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+            view_only_export = bool(normalized_includes) and not (normalized_includes - {"pages", "lines", "records"})
             if view_only_export:
                 export_payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
             else:
                 export_payload = _document_projection(snapshot, projection="structured")
                 export_payload["tenant_id"] = tenant_id
-            if normalized_includes & {"pages", "lines"}:
-                view_names = tuple(name for name in ("pages", "lines") if name in normalized_includes)
+            if view_names:
                 views = _document_view_rows(snapshot, view_types=view_names)
                 for dataset_name in ("pages", "lines"):
                     if dataset_name in normalized_includes:
                         export_payload[dataset_name] = views.get(dataset_name, [])
             if includes and "records" in normalized_includes:
-                export_payload["records"] = _document_records_projection(snapshot, limit=None, offset=0)["items"]
+                records_payload = runtime_obj.get_document_records_projection(
+                    doc_id=request.path_params["doc_id"],
+                    tenant_id=tenant_id,
+                    limit=None,
+                    offset=0,
+                )
+                if records_payload is None:
+                    return _error_response(
+                        request,
+                        code="document_not_found",
+                        message="Document not found",
+                        status_code=404,
+                    )
+                export_payload["records"] = records_payload["items"]
             manifest = create_export_package(
                 export_payload,
                 _export_root(runtime_obj),
@@ -1501,6 +1527,15 @@ def _minimal_export_payload(snapshot: dict[str, Any], *, tenant_id: str) -> dict
         "parse_run_id": str(getattr(job, "job_id", "") or ""),
         "tenant_id": tenant_id,
         "profile": str(profile or "") if profile is not None else None,
+    }
+
+
+def _minimal_export_payload_from_records(records_payload: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    return {
+        "doc_id": str(records_payload.get("doc_id") or ""),
+        "parse_run_id": str(records_payload.get("parse_run_id") or ""),
+        "tenant_id": tenant_id,
+        "profile": records_payload.get("profile"),
     }
 
 

@@ -13,7 +13,7 @@ from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, 
 from .events import JobEventLogger
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
 from .ocr_trace import build_ocr_decision_trace
-from .pdf_parts import child_doc_id, create_pdf_part_file, detect_pdf_page_count, plan_pdf_parts
+from .pdf_parts import child_doc_id, create_pdf_part_file, create_pdf_part_files, detect_pdf_page_count, plan_pdf_parts
 from .pipelines import ParsedDocumentArtifact, PipelineRegistry
 from .profiles import describe_parse_profiles
 
@@ -758,7 +758,13 @@ class ParseRuntime:
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
 
-    def get_document(self, *, doc_id: str, tenant_id: str | None = None) -> dict[str, Any]:
+    def get_document(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        document_view_types: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
         latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         normalized_tenant = str(tenant_id or getattr(latest_job, "tenant_id", "default") or "default")
         if latest_job is None:
@@ -783,10 +789,11 @@ class ParseRuntime:
                     tenant_id=latest_job.tenant_id,
                     parent_job_id=latest_job.job_id,
                 )
-        document_views: Mapping[str, Sequence[Mapping[str, Any]]] = {}
-        get_document_views = getattr(self.job_store, "get_document_views", None)
-        if latest_job is not None and callable(get_document_views):
-            document_views = get_document_views(doc_id=doc_id, tenant_id=latest_job.tenant_id)
+        document_views = self._document_views_for_types(
+            doc_id=doc_id,
+            tenant_id=getattr(latest_job, "tenant_id", tenant_id),
+            view_types=document_view_types,
+        ) if latest_job is not None else {}
         describe_document = getattr(self.index, "describe_document", None)
         index_manifest = None
         if callable(describe_document):
@@ -805,6 +812,91 @@ class ParseRuntime:
             "document_views": document_views,
             "index_manifest": index_manifest,
             "partition_parts": partition_parts,
+        }
+
+    def get_document_records_projection(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+        query: str | None = None,
+        table_id: str | None = None,
+        quality_signal: str | None = None,
+        field_filters: Mapping[str, Any] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> dict[str, Any] | None:
+        latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        if latest_job is None:
+            return None
+        snapshot = self._minimal_document_snapshot(doc_id=doc_id, job=latest_job)
+        query_document_records = getattr(self.job_store, "query_document_records", None)
+        if callable(query_document_records):
+            result = query_document_records(
+                doc_id=doc_id,
+                tenant_id=latest_job.tenant_id,
+                limit=limit,
+                offset=offset,
+                query=query,
+                table_id=table_id,
+                quality_signal=quality_signal,
+                field_filters=field_filters,
+                page_start=page_start,
+                page_end=page_end,
+            )
+            if bool(result.get("persisted")):
+                from .api_payloads import _document_records_response
+
+                return _document_records_response(
+                    snapshot,
+                    total=int(result.get("total") or 0),
+                    limit=result.get("limit"),
+                    offset=int(result.get("offset") or 0),
+                    items=tuple(item for item in result.get("items", ()) if isinstance(item, dict)),
+                )
+
+        fallback_snapshot = self.get_document(doc_id=doc_id, tenant_id=tenant_id)
+        from .api_payloads import _document_records_projection
+
+        return _document_records_projection(
+            fallback_snapshot,
+            limit=limit,
+            offset=offset,
+            query=query,
+            table_id=table_id,
+            quality_signal=quality_signal,
+            field_filters=field_filters,
+            page_start=page_start,
+            page_end=page_end,
+        )
+
+    def _document_views_for_types(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        view_types: Sequence[str] | None,
+    ) -> Mapping[str, Sequence[Mapping[str, Any]]]:
+        if not view_types:
+            return {}
+        document_views: dict[str, Sequence[Mapping[str, Any]]] = {}
+        for view_type in _normalized_document_view_types(view_types):
+            getter = getattr(self.job_store, f"get_document_{view_type}", None)
+            if callable(getter):
+                document_views[view_type] = getter(doc_id=doc_id, tenant_id=tenant_id)
+        return document_views
+
+    def _minimal_document_snapshot(self, *, doc_id: str, job: Any) -> dict[str, Any]:
+        return {
+            "doc_id": doc_id,
+            "job": job,
+            "blocks": (),
+            "chunks": (),
+            "document_views": {},
+            "index_manifest": None,
+            "partition_parts": [],
         }
 
     def start_pdf_part_jobs(
@@ -865,6 +957,24 @@ class ParseRuntime:
             clear_claim=True,
         )
 
+        part_file_specs = []
+        for spec in part_specs:
+            part_id = str(spec.get("part_id") or child_doc_id(parent_job.doc_id, spec.get("part_index") or 1))
+            part_file = self._pdf_part_file_path(
+                source_path=source_job.file_path,
+                parent_doc_id=parent_job.doc_id,
+                parent_job_id=parent_job.job_id,
+                part_id=part_id,
+            )
+            part_file_specs.append(
+                {
+                    "target_path": str(part_file),
+                    "page_start": spec.get("page_start"),
+                    "page_end": spec.get("page_end"),
+                }
+            )
+        create_pdf_part_files(source_job.file_path, part_file_specs)
+
         part_jobs = []
         for spec in part_specs:
             part_jobs.append(
@@ -874,6 +984,7 @@ class ParseRuntime:
                     spec=spec,
                     profile=effective_profile,
                     max_active_parts_per_doc=max_active_parts_per_doc,
+                    create_part_file=False,
                 )
             )
         parent_job = self.refresh_partitioned_parent(
@@ -1301,6 +1412,7 @@ class ParseRuntime:
         profile: str,
         max_active_parts_per_doc: int | None = None,
         rerun: bool = False,
+        create_part_file: bool = True,
     ):
         part_id = str(spec.get("part_id") or child_doc_id(parent_job.doc_id, spec.get("part_index") or 1))
         part_doc_id = str(spec.get("part_doc_id") or part_id)
@@ -1312,8 +1424,9 @@ class ParseRuntime:
             parent_job_id=parent_job.job_id,
             part_id=part_id,
         )
-        part_file.parent.mkdir(parents=True, exist_ok=True)
-        create_pdf_part_file(source_job.file_path, str(part_file), page_start, page_end)
+        if create_part_file:
+            part_file.parent.mkdir(parents=True, exist_ok=True)
+            create_pdf_part_file(source_job.file_path, str(part_file), page_start, page_end)
         options = dict(source_job.options)
         options.update(
             {
@@ -3047,6 +3160,15 @@ def _safe_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalized_document_view_types(view_types: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for view_type in view_types:
+        value = str(view_type or "").strip().lower()
+        if value in {"pages", "lines", "records"} and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
 
 
 def _safe_path_segment(value: Any) -> str:

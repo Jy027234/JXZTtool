@@ -2,6 +2,8 @@
 
 本文是 ParseCore 的配置总入口，面向要把产品跑起来、接入宿主系统、或进入灰度/生产验收的用户。配置文件使用 TOML；密钥只通过环境变量注入，不写入配置文件。
 
+如果只需要交付使用口径，先读 [release-notes.md](release-notes.md) 和 [user-guide.md](user-guide.md)；本文保留完整配置字段和运维细节。
+
 ## 快速选择
 
 | 使用场景 | 推荐配置 | 执行模式 | 存储/索引 | 典型命令 |
@@ -605,6 +607,8 @@ profile 建议用法：
 | `excel-ledger` | `.xls/.xlsx/.xlsm` 台账、明细表 | 验证 sheet、cell range、merged cells 和截断信号。 |
 | `scan-pdf` | 扫描件或图片型 PDF | 走异步优先，避免同步请求长时间占用连接。 |
 
+`large-pdf-catalog` / `large-pdf-ledger` 默认使用 fast text path：跳过重型 pdfplumber 双通道布局、阅读顺序和坏页 OCR fallback，优先保留原生文本行供 records 聚合。若某份目录/台账需要高保真表格块或 OCR，可在创建 job 时显式传 `post_process.dual_channel=true`、`post_process.layout_reading_order=true` 或 `enable_ocr=true`。
+
 `quality_signals` 后续会保持追加式扩展。宿主 schema 建议把它当数组 JSON 存储，不要只按当前 code 建固定列；消费时按 `code / severity / page_number / table_id / row_index / col_index / bbox` 做宽松解析，未知 code 默认展示或记录，不阻断主流程。
 
 ## 导出中心与复跑规划
@@ -628,7 +632,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 - `format=jsonl|csv|tsv|sqlite|xlsx`
 - `tenant_id=...` 可选，默认 `default`
 
-解析完成后，中台会把结构化 `pages / lines / records` 作为 document views 持久化到当前 JobStore；records 查询会优先读取持久化结果，缺失时再回退到 block 现场投影。记录级查询入口用于分页读取派生 records，避免把大结果集塞进主文档响应。records 可能来自结构化表格行，也可能来自 `large-pdf-catalog` / `large-pdf-ledger` 下按序号行聚合出的文本记录；消费方应按 `source / fields / raw_text / normalized_text / page_start / page_end` 宽松解析。
+解析完成后，中台会把结构化 `pages / lines / records` 作为 document views 持久化到当前 JobStore；records 查询会优先读取持久化结果，缺失时再回退到 block 现场投影。主文档快照默认不再携带 `pages / lines / records` views，页面/行导出会按需加载对应 view，记录级查询入口则用于分页读取派生 records，避免把大结果集塞进主文档响应。records 可能来自结构化表格行，也可能来自 `large-pdf-catalog` / `large-pdf-ledger` 下按序号行聚合出的文本记录；消费方应按 `source / fields / raw_text / normalized_text / page_start / page_end` 宽松解析。
 
 ```text
 GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0
@@ -647,7 +651,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / parse_units / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
+异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / parse_units / records`。异步包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 

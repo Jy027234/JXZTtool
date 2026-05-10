@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from hashlib import sha1
+from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 PdfReader = None
@@ -72,10 +73,32 @@ def create_pdf_part_file(
     page_start: int,
     page_end: int,
 ) -> None:
-    start = _positive_int(page_start, "invalid_page_range")
-    end = _positive_int(page_end, "invalid_page_range")
-    if end < start:
-        raise ValueError("invalid_page_range")
+    create_pdf_part_files(
+        source_path,
+        [
+            {
+                "target_path": target_path,
+                "page_start": page_start,
+                "page_end": page_end,
+            }
+        ],
+    )
+
+
+def create_pdf_part_files(source_path: str, parts: Sequence[Mapping[str, Any]]) -> None:
+    if not parts:
+        return
+
+    normalized_parts: list[tuple[str, int, int]] = []
+    for part in parts:
+        target_path = str(part.get("target_path") or "").strip()
+        if not target_path:
+            raise ValueError("invalid_part_file")
+        start = _positive_int(part.get("page_start"), "invalid_page_range")
+        end = _positive_int(part.get("page_end"), "invalid_page_range")
+        if end < start:
+            raise ValueError("invalid_page_range")
+        normalized_parts.append((target_path, start, end))
 
     reader_cls = _load_pdf_reader()
     writer_cls = _load_pdf_writer()
@@ -83,13 +106,19 @@ def create_pdf_part_file(
         with open(source_path, "rb") as source_file:
             reader = reader_cls(source_file)
             pages = reader.pages
-            if end > len(pages):
-                raise ValueError("invalid_page_range")
-            writer = writer_cls()
-            for page_number in range(start, end + 1):
-                writer.add_page(pages[page_number - 1])
-            with open(target_path, "wb") as target_file:
-                writer.write(target_file)
+            page_count = len(pages)
+            for _target_path, _start, end in normalized_parts:
+                if end > page_count:
+                    raise ValueError("invalid_page_range")
+
+            for target_path, start, end in normalized_parts:
+                writer = writer_cls()
+                for page_number in range(start, end + 1):
+                    writer.add_page(pages[page_number - 1])
+                target = Path(target_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as target_file:
+                    writer.write(target_file)
     except ValueError:
         raise
     except ImportError:
@@ -183,6 +212,7 @@ __all__ = [
     "PdfWriter",
     "child_doc_id",
     "create_pdf_part_file",
+    "create_pdf_part_files",
     "detect_pdf_page_count",
     "plan_pdf_parts",
 ]

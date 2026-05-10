@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from parsecore.api_payloads import _document_projection, _document_records_projection
+from parsecore.api_payloads import _document_projection
 from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
@@ -371,7 +371,21 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(views["records"][0]["fields"]["certificate_or_project_no"], "TC001A")
 
             snapshot = runtime.get_document(doc_id="doc-views", tenant_id="default")
-            records_payload = _document_records_projection(snapshot, query="ACME", limit=10, offset=0)
+            self.assertEqual(snapshot["document_views"], {})
+            snapshot_with_records = runtime.get_document(
+                doc_id="doc-views",
+                tenant_id="default",
+                document_view_types=("records",),
+            )
+            self.assertEqual(len(snapshot_with_records["document_views"]["records"]), 1)
+            records_payload = runtime.get_document_records_projection(
+                doc_id="doc-views",
+                tenant_id="default",
+                query="ACME",
+                limit=10,
+                offset=0,
+            )
+            self.assertIsNotNone(records_payload)
             self.assertEqual(records_payload["total"], 1)
             self.assertEqual(records_payload["items"][0]["record_id"], views["records"][0]["record_id"])
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .exports import export_structured_projection
+from .exports import write_structured_projection
 
 
 DEFAULT_EXPORTS: tuple[tuple[str, str], ...] = (
@@ -52,26 +51,21 @@ def create_export_package(
     }
 
     for dataset, format_name in requested_specs:
-        exported = export_structured_projection(
+        filename = f"{dataset}.{format_name}"
+        path = export_file_path(output_dir, export_id, filename)
+        exported = write_structured_projection(
             filtered_payload,
             dataset=dataset,
             format=format_name,
-            as_bytes=True,
+            path=path,
         )
-        filename = f"{dataset}.{format_name}"
-        content = exported["content"]
-        if not isinstance(content, bytes):
-            content = str(content).encode("utf-8")
-
-        path = export_file_path(output_dir, export_id, filename)
-        path.write_bytes(content)
         manifest["files"].append(
             {
                 "dataset": dataset,
                 "format": format_name,
                 "path": filename,
                 "content_type": exported["content_type"],
-                "bytes": len(content),
+                "bytes": exported["bytes"],
                 "records": _record_count(filtered_payload.get(dataset)),
             }
         )
@@ -127,7 +121,7 @@ def _export_specs(
 
 
 def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
-    filtered = deepcopy(payload)
+    filtered = dict(payload)
     severity_filter = _severity_filter(filters.get("severity"))
     quality_signal_filter = _string_filter(filters.get("quality_signal") or filters.get("quality_signals"))
     field_filters = _field_filters(filters)

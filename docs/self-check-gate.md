@@ -69,7 +69,23 @@ CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。base
 2. `1`：至少一项必需检查失败
 3. `2`：没有硬失败，但存在退化或超时
 
-## 2026-04-28 当前结论
+## 2026-05-10 当前结论
+
+### 可靠性
+
+- 本轮交付前全量回归通过：`322 passed, 5 skipped`。
+- `git diff --check` 通过。
+- records/document views/导出/大 PDF part 相关主链路已补充定向测试。
+- 真实 17,101 页 PDF 样本已完成产物抽检：`pages=17,101`、`lines=1,249,000`、`records=454,985`，SQLite 查询可用。
+- 当前版本可作为 `0.1.0 可交付灰度版` 进入受控生产灰度。
+
+### 继续观察
+
+- OCR 重样本与复杂跨页表格仍按专项性能窗口跟踪。
+- records 同步 HTTP 导出后续可继续 streaming 化。
+- Parquet、异常页截图包、raw cells trace 包属于后续增强，不阻塞当前交付。
+
+## 2026-04-28 历史结论
 
 ### 可靠性
 

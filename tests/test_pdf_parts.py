@@ -7,6 +7,7 @@ from parsecore import pdf_parts
 from parsecore.pdf_parts import (
     child_doc_id,
     create_pdf_part_file,
+    create_pdf_part_files,
     detect_pdf_page_count,
     plan_pdf_parts,
 )
@@ -129,6 +130,53 @@ class PdfPartsIoTests(unittest.TestCase):
             if target.exists():
                 target.unlink()
             source.unlink()
+            tmp_dir.rmdir()
+
+    def test_create_pdf_part_files_opens_source_once_for_batch(self) -> None:
+        reader_sources: list[object] = []
+        writes: list[list[str]] = []
+
+        class FakeReader:
+            def __init__(self, source_file: object) -> None:
+                reader_sources.append(source_file)
+                self.pages = ["p1", "p2", "p3", "p4", "p5"]
+
+        class FakeWriter:
+            def __init__(self) -> None:
+                self.pages: list[str] = []
+
+            def add_page(self, page: str) -> None:
+                self.pages.append(page)
+
+            def write(self, target_file: object) -> None:
+                writes.append(list(self.pages))
+                target_file.write(",".join(self.pages).encode("utf-8"))
+
+        pdf_parts.PdfReader = FakeReader
+        pdf_parts.PdfWriter = FakeWriter
+        tmp_dir = Path(self._testMethodName)
+        tmp_dir.mkdir(exist_ok=True)
+        source = tmp_dir / "source.pdf"
+        first = tmp_dir / "part-1.pdf"
+        second = tmp_dir / "part-2.pdf"
+        source.write_bytes(b"%PDF-fake")
+        try:
+            create_pdf_part_files(
+                str(source),
+                [
+                    {"target_path": str(first), "page_start": 1, "page_end": 2},
+                    {"target_path": str(second), "page_start": 4, "page_end": 5},
+                ],
+            )
+
+            self.assertEqual(len(reader_sources), 1)
+            self.assertEqual(writes, [["p1", "p2"], ["p4", "p5"]])
+            self.assertEqual(first.read_bytes(), b"p1,p2")
+            self.assertEqual(second.read_bytes(), b"p4,p5")
+        finally:
+            for path in (first, second, source):
+                if path.exists():
+                    path.unlink()
             tmp_dir.rmdir()
 
     def test_create_pdf_part_file_rejects_invalid_page_ranges(self) -> None:

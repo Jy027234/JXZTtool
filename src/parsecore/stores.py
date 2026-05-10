@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .contracts import IndexAdapter, JobStore
 from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseRequest
+from .record_filters import collect_record_query, normalize_field_filters
 
 
 def _utc_now() -> str:
@@ -110,11 +111,37 @@ def _optional_int_value(value: Any) -> int | None:
 
 def _load_document_view_payloads(rows: Sequence[Sequence[Any]]) -> tuple[dict[str, Any], ...]:
     payloads: list[dict[str, Any]] = []
+    for payload in _iter_document_view_payloads(rows):
+        payloads.append(payload)
+    return tuple(payloads)
+
+
+def _iter_document_view_payloads(rows: Sequence[Sequence[Any]]) -> Iterator[dict[str, Any]]:
     for row in rows:
         payload = json.loads(row[0])
         if isinstance(payload, dict):
-            payloads.append(payload)
-    return tuple(payloads)
+            yield payload
+
+
+def _iter_document_view_payloads_from_cursor(cursor: Any, *, batch_size: int = 512) -> Iterator[dict[str, Any]]:
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            break
+        yield from _iter_document_view_payloads(rows)
+
+
+def _record_query_requires_payload_filter(
+    *,
+    query: str | None,
+    table_id: str | None,
+    quality_signal: str | None,
+    field_filters: Mapping[str, Any] | None,
+) -> bool:
+    return any(
+        str(value or "").strip()
+        for value in (query, table_id, quality_signal)
+    ) or bool(normalize_field_filters(field_filters))
 
 
 def _document_view_bounds(rows: Sequence[Sequence[Any]]) -> tuple[int | None, int | None]:
@@ -402,6 +429,97 @@ class SQLiteJobStore(JobStore):
 
     def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
         return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def query_document_records(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+        query: str | None = None,
+        table_id: str | None = None,
+        quality_signal: str | None = None,
+        field_filters: Mapping[str, Any] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Mapping[str, Any]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        start = _optional_int_value(page_start)
+        end = _optional_int_value(page_end)
+        if start is not None and end is not None and start > end:
+            raise ValueError("invalid_page_range")
+
+        where = ["doc_id = ?", "tenant_id = ?", "view_type = ?"]
+        params: list[Any] = [doc_id, normalized_tenant, "records"]
+        if start is not None:
+            where.append("COALESCE(page_end, page_start, 1) >= ?")
+            params.append(start)
+        if end is not None:
+            where.append("COALESCE(page_start, page_end, 1) <= ?")
+            params.append(end)
+        where_sql = " AND ".join(where)
+
+        payload_filter = _record_query_requires_payload_filter(
+            query=query,
+            table_id=table_id,
+            quality_signal=quality_signal,
+            field_filters=field_filters,
+        )
+        normalized_limit = None if limit is None else max(1, int(limit))
+        normalized_offset = max(0, int(offset or 0))
+
+        with self._connect() as conn:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) FROM document_views WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()
+            candidate_count = int(count_row[0] if count_row is not None else 0)
+            if candidate_count <= 0:
+                return {
+                    "items": (),
+                    "total": 0,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "persisted": False,
+                }
+
+            select_sql = (
+                "SELECT payload_json FROM document_views "
+                f"WHERE {where_sql} "
+                "ORDER BY COALESCE(page_start, 0) ASC, position ASC"
+            )
+            select_params = list(params)
+            if not payload_filter:
+                if normalized_limit is not None:
+                    select_sql += " LIMIT ? OFFSET ?"
+                    select_params.extend([normalized_limit, normalized_offset])
+                elif normalized_offset:
+                    select_sql += " LIMIT -1 OFFSET ?"
+                    select_params.append(normalized_offset)
+                rows = conn.execute(select_sql, tuple(select_params)).fetchall()
+                return {
+                    "items": _load_document_view_payloads(rows),
+                    "total": candidate_count,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "persisted": True,
+                }
+
+            cursor = conn.execute(select_sql, tuple(select_params))
+            result = collect_record_query(
+                _iter_document_view_payloads_from_cursor(cursor),
+                limit=normalized_limit,
+                offset=normalized_offset,
+                query=query,
+                table_id=table_id,
+                quality_signal=quality_signal,
+                field_filters=field_filters,
+                page_start=start,
+                page_end=end,
+            )
+        result["persisted"] = True
+        return result
 
     def _get_document_view_items(
         self,
@@ -1612,6 +1730,96 @@ class PostgresJobStore(JobStore):
 
     def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
         return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def query_document_records(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+        query: str | None = None,
+        table_id: str | None = None,
+        quality_signal: str | None = None,
+        field_filters: Mapping[str, Any] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Mapping[str, Any]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        start = _optional_int_value(page_start)
+        end = _optional_int_value(page_end)
+        if start is not None and end is not None and start > end:
+            raise ValueError("invalid_page_range")
+
+        where = ["doc_id = %s", "tenant_id = %s", "view_type = %s"]
+        params: list[Any] = [doc_id, normalized_tenant, "records"]
+        if start is not None:
+            where.append("COALESCE(page_end, page_start, 1) >= %s")
+            params.append(start)
+        if end is not None:
+            where.append("COALESCE(page_start, page_end, 1) <= %s")
+            params.append(end)
+        where_sql = " AND ".join(where)
+
+        payload_filter = _record_query_requires_payload_filter(
+            query=query,
+            table_id=table_id,
+            quality_signal=quality_signal,
+            field_filters=field_filters,
+        )
+        normalized_limit = None if limit is None else max(1, int(limit))
+        normalized_offset = max(0, int(offset or 0))
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM document_views WHERE {where_sql}", tuple(params))
+            row = cur.fetchone()
+            candidate_count = int(row[0] if row is not None else 0)
+            if candidate_count <= 0:
+                return {
+                    "items": (),
+                    "total": 0,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "persisted": False,
+                }
+
+            select_sql = (
+                "SELECT payload_json FROM document_views "
+                f"WHERE {where_sql} "
+                "ORDER BY COALESCE(page_start, 0) ASC, position ASC"
+            )
+            select_params = list(params)
+            if not payload_filter:
+                if normalized_limit is not None:
+                    select_sql += " LIMIT %s OFFSET %s"
+                    select_params.extend([normalized_limit, normalized_offset])
+                elif normalized_offset:
+                    select_sql += " OFFSET %s"
+                    select_params.append(normalized_offset)
+                cur.execute(select_sql, tuple(select_params))
+                rows = cur.fetchall()
+                return {
+                    "items": _load_document_view_payloads(rows),
+                    "total": candidate_count,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "persisted": True,
+                }
+
+            cur.execute(select_sql, tuple(select_params))
+            result = collect_record_query(
+                _iter_document_view_payloads_from_cursor(cur),
+                limit=normalized_limit,
+                offset=normalized_offset,
+                query=query,
+                table_id=table_id,
+                quality_signal=quality_signal,
+                field_filters=field_filters,
+                page_start=start,
+                page_end=end,
+            )
+        result["persisted"] = True
+        return result
 
     def _get_document_view_items(
         self,

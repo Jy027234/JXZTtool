@@ -36,6 +36,31 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 报告会输出 `planned_parts / executed_parts / plan_elapsed_s / part_timings / manifest_part_index`。其中 `manifest_part_index` 对应文档 `index_manifest.part_index.parts[]`，可用于确认 `chunk_ids / page_range / index_version` 是否随 part rerun 正常刷新。
 
+### 真实 17,101 页样本基线
+
+2026-05-10 使用 `D:\app\uploads\bigpdf\已获批准的民用航空产品和零部件目录-2025.pdf` 做了一轮真实样本基线：
+
+| 场景 | 页数 | part 大小 | planned_parts | plan_elapsed_s | total_elapsed_s | 说明 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 优化前 plan-only | 17,101 | 200 | 86 | 235.283 | 237.543 | 每个 part 重复打开源 PDF。 |
+| 优化前 execute 1 part | 17,101 | 200 | 86 | 265.144 | 357.489 | part-1 解析 89.742s，产出 3,411 blocks/chunks。 |
+| 批量拆分优化后 plan-only | 17,101 | 200 | 86 | 12.112 | 14.34 | 源 PDF 只打开一次并批量写 part。 |
+| 批量拆分优化后 execute 1 part | 17,101 | 200 | 86 | 11.974 | 101.194 | part-1 解析 86.561s，产出 3,411 blocks/chunks。 |
+| 目录型 fast text 后 execute 1 part | 17,101 | 200 | 86 | 12.262 | 23.646 | part-1 解析 9.028s，产出 212 blocks、9,987 lines、2,703 records。 |
+
+对应报告：
+
+- `var/self-check/real-large-pdf-stress.md`
+- `var/self-check/real-large-pdf-stress-exec1.md`
+- `var/self-check/real-large-pdf-stress-batchsplit.md`
+- `var/self-check/real-large-pdf-stress-batchsplit-exec1.md`
+- `var/self-check/real-large-pdf-stress-fasttext-exec1.md`
+- `var/self-check/real-large-pdf-export-baseline.md`
+
+同一真实样本已有全量产物规模：`pages=17,101`、`lines=1,249,000`、`records=454,985`；`records.jsonl=308.411MB`、`lines.csv=131.679MB`、`catalog.sqlite=614.871MB`。当前中台在已解析的 200 页真实 part 上导出 `pages/lines/records/quality_signals/parse_units` 用时 0.251s，`records.sqlite` 用时 0.103s，`records.xlsx` 用时 0.584s。异步 export job 已改成直接写文件，`jsonl/csv/tsv/sqlite/xlsx` 不再先整体序列化成 bytes；过滤 payload 也不再对全量 records 做 deep copy。records 查询已从主文档快照中拆出，`/records` 会优先按 `limit/offset/page range` 读取持久化 document views，带 `query/table_id/quality_signal/field.*` 时按游标批量扫描候选行。后续性能优先级应继续看 records 导出的真正流式响应，以及 fast text profile 与高保真表格 profile 的自动切换策略。
+
+`large-pdf-catalog` / `large-pdf-ledger` 默认走 fast text path：跳过 pdfplumber 双通道布局、阅读顺序和坏页 OCR fallback，优先保留原生文本行供 records 聚合；如果某个目录/台账确实需要高保真表格块或 OCR，可在请求 `post_process` 中显式设置 `dual_channel=true`、`layout_reading_order=true` 或 `enable_ocr=true`。
+
 API 同步入口支持运行时文件大小保护：
 
 ```toml
@@ -221,7 +246,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=...
 ```
 
-第一期已经支持 `jsonl/csv/tsv` 和 manifest；`parquet`、截图包、raw cells 和完整 trace 包可以等 part 调度与复跑接口稳定后再补。
+第一期已经支持 `jsonl/csv/tsv/sqlite/xlsx` 和 manifest，并且异步包写出会直接落盘。`parquet`、截图包、raw cells 和完整 trace 包可以等 part 调度与复跑接口稳定后再补。
 
 只读 part 视图也已作为排障入口落地：
 

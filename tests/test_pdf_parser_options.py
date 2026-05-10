@@ -217,6 +217,66 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         self.assertTrue(captured["layout_reading_order_enabled"])
 
+    def test_large_pdf_catalog_profile_uses_fast_text_path_by_default(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "layout_reading_order": True, "ocr_bad_pages": True}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-catalog-fast",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"profile": "large-pdf-catalog"},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=AssertionError("layout extractor should be skipped"),
+            ):
+                blocks = parser.parse(request)
+
+        self.assertEqual(blocks[1].content, "broken text")
+        self.assertTrue(blocks[1].metadata["profile_fast_text_path"])
+        self.assertNotIn("layout_source", blocks[1].metadata)
+        self.assertEqual(blocks[0].metadata["ocr_strategy"], "off")
+
+    def test_large_pdf_catalog_profile_allows_explicit_layout_opt_in(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": False, "layout_reading_order": False, "ocr_bad_pages": False}},
+        )
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["layout_reading_order_enabled"] = kwargs.get("layout_reading_order_enabled")
+            return [_fake_page_layout(text_without_tables="Layout text", ocr_fallback_reason=None)]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-catalog-layout",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={
+                    "profile": "large-pdf-catalog",
+                    "post_process": {"dual_channel": True, "layout_reading_order": True},
+                },
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertTrue(captured["layout_reading_order_enabled"])
+        self.assertEqual(blocks[1].content, "Layout text")
+
     def test_layout_reading_order_metadata_is_exposed_on_blocks(self) -> None:
         parser = PdfTextParser(
             media_types=["application/pdf"],

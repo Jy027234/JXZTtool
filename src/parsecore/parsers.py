@@ -1351,12 +1351,16 @@ class PdfTextParser(ParserAdapter):
     def parse(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
         request_enable_ocr = _resolve_request_enable_ocr(request)
+        request_dual_channel = _resolve_request_dual_channel(request)
         request_layout_reading_order = _resolve_request_layout_reading_order(request)
+        fast_text_profile = _uses_pdf_fast_text_profile(request)
         effective_ocr_bad_pages_enabled = (
             self._ocr_bad_pages_enabled
             if request_enable_ocr is None
             else request_enable_ocr
         )
+        if fast_text_profile and request_enable_ocr is None:
+            effective_ocr_bad_pages_enabled = False
         # Resolve the effective OCR strategy label for observability.
         # "force"  – caller explicitly requested full-document OCR.
         # "auto"   – bad-page detector is active (either from config or caller).
@@ -1372,8 +1376,17 @@ class PdfTextParser(ParserAdapter):
             if request_layout_reading_order is None
             else request_layout_reading_order
         )
-        effective_dual_channel_enabled = (
+        if fast_text_profile and request_layout_reading_order is None:
+            effective_layout_reading_order_enabled = False
+        base_dual_channel_enabled = (
             self._dual_channel_enabled
+            if request_dual_channel is None
+            else request_dual_channel
+        )
+        if fast_text_profile and request_dual_channel is None:
+            base_dual_channel_enabled = False
+        effective_dual_channel_enabled = (
+            base_dual_channel_enabled
             or effective_ocr_bad_pages_enabled
             or effective_layout_reading_order_enabled
         )
@@ -1432,6 +1445,8 @@ class PdfTextParser(ParserAdapter):
                 },
             )
         ]
+        if fast_text_profile:
+            blocks[0].metadata["profile_fast_text_path"] = True
         position = 1
         for page_number, page_text in enumerate(cleaned_page_texts, start=1):
             page_layout = (
@@ -1533,6 +1548,8 @@ class PdfTextParser(ParserAdapter):
                 }
                 if page_layout is not None:
                     _attach_page_layout_metadata(metadata, page_layout)
+                if fast_text_profile:
+                    metadata["profile_fast_text_path"] = True
                 if page_number in stripped_page_numbers:
                     metadata["header_footer_stripped"] = True
                 blocks.append(
@@ -1799,6 +1816,13 @@ def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
     return bool(value)
 
 
+def _resolve_request_dual_channel(request: ParseRequest) -> bool | None:
+    post_process = request.options.get("post_process")
+    if isinstance(post_process, Mapping) and "dual_channel" in post_process:
+        return _coerce_optional_bool(post_process.get("dual_channel"))
+    return None
+
+
 def _resolve_request_layout_reading_order(request: ParseRequest) -> bool | None:
     post_process = request.options.get("post_process")
     if isinstance(post_process, Mapping) and "layout_reading_order" in post_process:
@@ -1810,6 +1834,11 @@ def _resolve_request_layout_reading_order(request: ParseRequest) -> bool | None:
         if isinstance(layout_reading_order, Mapping) and "enabled" in layout_reading_order:
             return _coerce_optional_bool(layout_reading_order.get("enabled"))
     return None
+
+
+def _uses_pdf_fast_text_profile(request: ParseRequest) -> bool:
+    profile = str(request.options.get("profile") or "").strip().lower()
+    return profile in {"large-pdf-catalog", "large-pdf-ledger"}
 
 
 def _coerce_optional_bool(value: Any) -> bool | None:

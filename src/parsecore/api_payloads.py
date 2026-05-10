@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from datetime import date
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .models import Block, BlockType, ParseOutcome
 from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
 from .profiles import resolve_parse_profile
+from .record_filters import collect_record_page
 from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 
 
@@ -245,11 +246,12 @@ def _document_records_projection(
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
-    structured = _document_projection(snapshot, projection="structured")
     persisted_records = _persisted_records_from_snapshot(snapshot)
     records = persisted_records if persisted_records is not None else _records_from_snapshot(snapshot)
-    filtered = _filter_records(
+    result = collect_record_page(
         records,
+        limit=limit,
+        offset=offset,
         query=query,
         table_id=table_id,
         quality_signal=quality_signal,
@@ -257,25 +259,37 @@ def _document_records_projection(
         page_start=page_start,
         page_end=page_end,
     )
-    normalized_offset = max(0, int(offset or 0))
-    if limit is None:
-        items = filtered[normalized_offset:]
-        normalized_limit = None
-    else:
-        normalized_limit = max(1, int(limit))
-        items = filtered[normalized_offset: normalized_offset + normalized_limit]
+    return _document_records_response(
+        snapshot,
+        total=int(result["total"]),
+        limit=result["limit"],
+        offset=int(result["offset"]),
+        items=result["items"],
+    )
+
+
+def _document_records_response(
+    snapshot: dict[str, Any],
+    *,
+    total: int,
+    limit: int | None,
+    offset: int,
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    job = snapshot.get("job")
+    profile_resolution = _profile_resolution_for_document(job=job, pages=[], tables=[])
     return {
         "schema_version": DOCUMENT_SCHEMA_VERSION,
         "projection": "records",
-        "doc_id": structured["doc_id"],
-        "parse_run_id": structured["parse_run_id"],
-        "profile": structured["profile"],
-        "profile_resolution": structured["profile_resolution"],
-        "state": structured["state"],
-        "total": len(filtered),
-        "limit": normalized_limit,
-        "offset": normalized_offset,
-        "items": items,
+        "doc_id": str(snapshot.get("doc_id") or getattr(job, "doc_id", "") or ""),
+        "parse_run_id": str(getattr(job, "job_id", "") or ""),
+        "profile": str(profile_resolution["resolved_profile"]),
+        "profile_resolution": profile_resolution,
+        "state": _state_value(getattr(job, "state", None)),
+        "total": int(total),
+        "limit": limit,
+        "offset": max(0, int(offset or 0)),
+        "items": [dict(item) for item in items],
     }
 
 
@@ -941,97 +955,6 @@ def _records_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "by_source": by_source,
         "sample_record_ids": [str(record.get("record_id") or "") for record in records[:5]],
     }
-
-
-def _filter_records(
-    records: list[dict[str, Any]],
-    *,
-    query: str | None,
-    table_id: str | None,
-    quality_signal: str | None,
-    field_filters: Mapping[str, Any] | None,
-    page_start: int | None,
-    page_end: int | None,
-) -> list[dict[str, Any]]:
-    normalized_query = str(query or "").strip().lower()
-    normalized_table_id = str(table_id or "").strip()
-    normalized_quality_signal = str(quality_signal or "").strip()
-    normalized_field_filters = _normalize_field_filters(field_filters)
-    start = int(page_start) if page_start is not None else None
-    end = int(page_end) if page_end is not None else None
-    if start is not None and end is not None and start > end:
-        raise ValueError("invalid_page_range")
-
-    filtered: list[dict[str, Any]] = []
-    for record in records:
-        if normalized_table_id and str(record.get("table_id") or "") != normalized_table_id:
-            continue
-        if normalized_quality_signal and normalized_quality_signal not in {
-            str(code or "") for code in list(record.get("quality_signal_codes") or [])
-        }:
-            continue
-        if normalized_field_filters and not _record_matches_field_filters(record, normalized_field_filters):
-            continue
-        record_start = _safe_int(record.get("page_start"), default=1)
-        record_end = _safe_int(record.get("page_end"), default=record_start)
-        if start is not None and record_end < start:
-            continue
-        if end is not None and record_start > end:
-            continue
-        if normalized_query:
-            haystack = " ".join(
-                [
-                    str(record.get("record_id") or ""),
-                    str(record.get("raw_text") or ""),
-                    str(record.get("normalized_text") or ""),
-                    _jsonish_text(record.get("fields")),
-                ]
-            ).lower()
-            if normalized_query not in haystack:
-                continue
-        filtered.append(record)
-    return filtered
-
-
-def _normalize_field_filters(field_filters: Mapping[str, Any] | None) -> dict[str, str]:
-    if not isinstance(field_filters, Mapping):
-        return {}
-    normalized: dict[str, str] = {}
-    for raw_key, raw_value in field_filters.items():
-        key = str(raw_key or "").strip()
-        if not key:
-            continue
-        normalized[key] = str(raw_value or "").strip()
-    return normalized
-
-
-def _record_matches_field_filters(record: dict[str, Any], field_filters: Mapping[str, str]) -> bool:
-    fields = record.get("fields")
-    if not isinstance(fields, dict):
-        return False
-    for field_name, expected in field_filters.items():
-        if field_name not in fields:
-            return False
-        value = fields.get(field_name)
-        if expected and expected.lower() not in _field_value_text(value).lower():
-            return False
-        if not expected and not _field_value_text(value).strip():
-            return False
-    return True
-
-
-def _field_value_text(value: Any) -> str:
-    if isinstance(value, (dict, list, tuple)):
-        return _jsonish_text(value)
-    return str(value or "")
-
-
-def _jsonish_text(value: Any) -> str:
-    if isinstance(value, dict):
-        return " ".join(str(item or "") for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(item or "") for item in value)
-    return str(value or "")
 
 
 def _table_rows_from_metadata(metadata: dict[str, Any]) -> list[list[str]]:

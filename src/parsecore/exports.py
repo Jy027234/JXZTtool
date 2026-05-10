@@ -44,6 +44,41 @@ def export_structured_projection(
     }
 
 
+def write_structured_projection(
+    payload: dict[str, Any],
+    *,
+    dataset: str,
+    format: str,
+    path: str | Path,
+) -> dict[str, str | int]:
+    """Write one structured projection dataset directly to disk."""
+    normalized_dataset = _normalize_dataset(dataset)
+    normalized_format = _normalize_format(format)
+    rows = _dataset_rows(payload, normalized_dataset)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if normalized_format == "jsonl":
+        _write_jsonl(rows, target)
+    elif normalized_format in {"csv", "tsv"}:
+        _write_delimited(rows, target, format=normalized_format)
+    elif normalized_format == "xlsx":
+        _write_xlsx(rows, dataset=normalized_dataset, path=target)
+    elif normalized_format == "sqlite":
+        _write_sqlite(rows, dataset=normalized_dataset, path=target)
+    else:
+        content = _serialize_rows(rows, dataset=normalized_dataset, format=normalized_format)
+        if not isinstance(content, bytes):
+            content = content.encode("utf-8")
+        target.write_bytes(content)
+
+    return {
+        "content_type": _content_type(normalized_format),
+        "filename": _filename(payload, dataset=normalized_dataset, format=normalized_format),
+        "bytes": target.stat().st_size,
+    }
+
+
 def _normalize_dataset(dataset: str) -> ExportDataset:
     normalized = str(dataset or "").strip().lower()
     if normalized not in EXPORT_DATASETS:
@@ -88,6 +123,56 @@ def _serialize_rows(rows: list[dict[str, Any]], *, dataset: ExportDataset, forma
     for row in rows:
         writer.writerow({field: _cell_value(row.get(field)) for field in writer.fieldnames or []})
     return output.getvalue()
+
+
+def _write_jsonl(rows: list[dict[str, Any]], path: Path) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        for index, row in enumerate(rows):
+            if index:
+                handle.write("\n")
+            handle.write(_json_dumps(row))
+
+
+def _write_delimited(rows: list[dict[str, Any]], path: Path, *, format: ExportFormat) -> None:
+    delimiter = "\t" if format == "tsv" else ","
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_fieldnames(rows), delimiter=delimiter, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: _cell_value(row.get(field)) for field in writer.fieldnames or []})
+
+
+def _write_xlsx(rows: list[dict[str, Any]], *, dataset: ExportDataset, path: Path) -> None:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError("xlsx export requires openpyxl") from exc
+
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet(title=str(dataset)[:31] or "data")
+    fieldnames = _fieldnames(rows)
+    if fieldnames:
+        worksheet.append(fieldnames)
+        for row in rows:
+            worksheet.append([_cell_value(row.get(field)) for field in fieldnames])
+    workbook.save(str(path))
+
+
+def _write_sqlite(rows: list[dict[str, Any]], *, dataset: ExportDataset, path: Path) -> None:
+    fieldnames = _fieldnames(rows)
+    table_name = _sqlite_identifier(str(dataset or "data"))
+    path.unlink(missing_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f"CREATE TABLE {_quote_sqlite_identifier(table_name)} ({_sqlite_columns(fieldnames)})")
+        if fieldnames and rows:
+            placeholders = ", ".join("?" for _ in fieldnames)
+            columns = ", ".join(_quote_sqlite_identifier(field) for field in fieldnames)
+            sql = f"INSERT INTO {_quote_sqlite_identifier(table_name)} ({columns}) VALUES ({placeholders})"
+            conn.executemany(sql, (tuple(_cell_value(row.get(field)) for field in fieldnames) for row in rows))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _serialize_xlsx(rows: list[dict[str, Any]], *, dataset: ExportDataset) -> bytes:
@@ -204,4 +289,4 @@ def _filename(payload: dict[str, Any], *, dataset: ExportDataset, format: Export
     return f"{safe_doc_id}-{dataset}.{format}"
 
 
-__all__ = ["export_structured_projection"]
+__all__ = ["export_structured_projection", "write_structured_projection"]

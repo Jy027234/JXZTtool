@@ -19,7 +19,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 
 ## 当前交付范围
 
-当前仓库提供的是 Starter Kit，而不是完整业务实现：
+当前仓库提供的是可交付灰度版解析中台内核，而不是宿主业务系统本身：
 
 - 项目目录骨架
 - 核心数据模型与协议接口
@@ -29,6 +29,8 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 真实 DOCX 解析器与文本解析器
 - Excel `.xls/.xlsx/.xlsm` 原生表格解析器
 - PDF / OCR 结构块 `semantic_role` 标注（如 `toc_entry`、`highlights_entry`、`warning`）
+- 超大 PDF 页段规划、part 子 job、局部复跑和父文档 partial 读模型
+- `pages / lines / records` document views 持久化、records 分页查询与大结果集导出
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
@@ -40,6 +42,8 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 配置模板
 - 基础单元测试
 
+当前交付状态：`0.1.0 可交付灰度版`。中小文档可直接试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版结论见 [docs/release-notes.md](docs/release-notes.md)。
+
 ## 建议演进路径
 
 1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
@@ -48,6 +52,8 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 
 ## 文档导航
 
+- [docs/release-notes.md](docs/release-notes.md)：当前版本定位、交付范围、验证结果、已知限制与发版检查
+- [docs/user-guide.md](docs/user-guide.md)：面向宿主产品开发/测试/运维的使用说明、推荐流程和验收口径
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径
 - [docs/ocr-integration-checklist.md](docs/ocr-integration-checklist.md)：宿主接 OCR provider 前的配置、探活、事件与回滚检查清单
 - [docs/configuration.md](docs/configuration.md)：配置文件选择、配置项说明、常用场景与验收命令
@@ -72,6 +78,8 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │  ├─ ocr-gateway-contract.md
 │  ├─ parsecore-data-quality-pipeline-plan.md
 │  ├─ performance-stability.md
+│  ├─ release-notes.md
+│  ├─ user-guide.md
 │  └─ self-check-gate.md
 ├─ src/
 │  └─ parsecore/
