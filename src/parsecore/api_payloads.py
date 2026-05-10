@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+import re
 from typing import Any
 
 from .models import Block, BlockType, ParseOutcome
@@ -15,6 +16,14 @@ _ARTIFACT_SEMANTIC_ROLES = {
     "version_cell",
     "page_ref_cell",
 }
+_TEXT_RECORD_PROFILES = {"large-pdf-catalog", "large-pdf-ledger"}
+_TEXT_RECORD_START_PATTERN = re.compile(r"^\s*(?P<row>\d{1,8})\s+(?P<body>.+?)\s*$")
+_TEXT_RECORD_HEADER_PATTERN = re.compile(r"(?:序号|证件编号|项目编号|持证人|最新批准日期|批准日期)")
+_TEXT_RECORD_DATE_PATTERN = re.compile(r"\b(19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b")
+_TEXT_RECORD_CERT_PATTERN = re.compile(
+    r"\b(?:TC|STC|PMA|MDA|CTSOA|VTC|VSTC|VDA|TDA|TSOA)[A-Z0-9-]*\b",
+    re.IGNORECASE,
+)
 
 # Increment when the shape of pages[] or top-level fields changes in a
 # backwards-incompatible way.  Consumers can gate on this string.
@@ -147,11 +156,21 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
         }
 
     tables = _structured_tables(blocks, doc_id=doc_id)
+    profile_resolution = _profile_resolution_for_document(job=job, pages=pages, tables=tables)
+    profile = str(profile_resolution["resolved_profile"])
     quality_signals = _quality_signals(
         pages=pages,
         tables=tables,
         blocks=blocks,
     )
+    records = _structured_records(
+        blocks=blocks,
+        tables=tables,
+        quality_signals=quality_signals,
+        profile=profile,
+        doc_id=doc_id,
+    )
+    quality_signals.extend(_record_quality_signals(records))
     structured_pages = _structured_pages(
         pages=pages,
         tables=tables,
@@ -162,12 +181,13 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
         "projection": normalized_projection,
         "doc_id": doc_id,
         "parse_run_id": str(getattr(job, "job_id", "") or ""),
-        "profile": _profile_for_document(job=job, pages=pages, tables=tables),
-        "profile_resolution": _profile_resolution_for_document(job=job, pages=pages, tables=tables),
+        "profile": profile,
+        "profile_resolution": profile_resolution,
         "state": _state_value(getattr(job, "state", None)),
         "compat_pages": pages,
         "pages": structured_pages,
         "tables": tables,
+        "records_summary": _records_summary(records),
         "quality": _quality_payload(output_qs),
         "raw_quality": _quality_payload(raw_qs),
         "output_quality": _quality_payload(output_qs),
@@ -207,6 +227,125 @@ def _document_quality_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "ocr_decision_trace": structured["ocr_decision_trace"],
         "parse_units": structured["parse_units"],
     }
+
+
+def _document_records_projection(
+    snapshot: dict[str, Any],
+    *,
+    limit: int | None = 100,
+    offset: int = 0,
+    query: str | None = None,
+    table_id: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> dict[str, Any]:
+    structured = _document_projection(snapshot, projection="structured")
+    persisted_records = _persisted_records_from_snapshot(snapshot)
+    records = persisted_records if persisted_records is not None else _records_from_snapshot(snapshot)
+    filtered = _filter_records(
+        records,
+        query=query,
+        table_id=table_id,
+        page_start=page_start,
+        page_end=page_end,
+    )
+    normalized_offset = max(0, int(offset or 0))
+    if limit is None:
+        items = filtered[normalized_offset:]
+        normalized_limit = None
+    else:
+        normalized_limit = max(1, int(limit))
+        items = filtered[normalized_offset: normalized_offset + normalized_limit]
+    return {
+        "schema_version": DOCUMENT_SCHEMA_VERSION,
+        "projection": "records",
+        "doc_id": structured["doc_id"],
+        "parse_run_id": structured["parse_run_id"],
+        "profile": structured["profile"],
+        "profile_resolution": structured["profile_resolution"],
+        "state": structured["state"],
+        "total": len(filtered),
+        "limit": normalized_limit,
+        "offset": normalized_offset,
+        "items": items,
+    }
+
+
+def _document_view_rows(snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    structured = _document_projection(snapshot, projection="structured")
+    records = _records_from_snapshot(snapshot)
+    return {
+        "pages": [dict(page) for page in structured.get("pages", []) if isinstance(page, dict)],
+        "lines": _structured_lines_from_blocks(
+            tuple(snapshot.get("blocks") or ()),
+            doc_id=str(structured.get("doc_id") or snapshot.get("doc_id") or ""),
+            parse_run_id=str(structured.get("parse_run_id") or ""),
+        ),
+        "records": [dict(record) for record in records],
+    }
+
+
+def _persisted_records_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]] | None:
+    document_views = snapshot.get("document_views")
+    if not isinstance(document_views, dict):
+        return None
+    records = document_views.get("records")
+    if not isinstance(records, (list, tuple)):
+        if any(document_views.get(key) for key in ("pages", "lines")):
+            return []
+        return None
+    persisted: list[dict[str, Any]] = []
+    for record in records:
+        if isinstance(record, dict):
+            persisted.append(dict(record))
+    return persisted
+
+
+def _structured_lines_from_blocks(
+    blocks: tuple[Block, ...],
+    *,
+    doc_id: str,
+    parse_run_id: str,
+) -> list[dict[str, Any]]:
+    lines: list[dict[str, Any]] = []
+    for block_index, block in enumerate(blocks, start=1):
+        metadata = block.metadata or {}
+        page_number = _safe_int(metadata.get("page"), default=1)
+        role = str(metadata.get("semantic_role") or "paragraph")
+        parser = str(metadata.get("parser") or "")
+        for line_index, text in enumerate(_block_lines(block.content), start=1):
+            line_number = len(lines) + 1
+            lines.append(
+                {
+                    "line_id": f"{doc_id}:line:{line_number}",
+                    "doc_id": doc_id or block.doc_id,
+                    "parse_run_id": parse_run_id,
+                    "block_id": block.block_id,
+                    "block_type": block.type.value,
+                    "block_index": block_index,
+                    "line_index": line_index,
+                    "page_number": page_number,
+                    "page_start": page_number,
+                    "page_end": page_number,
+                    "semantic_role": role,
+                    "source_parser": parser,
+                    "text": text,
+                    "normalized_text": _normalize_record_text(text),
+                }
+            )
+    return lines
+
+
+def _block_lines(text: str) -> list[str]:
+    lines = [
+        " ".join(raw_line.split())
+        for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if " ".join(raw_line.split())
+    ]
+    if lines:
+        return lines
+    normalized = " ".join(str(text or "").split())
+    return [normalized] if normalized else []
 
 
 def _read_first_metadata(blocks: tuple[Block, ...], key: str) -> Any:
@@ -335,6 +474,391 @@ def _structured_cells(
                 }
             )
     return cells
+
+
+def _structured_records(
+    *,
+    blocks: tuple[Block, ...] = (),
+    tables: list[dict[str, Any]],
+    quality_signals: list[dict[str, Any]],
+    profile: str | None = None,
+    doc_id: str | None = None,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    signal_codes_by_row: dict[tuple[str, int], list[str]] = {}
+    for signal in quality_signals:
+        if not isinstance(signal, dict):
+            continue
+        table_id = str(signal.get("table_id") or "")
+        if not table_id or signal.get("row_index") is None:
+            continue
+        row_index = _safe_int(signal.get("row_index"), default=0)
+        signal_codes_by_row.setdefault((table_id, row_index), []).append(str(signal.get("code") or ""))
+
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        table_id = str(table.get("table_id") or "")
+        rows = _rows_from_structured_cells(table.get("cells"))
+        if not rows:
+            continue
+        page_number = _safe_int(table.get("page_number"), default=1)
+        header_rows = max(0, _safe_int(table.get("header_rows"), default=1 if rows else 0))
+        header_values = table.get("header_values")
+        if isinstance(header_values, list) and header_values:
+            headers = _stable_record_headers(header_values, _record_col_count(rows))
+        elif header_rows > 0:
+            headers = _stable_record_headers(rows[0], _record_col_count(rows))
+        else:
+            headers = _stable_record_headers([], _record_col_count(rows))
+        first_data_row = min(len(rows), header_rows) if header_rows > 0 else 0
+        for row_index, row in enumerate(rows[first_data_row:], start=first_data_row):
+            if not any(str(cell or "").strip() for cell in row):
+                continue
+            fields = {
+                headers[col_index]: str(row[col_index] if col_index < len(row) else "")
+                for col_index in range(len(headers))
+            }
+            raw_cells = [str(cell or "") for cell in row]
+            raw_text = "\t".join(raw_cells).strip()
+            record: dict[str, Any] = {
+                "record_id": f"{table_id}:r{row_index}",
+                "doc_id": str(table.get("source_doc_id") or ""),
+                "table_id": table_id,
+                "block_id": table.get("block_id"),
+                "page_start": page_number,
+                "page_end": page_number,
+                "row_index": row_index,
+                "fields": fields,
+                "raw_cells": raw_cells,
+                "raw_text": raw_text,
+                "normalized_text": _normalize_record_text(raw_text),
+                "quality_signal_codes": signal_codes_by_row.get((table_id, row_index), []),
+            }
+            for key in ("section", "sheet_name", "table_title", "table_type"):
+                if table.get(key) is not None:
+                    record[key] = table.get(key)
+            records.append(record)
+    if str(profile or "").strip().lower() in _TEXT_RECORD_PROFILES:
+        records.extend(
+            _text_block_records(
+                blocks=blocks,
+                doc_id=doc_id,
+                existing_count=len(records),
+            )
+        )
+    return records
+
+
+def _records_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = tuple(snapshot.get("blocks") or ())
+    job = snapshot.get("job")
+    doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", ""))
+    pages = _project_pages(blocks)
+    tables = _structured_tables(blocks, doc_id=doc_id)
+    profile_resolution = _profile_resolution_for_document(job=job, pages=pages, tables=tables)
+    quality_signals = _quality_signals(pages=pages, tables=tables, blocks=blocks)
+    records = _structured_records(
+        blocks=blocks,
+        tables=tables,
+        quality_signals=quality_signals,
+        profile=str(profile_resolution["resolved_profile"]),
+        doc_id=doc_id,
+    )
+    record_signals = _record_quality_signals(records)
+    if record_signals:
+        codes_by_record: dict[str, list[str]] = {}
+        for signal in record_signals:
+            record_id = str(signal.get("record_id") or "")
+            if record_id:
+                codes_by_record.setdefault(record_id, []).append(str(signal.get("code") or ""))
+        for record in records:
+            record_id = str(record.get("record_id") or "")
+            if record_id in codes_by_record:
+                existing = list(record.get("quality_signal_codes") or [])
+                record["quality_signal_codes"] = list(dict.fromkeys(existing + codes_by_record[record_id]))
+    return records
+
+
+def _text_block_records(
+    *,
+    blocks: tuple[Block, ...],
+    doc_id: str | None,
+    existing_count: int = 0,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    current_parts: list[str] = []
+    current_block_ids: list[str] = []
+
+    def finish_current() -> None:
+        nonlocal current, current_parts, current_block_ids
+        if current is None:
+            return
+        raw_text = "\n".join(part for part in current_parts if part.strip()).strip()
+        current["raw_text"] = raw_text
+        current["normalized_text"] = _normalize_record_text(raw_text)
+        current["source_block_ids"] = list(dict.fromkeys(current_block_ids))
+        current["fields"] = _text_record_fields(current)
+        current["quality_signal_codes"] = _text_record_signal_codes(current)
+        records.append(current)
+        current = None
+        current_parts = []
+        current_block_ids = []
+
+    for block in blocks:
+        if block.type == BlockType.TABLE:
+            continue
+        metadata = block.metadata or {}
+        role = str(metadata.get("semantic_role") or "").strip().lower()
+        if role in _ARTIFACT_SEMANTIC_ROLES or block.type == BlockType.TITLE:
+            continue
+        page_number = _safe_int(metadata.get("page"), default=1)
+        block_id = str(block.block_id)
+        for line_index, line in enumerate(_record_candidate_lines(block.content), start=1):
+            match = _TEXT_RECORD_START_PATTERN.match(line)
+            if match is None and _TEXT_RECORD_HEADER_PATTERN.search(line):
+                continue
+            if match:
+                finish_current()
+                row_number = int(match.group("row"))
+                body = str(match.group("body") or "").strip()
+                record_index = existing_count + len(records) + 1
+                current = {
+                    "record_id": f"{doc_id or 'doc'}:text:r{record_index}",
+                    "doc_id": str(doc_id or block.doc_id),
+                    "source": "text-block",
+                    "page_start": page_number,
+                    "page_end": page_number,
+                    "row_number": row_number,
+                    "line_start": line_index,
+                    "line_end": line_index,
+                    "raw_cells": [str(row_number), body],
+                }
+                current_parts = [line]
+                current_block_ids = [block_id]
+                continue
+            if current is not None:
+                current_parts.append(line)
+                current_block_ids.append(block_id)
+                current["page_end"] = max(_safe_int(current.get("page_end"), default=page_number), page_number)
+                current["line_end"] = line_index
+                current["row_continuation_detected"] = True
+    finish_current()
+    return records
+
+
+def _record_candidate_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        normalized = " ".join(raw_line.split())
+        if normalized:
+            lines.append(normalized)
+    if not lines:
+        normalized_text = " ".join(str(text or "").split())
+        if normalized_text:
+            lines.append(normalized_text)
+    return lines
+
+
+def _text_record_fields(record: dict[str, Any]) -> dict[str, Any]:
+    raw_text = str(record.get("raw_text") or "")
+    row_number = record.get("row_number")
+    lines = _record_candidate_lines(raw_text)
+    body_lines = list(lines)
+    if body_lines:
+        match = _TEXT_RECORD_START_PATTERN.match(body_lines[0])
+        if match:
+            body_lines[0] = str(match.group("body") or "").strip()
+    body = "\n".join(body_lines)
+    certificate = _extract_certificate_or_project_no(body)
+    latest_date = _extract_latest_date(raw_text)
+    fields: dict[str, Any] = {
+        "row_number": row_number,
+        "text": _normalize_record_text(body),
+    }
+    if certificate:
+        fields["certificate_or_project_no"] = certificate
+    if latest_date:
+        fields["latest_date"] = latest_date
+    holder = _holder_or_name_start(body, certificate=certificate, latest_date=latest_date)
+    if holder:
+        fields["holder_or_name_start"] = holder
+    return fields
+
+
+def _extract_certificate_or_project_no(text: str) -> str | None:
+    match = _TEXT_RECORD_CERT_PATTERN.search(text)
+    if match:
+        return match.group(0)
+    for token in str(text or "").split():
+        cleaned = token.strip(" ,;；，。:：")
+        if any(char.isdigit() for char in cleaned) and any(char.isalpha() for char in cleaned) and len(cleaned) >= 4:
+            return cleaned
+    return None
+
+
+def _extract_latest_date(text: str) -> str | None:
+    matches = [match.group(0) for match in _TEXT_RECORD_DATE_PATTERN.finditer(str(text or ""))]
+    if not matches:
+        return None
+    latest = matches[-1].replace("/", "-").replace(".", "-")
+    parts = latest.split("-")
+    if len(parts) == 3:
+        return f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+    return latest
+
+
+def _holder_or_name_start(text: str, *, certificate: str | None, latest_date: str | None) -> str | None:
+    value = str(text or "")
+    if certificate:
+        value = value.replace(certificate, "", 1)
+    if latest_date:
+        value = value.replace(latest_date, "", 1)
+    value = _TEXT_RECORD_DATE_PATTERN.sub("", value)
+    return _normalize_record_text(value)[:120] or None
+
+
+def _text_record_signal_codes(record: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    if not fields.get("certificate_or_project_no"):
+        codes.append("record_field_missing")
+    if bool(record.get("row_continuation_detected")):
+        codes.append("row_continuation_detected")
+    if "\n" in str(record.get("raw_text") or "") and not bool(record.get("row_continuation_detected")):
+        codes.append("record_boundary_uncertain")
+    return codes
+
+
+def _record_quality_signals(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for record in records:
+        record_id = str(record.get("record_id") or "")
+        page_number = _safe_int(record.get("page_start"), default=1)
+        for code in list(record.get("quality_signal_codes") or []):
+            severity = "info" if code in {"row_continuation_detected"} else "warning"
+            signals.append(
+                _quality_signal(
+                    code=str(code),
+                    severity=severity,
+                    message=_quality_signal_message(str(code)),
+                    page_number=page_number,
+                    record_id=record_id,
+                    detail={"row_number": record.get("row_number")},
+                )
+            )
+    return signals
+
+
+def _rows_from_structured_cells(raw_cells: Any) -> list[list[str]]:
+    if not isinstance(raw_cells, list):
+        return []
+    cells: dict[int, dict[int, str]] = {}
+    max_col = -1
+    for cell in raw_cells:
+        if not isinstance(cell, dict):
+            continue
+        row_index = _safe_int(cell.get("row_index"), default=0)
+        col_index = _safe_int(cell.get("col_index"), default=0)
+        max_col = max(max_col, col_index)
+        cells.setdefault(row_index, {})[col_index] = str(cell.get("text") or "")
+    if not cells:
+        return []
+    rows: list[list[str]] = []
+    for row_index in range(max(cells) + 1):
+        row = cells.get(row_index, {})
+        rows.append([row.get(col_index, "") for col_index in range(max_col + 1)])
+    return rows
+
+
+def _stable_record_headers(raw_headers: list[Any], col_count: int) -> list[str]:
+    headers: list[str] = []
+    seen: dict[str, int] = {}
+    for index in range(max(0, col_count)):
+        raw = str(raw_headers[index] if index < len(raw_headers) else "").strip()
+        header = raw or f"col_{index + 1}"
+        if header in seen:
+            seen[header] += 1
+            header = f"{header}_{seen[header]}"
+        else:
+            seen[header] = 1
+        headers.append(header)
+    return headers
+
+
+def _record_col_count(rows: list[list[str]]) -> int:
+    return max((len(row) for row in rows), default=0)
+
+
+def _normalize_record_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _records_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    by_table: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for record in records:
+        table_id = str(record.get("table_id") or "")
+        if table_id:
+            by_table[table_id] = by_table.get(table_id, 0) + 1
+        source = str(record.get("source") or ("table-row" if table_id else "unknown"))
+        by_source[source] = by_source.get(source, 0) + 1
+    return {
+        "total": len(records),
+        "table_count": len(by_table),
+        "text_record_count": by_source.get("text-block", 0),
+        "by_source": by_source,
+        "sample_record_ids": [str(record.get("record_id") or "") for record in records[:5]],
+    }
+
+
+def _filter_records(
+    records: list[dict[str, Any]],
+    *,
+    query: str | None,
+    table_id: str | None,
+    page_start: int | None,
+    page_end: int | None,
+) -> list[dict[str, Any]]:
+    normalized_query = str(query or "").strip().lower()
+    normalized_table_id = str(table_id or "").strip()
+    start = int(page_start) if page_start is not None else None
+    end = int(page_end) if page_end is not None else None
+    if start is not None and end is not None and start > end:
+        raise ValueError("invalid_page_range")
+
+    filtered: list[dict[str, Any]] = []
+    for record in records:
+        if normalized_table_id and str(record.get("table_id") or "") != normalized_table_id:
+            continue
+        record_start = _safe_int(record.get("page_start"), default=1)
+        record_end = _safe_int(record.get("page_end"), default=record_start)
+        if start is not None and record_end < start:
+            continue
+        if end is not None and record_start > end:
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(record.get("record_id") or ""),
+                    str(record.get("raw_text") or ""),
+                    str(record.get("normalized_text") or ""),
+                    _jsonish_text(record.get("fields")),
+                ]
+            ).lower()
+            if normalized_query not in haystack:
+                continue
+        filtered.append(record)
+    return filtered
+
+
+def _jsonish_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(str(item or "") for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item or "") for item in value)
+    return str(value or "")
 
 
 def _table_rows_from_metadata(metadata: dict[str, Any]) -> list[list[str]]:
@@ -530,6 +1054,7 @@ def _quality_signal(
     message: str,
     page_number: int | None = None,
     table_id: str | None = None,
+    record_id: str | None = None,
     row_index: int | None = None,
     col_index: int | None = None,
     detail: dict[str, Any] | None = None,
@@ -543,6 +1068,8 @@ def _quality_signal(
         signal["page_number"] = page_number
     if table_id:
         signal["table_id"] = table_id
+    if record_id:
+        signal["record_id"] = record_id
     if row_index is not None:
         signal["row_index"] = row_index
     if col_index is not None:
@@ -565,6 +1092,9 @@ def _quality_signal_message(code: str) -> str:
         "table_formula_cells": "Table contains formula cells",
         "table_header_blank_cells": "Table header row has blank cells",
         "table_header_duplicate_values": "Table header row has duplicate values",
+        "record_field_missing": "Record is missing an expected field",
+        "row_continuation_detected": "Record spans continuation lines",
+        "record_boundary_uncertain": "Record boundary is uncertain",
     }.get(code, code)
 
 

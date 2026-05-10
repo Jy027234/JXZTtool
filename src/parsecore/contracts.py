@@ -122,6 +122,16 @@ class JobStore(Protocol):
 
     def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None: ...
 
+    def save_document_views(
+        self,
+        *,
+        doc_id: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None: ...
+
     def replace_blocks_by_prefix(
         self,
         *,
@@ -155,6 +165,34 @@ class JobStore(Protocol):
     def get_blocks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Block]: ...
 
     def get_chunks(self, *, doc_id: str, tenant_id: str | None = None) -> Sequence[Chunk]: ...
+
+    def get_document_views(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Mapping[str, Sequence[Mapping[str, Any]]]: ...
+
+    def get_document_pages(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    def get_document_lines(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    def get_document_records(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Sequence[Mapping[str, Any]]: ...
 
     def record_layer_search_hit(
         self,

@@ -18,6 +18,7 @@ from .api_payloads import (
     _batch_success_response,
     _document_projection,
     _document_quality_projection,
+    _document_records_projection,
     _parse_success_response,
     _to_payload,
 )
@@ -38,6 +39,7 @@ from .export_jobs import create_export_package, export_file_path, load_export_ma
 from .exports import export_structured_projection
 from .models import ParseRequest
 from .parts import PART_STATE_FILTERS, document_parts_projection
+from .pdf_parts import detect_pdf_page_count
 from .profiles import describe_parse_profiles, resolve_parse_profile
 from .runtime import ParseRuntime, QuotaExceededError
 
@@ -82,6 +84,7 @@ class ApiRoutes:
             Route("/v1/parse/dashboard", self.tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/records", self.get_document_records, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/exports", self.export_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/export-jobs", self.create_export_job, methods=["POST"]),
             Route("/v1/parse/documents/{doc_id}/parts", self.get_document_parts, methods=["GET"]),
@@ -198,6 +201,7 @@ class ApiRoutes:
             media_type=media_type,
             file_name=file_name,
             file_size_bytes=_safe_file_size(file_path),
+            page_count=_detect_pdf_page_count_for_profile(file_path, media_type=media_type),
             requested_profile=payload.get("profile"),
         )
         options.setdefault("file_name", file_name)
@@ -648,6 +652,14 @@ class ApiRoutes:
                         detail={"object_store": runtime_obj.settings.object_store},
                     )
                 raise
+            profile_options, profile = _profile_options(
+                {"enable_ocr": enable_ocr, "file_name": file_name},
+                media_type=media_type,
+                file_name=file_name,
+                file_size_bytes=len(content),
+                page_count=_detect_pdf_page_count_for_profile(submission_path, media_type=media_type),
+                requested_profile=requested_profile,
+            )
             job_payload = None
             if create_job:
                 parse_request = ParseRequest(
@@ -875,6 +887,44 @@ class ApiRoutes:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         return JSONResponse(_document_quality_projection(snapshot))
 
+    async def get_document_records(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        try:
+            limit = max(1, min(1000, int(request.query_params.get("limit", "100"))))
+            offset = max(0, int(request.query_params.get("offset", "0")))
+            page_start = _optional_int(request.query_params.get("page_start"))
+            page_end = _optional_int(request.query_params.get("page_end"))
+            return JSONResponse(
+                _document_records_projection(
+                    snapshot,
+                    limit=limit,
+                    offset=offset,
+                    query=request.query_params.get("query"),
+                    table_id=request.query_params.get("table_id"),
+                    page_start=page_start,
+                    page_end=page_end,
+                )
+            )
+        except ValueError as exc:
+            code = str(exc) or "invalid_records_query"
+            if code == "invalid_page_range":
+                return _error_response(
+                    request,
+                    code=code,
+                    message="Invalid records page range",
+                    status_code=400,
+                )
+            return _error_response(
+                request,
+                code="invalid_records_query",
+                message="Invalid records query",
+                status_code=400,
+            )
+
     async def export_document(self, request: Request) -> Response:
         runtime_obj: ParseRuntime = request.app.state.runtime
         tenant_id = str(request.query_params.get("tenant_id") or "default")
@@ -884,6 +934,8 @@ class ApiRoutes:
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         payload = _document_projection(snapshot, projection="structured")
+        if dataset.strip().lower() == "records":
+            payload["records"] = _document_records_projection(snapshot, limit=None, offset=0)["items"]
         try:
             exported = export_structured_projection(
                 payload,
@@ -899,7 +951,7 @@ class ApiRoutes:
                     code=code,
                     message="Invalid export dataset",
                     status_code=400,
-                    detail={"allowed": ["tables", "quality_signals", "parse_units"]},
+                    detail={"allowed": ["tables", "quality_signals", "parse_units", "records"]},
                 )
             if code == "invalid_export_format":
                 return _error_response(
@@ -907,7 +959,7 @@ class ApiRoutes:
                     code=code,
                     message="Invalid export format",
                     status_code=400,
-                    detail={"allowed": ["jsonl", "csv", "tsv"]},
+                    detail={"allowed": ["jsonl", "csv", "tsv", "xlsx", "sqlite"]},
                 )
             return _error_response(
                 request,
@@ -1061,11 +1113,15 @@ class ApiRoutes:
         export_payload = _document_projection(snapshot, projection="structured")
         export_payload["tenant_id"] = tenant_id
         try:
+            includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
+            formats = _formats_payload(payload.get("formats"))
+            if includes and "records" in {str(item).strip().lower() for item in includes}:
+                export_payload["records"] = _document_records_projection(snapshot, limit=None, offset=0)["items"]
             manifest = create_export_package(
                 export_payload,
                 _export_root(runtime_obj),
-                formats=_formats_payload(payload.get("formats")),
-                includes=_includes_payload(payload.get("include") or payload.get("includes"), field_name="include"),
+                formats=formats,
+                includes=includes,
                 filters=dict(payload.get("filters") or {}),
             )
         except ValueError as exc:
@@ -1485,6 +1541,16 @@ def _safe_file_size(file_path: str) -> int | None:
     try:
         return Path(file_path).stat().st_size
     except OSError:
+        return None
+
+
+def _detect_pdf_page_count_for_profile(file_path: str, *, media_type: str | None) -> int | None:
+    suffix = Path(str(file_path)).suffix.lower()
+    if str(media_type or "").lower() != "application/pdf" and suffix != ".pdf":
+        return None
+    try:
+        return detect_pdf_page_count(file_path)
+    except Exception:
         return None
 
 

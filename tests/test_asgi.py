@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import Future
 import os
 from pathlib import Path
+import sqlite3
 import time
 import unittest
 
@@ -636,6 +637,29 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(options["profile"], "large_pdf")
             self.assertFalse(options["profile_known"])
             self.assertEqual(options["profile_warning"], "unknown_profile")
+
+    def test_create_job_uses_pdf_page_count_for_large_catalog_auto_profile(self) -> None:
+        with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
+            document_path = workspace.create_pdf("approved-catalog.pdf", [["one"]])
+            app = create_app(workspace.config_path)
+            with patch("parsecore.api_routes.detect_pdf_page_count", return_value=600):
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/v1/parse/jobs",
+                        json={
+                            "doc_id": "doc-large-catalog-auto",
+                            "file_path": str(document_path),
+                            "media_type": "application/pdf",
+                            "profile": "auto",
+                        },
+                    )
+
+            self.assertEqual(response.status_code, 202)
+            options = response.json()["options"]
+            self.assertEqual(options["profile"], "large-pdf-catalog")
+            self.assertEqual(options["profile_source"], "auto")
+            self.assertIn("page_count>=500", options["profile_reasons"])
+            self.assertIn("catalog_name_hint", options["profile_reasons"])
 
     def test_parse_profiles_endpoint_describes_supported_profiles(self) -> None:
         with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
@@ -1272,8 +1296,19 @@ class ParseApiTests(unittest.TestCase):
                 table = payload["tables"][0]
                 self.assertEqual(table["header_rows"], 1)
                 self.assertEqual(table["cells"][0]["text"], "Part")
+                self.assertEqual(payload["records_summary"]["total"], 1)
                 self.assertTrue(any(signal["code"] == "table_ragged_rows" for signal in payload["quality_signals"]))
                 self.assertEqual(payload["parse_units"][0]["table_count"], 1)
+
+                records = client.get(
+                    "/v1/parse/documents/doc-table-v2/records",
+                    params={"query": "Bolt", "limit": "10"},
+                )
+                self.assertEqual(records.status_code, 200)
+                records_payload = records.json()
+                self.assertEqual(records_payload["projection"], "records")
+                self.assertEqual(records_payload["total"], 1)
+                self.assertEqual(records_payload["items"][0]["fields"]["Part"], "Bolt")
 
                 quality = client.get("/v1/parse/documents/doc-table-v2/quality")
                 self.assertEqual(quality.status_code, 200)
@@ -1324,6 +1359,14 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(exported_signals.headers["content-type"], "application/x-ndjson; charset=utf-8")
                 self.assertIn('"code":"table_ragged_rows"', exported_signals.text)
 
+                exported_records = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "records", "format": "jsonl"},
+                )
+                self.assertEqual(exported_records.status_code, 200)
+                self.assertIn('"record_id"', exported_records.text)
+                self.assertIn('"Bolt"', exported_records.text)
+
                 invalid_export = client.get(
                     "/v1/parse/documents/doc-table-v2/exports",
                     params={"dataset": "pages", "format": "jsonl"},
@@ -1334,8 +1377,8 @@ class ParseApiTests(unittest.TestCase):
                 export_job = client.post(
                     "/v1/parse/documents/doc-table-v2/export-jobs",
                     json={
-                        "include": ["tables", "quality_signals"],
-                        "formats": {"tables": "csv", "quality_signals": "jsonl"},
+                        "include": ["tables", "quality_signals", "records"],
+                        "formats": {"tables": "csv", "quality_signals": "jsonl", "records": "jsonl"},
                         "filters": {"severity": ["warning"]},
                     },
                 )
@@ -1345,7 +1388,7 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(export_payload["doc_id"], "doc-table-v2")
                 self.assertEqual(
                     [(item["dataset"], item["format"]) for item in export_payload["files"]],
-                    [("tables", "csv"), ("quality_signals", "jsonl")],
+                    [("tables", "csv"), ("quality_signals", "jsonl"), ("records", "jsonl")],
                 )
 
                 export_manifest = client.get(f"/v1/parse/export-jobs/{export_payload['export_id']}")
@@ -1353,7 +1396,7 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(export_manifest.json()["export_id"], export_payload["export_id"])
                 self.assertEqual(export_manifest.json()["manifest_schema_version"], "2026-05")
                 self.assertEqual(export_manifest.json()["tenant_id"], "default")
-                self.assertEqual(export_manifest.json()["request"]["include"], ["tables", "quality_signals"])
+                self.assertEqual(export_manifest.json()["request"]["include"], ["tables", "quality_signals", "records"])
                 self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
                 self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
 
@@ -1374,6 +1417,87 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(compat_payload["projection"], "compat")
                 self.assertNotIn("profile_resolution", compat_payload)
                 self.assertIn("pages", compat_payload)
+
+    def test_pdf_catalog_text_records_are_queryable_and_exportable(self) -> None:
+        with TemporaryWorkspace(PDF_API_CONFIG) as workspace:
+            document_path = workspace.create_pdf(
+                "approved-catalog.pdf",
+                [
+                    [
+                        "No Certificate Holder Model LatestDate",
+                        "1 TC001A Harbin Aircraft Y11B 1992-12-28",
+                        "2 PMA0013-01-XN Chongqing Water Filter",
+                        "SQ-737-1518 Boeing 2025-01-10",
+                    ]
+                ],
+            )
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-pdf-catalog-records",
+                        "file_path": str(document_path),
+                        "media_type": "application/pdf",
+                        "profile": "large-pdf-catalog",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                job_id = created.json()["job_id"]
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{job_id}")
+                    self.assertEqual(current.status_code, 200)
+                    if current.json()["state"] == ParseJobState.DONE.value:
+                        break
+
+                structured = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records",
+                    params={"projection": "structured"},
+                )
+                self.assertEqual(structured.status_code, 200)
+                self.assertEqual(structured.json()["records_summary"]["total"], 2)
+                self.assertNotIn("records", structured.json())
+
+                records = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/records",
+                    params={"query": "Boeing"},
+                )
+                self.assertEqual(records.status_code, 200)
+                records_payload = records.json()
+                self.assertEqual(records_payload["total"], 1)
+                self.assertEqual(records_payload["items"][0]["source"], "text-block")
+                self.assertEqual(
+                    records_payload["items"][0]["fields"]["certificate_or_project_no"],
+                    "PMA0013-01-XN",
+                )
+                self.assertIn(
+                    "row_continuation_detected",
+                    records_payload["items"][0]["quality_signal_codes"],
+                )
+
+                exported_records = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/exports",
+                    params={"dataset": "records", "format": "jsonl"},
+                )
+                self.assertEqual(exported_records.status_code, 200)
+                self.assertIn('"source":"text-block"', exported_records.text)
+                self.assertIn("PMA0013-01-XN", exported_records.text)
+
+                sqlite_export = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/exports",
+                    params={"dataset": "records", "format": "sqlite"},
+                )
+                self.assertEqual(sqlite_export.status_code, 200)
+                self.assertEqual(sqlite_export.headers["content-type"], "application/vnd.sqlite3")
+                export_path = workspace.root / "records-export.sqlite"
+                export_path.write_bytes(sqlite_export.content)
+                conn = sqlite3.connect(export_path)
+                try:
+                    rows = conn.execute("SELECT record_id, fields FROM records ORDER BY record_id").fetchall()
+                finally:
+                    conn.close()
+                self.assertEqual(len(rows), 2)
+                self.assertIn("PMA0013-01-XN", rows[1][1])
 
     def test_pdf_parts_plan_endpoint_creates_child_jobs_and_parent_read_model(self) -> None:
         with TemporaryWorkspace(PDF_API_CONFIG) as workspace:

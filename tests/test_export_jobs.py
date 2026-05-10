@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +102,62 @@ class ExportPackageTests(unittest.TestCase):
             units = list(csv.DictReader(io.StringIO(units_content), delimiter="\t"))
             self.assertEqual([row["parse_unit_id"] for row in units], ["u2"])
 
+    def test_custom_export_package_can_include_records(self) -> None:
+        payload = {
+            "schema_version": "2026-06",
+            "doc_id": "doc-records",
+            "records": [
+                {"record_id": "rec-1", "page_start": 1, "fields": {"name": "alpha"}},
+                {"record_id": "rec-2", "page_start": 3, "fields": {"name": "beta"}},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["records"],
+                formats={"records": "jsonl"},
+                filters={"page_range": {"start": 2, "end": 4}},
+            )
+
+            self.assertEqual(manifest["request"]["include"], ["records"])
+            self.assertEqual(manifest["files"][0]["dataset"], "records")
+            self.assertEqual(manifest["files"][0]["records"], 1)
+            record_lines = export_file_path(tmp, manifest["export_id"], "records.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([json.loads(line)["record_id"] for line in record_lines], ["rec-2"])
+
+    def test_custom_export_package_can_write_records_sqlite(self) -> None:
+        payload = {
+            "schema_version": "2026-06",
+            "doc_id": "doc-records",
+            "records": [
+                {"record_id": "rec-1", "page_start": 1, "fields": {"name": "alpha"}},
+                {"record_id": "rec-2", "page_start": 2, "fields": {"name": "beta"}},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["records"],
+                formats={"records": "sqlite"},
+            )
+
+            self.assertEqual(manifest["files"][0]["path"], "records.sqlite")
+            self.assertEqual(manifest["files"][0]["content_type"], "application/vnd.sqlite3")
+            sqlite_path = export_file_path(tmp, manifest["export_id"], "records.sqlite")
+            conn = sqlite3.connect(sqlite_path)
+            try:
+                rows = conn.execute("SELECT record_id, fields FROM records ORDER BY record_id").fetchall()
+            finally:
+                conn.close()
+            self.assertEqual([row[0] for row in rows], ["rec-1", "rec-2"])
+            self.assertEqual(json.loads(rows[1][1]), {"name": "beta"})
+
     def test_custom_invalid_dataset_and_format_raise_value_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "invalid_export_dataset"):
@@ -108,7 +165,7 @@ class ExportPackageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "invalid_export_format"):
-                create_export_package({}, tmp, includes=["tables"], formats={"tables": "xlsx"})
+                create_export_package({}, tmp, includes=["tables"], formats={"tables": "parquet"})
 
     def test_export_paths_reject_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

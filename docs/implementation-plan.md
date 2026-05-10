@@ -4,6 +4,7 @@
 
 - 第 1 节「当前状态」与第 2 节「Phase 0 ~ Phase 4」只保留历史结论和回溯入口，不再作为活动路线或日常阅读入口。
 - 第 3 节「下一阶段规划（2026-04-27）」是当前唯一的活动路线，新任务、新决策、新验收口径都写到这里，并对照 [docs/architecture.md](architecture.md)、[docs/ocr-gateway-contract.md](ocr-gateway-contract.md)、[docs/self-check-gate.md](self-check-gate.md) 维护。
+- 超大表格/目录型 PDF 的下一阶段升级路线单独维护在 [large-pdf-table-pipeline-upgrade-plan.md](large-pdf-table-pipeline-upgrade-plan.md)，作为 17,101 页真实样本后的优先实施计划。
 - 单一宿主接线、历史双跑与 compare-only 细节统一留在 `archive/`；本文件只保留会影响当前决策的最小历史结论。
 
 总体收口判断：

@@ -31,6 +31,83 @@ def _normalize_tenant_id(tenant_id: str | None) -> str:
     return value or "default"
 
 
+def _document_view_rows(
+    *,
+    doc_id: str,
+    tenant_id: str,
+    view_type: str,
+    items: Sequence[Mapping[str, Any]],
+    updated_at: str,
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    normalized_view_type = str(view_type or "").strip().lower()
+    for position, item in enumerate(items):
+        payload = dict(item)
+        page_start, page_end = _document_view_page_range(payload)
+        rows.append(
+            (
+                doc_id,
+                tenant_id,
+                normalized_view_type,
+                position,
+                _document_view_item_id(
+                    view_type=normalized_view_type,
+                    item=payload,
+                    position=position,
+                ),
+                page_start,
+                page_end,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                updated_at,
+            )
+        )
+    return rows
+
+
+def _document_view_item_id(*, view_type: str, item: Mapping[str, Any], position: int) -> str:
+    candidate_keys = {
+        "pages": ("page_id", "page_number"),
+        "lines": ("line_id", "id"),
+        "records": ("record_id", "id"),
+    }.get(view_type, ("id",))
+    for key in candidate_keys:
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            if key == "page_number":
+                return f"page:{value}"
+            return str(value)
+    return f"{view_type}:{position + 1}"
+
+
+def _document_view_page_range(item: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    page_start = item.get("page_start")
+    page_end = item.get("page_end")
+    page_number = item.get("page_number", item.get("page"))
+    if page_start is None and page_number is not None:
+        page_start = page_number
+    if page_end is None:
+        page_end = page_start
+    return _optional_int_value(page_start), _optional_int_value(page_end)
+
+
+def _optional_int_value(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_document_view_payloads(rows: Sequence[Sequence[Any]]) -> tuple[dict[str, Any], ...]:
+    payloads: list[dict[str, Any]] = []
+    for row in rows:
+        payload = json.loads(row[0])
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return tuple(payloads)
+
+
 class SQLiteJobStore(JobStore):
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
@@ -167,6 +244,104 @@ class SQLiteJobStore(JobStore):
                     for position, chunk in enumerate(chunks)
                 ],
             )
+
+    def save_document_views(
+        self,
+        *,
+        doc_id: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        updated_at = _utc_now()
+        rows: list[tuple[Any, ...]] = []
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="pages",
+                items=pages,
+                updated_at=updated_at,
+            )
+        )
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="lines",
+                items=lines,
+                updated_at=updated_at,
+            )
+        )
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="records",
+                items=records,
+                updated_at=updated_at,
+            )
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM document_views WHERE doc_id = ? AND tenant_id = ?",
+                (doc_id, normalized_tenant),
+            )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO document_views (
+                        doc_id, tenant_id, view_type, position, item_id,
+                        page_start, page_end, payload_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
+    def get_document_views(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Mapping[str, tuple[dict[str, Any], ...]]:
+        return {
+            "pages": self.get_document_pages(doc_id=doc_id, tenant_id=tenant_id),
+            "lines": self.get_document_lines(doc_id=doc_id, tenant_id=tenant_id),
+            "records": self.get_document_records(doc_id=doc_id, tenant_id=tenant_id),
+        }
+
+    def get_document_pages(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="pages")
+
+    def get_document_lines(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="lines")
+
+    def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def _get_document_view_items(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        view_type: str,
+    ) -> tuple[dict[str, Any], ...]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        normalized_view_type = str(view_type or "").strip().lower()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM document_views
+                WHERE doc_id = ? AND tenant_id = ? AND view_type = ?
+                ORDER BY position ASC
+                """,
+                (doc_id, normalized_tenant, normalized_view_type),
+            ).fetchall()
+        return _load_document_view_payloads(rows)
 
     def replace_blocks_by_prefix(
         self,
@@ -620,6 +795,22 @@ class SQLiteJobStore(JobStore):
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
                 ON chunks (tenant_id, doc_id, position ASC);
 
+                CREATE TABLE IF NOT EXISTS document_views (
+                    doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    view_type TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    item_id TEXT NOT NULL,
+                    page_start INTEGER,
+                    page_end INTEGER,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, doc_id, view_type, position)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_document_views_lookup
+                ON document_views (tenant_id, doc_id, view_type, page_start, page_end);
+
                 CREATE TABLE IF NOT EXISTS search_layer_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -899,6 +1090,21 @@ class PostgresJobStore(JobStore):
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_position
                     ON chunks (doc_id, position ASC);
 
+                CREATE TABLE IF NOT EXISTS document_views (
+                    doc_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    view_type TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    item_id TEXT NOT NULL,
+                    page_start INTEGER,
+                    page_end INTEGER,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, doc_id, view_type, position)
+                );
+                CREATE INDEX IF NOT EXISTS idx_document_views_lookup
+                    ON document_views (tenant_id, doc_id, view_type, page_start, page_end);
+
                 CREATE TABLE IF NOT EXISTS search_layer_metrics (
                     id BIGSERIAL PRIMARY KEY,
                     tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -1122,6 +1328,105 @@ class PostgresJobStore(JobStore):
                     """,
                     rows,
                 )
+
+    def save_document_views(
+        self,
+        *,
+        doc_id: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        updated_at = _utc_now()
+        rows: list[tuple[Any, ...]] = []
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="pages",
+                items=pages,
+                updated_at=updated_at,
+            )
+        )
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="lines",
+                items=lines,
+                updated_at=updated_at,
+            )
+        )
+        rows.extend(
+            _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="records",
+                items=records,
+                updated_at=updated_at,
+            )
+        )
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM document_views WHERE doc_id = %s AND tenant_id = %s",
+                (doc_id, normalized_tenant),
+            )
+            if rows:
+                cur.executemany(
+                    """
+                    INSERT INTO document_views (
+                        doc_id, tenant_id, view_type, position, item_id,
+                        page_start, page_end, payload_json, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+
+    def get_document_views(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Mapping[str, tuple[dict[str, Any], ...]]:
+        return {
+            "pages": self.get_document_pages(doc_id=doc_id, tenant_id=tenant_id),
+            "lines": self.get_document_lines(doc_id=doc_id, tenant_id=tenant_id),
+            "records": self.get_document_records(doc_id=doc_id, tenant_id=tenant_id),
+        }
+
+    def get_document_pages(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="pages")
+
+    def get_document_lines(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="lines")
+
+    def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, Any], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def _get_document_view_items(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        view_type: str,
+    ) -> tuple[dict[str, Any], ...]:
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        normalized_view_type = str(view_type or "").strip().lower()
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT payload_json
+                FROM document_views
+                WHERE doc_id = %s AND tenant_id = %s AND view_type = %s
+                ORDER BY position ASC
+                """,
+                (doc_id, normalized_tenant, normalized_view_type),
+            )
+            rows = cur.fetchall()
+        return _load_document_view_payloads(rows)
 
     def replace_blocks_by_prefix(
         self,

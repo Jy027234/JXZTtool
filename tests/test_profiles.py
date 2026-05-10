@@ -13,12 +13,24 @@ class ParseProfileResolutionTests(unittest.TestCase):
         self.assertEqual(description["auto_profile"], "auto")
         self.assertEqual(
             description["supported_profiles"],
-            ["default", "large-pdf", "table-heavy", "ocr-heavy", "excel-ledger", "scan-pdf"],
+            [
+                "default",
+                "large-pdf",
+                "large-pdf-catalog",
+                "large-pdf-ledger",
+                "table-heavy",
+                "ocr-heavy",
+                "excel-ledger",
+                "scan-pdf",
+            ],
         )
         self.assertEqual(description["default_auto_rule_thresholds"]["max_file_size_bytes"], 50 * MIB)
         self.assertEqual(description["default_auto_rule_thresholds"]["max_page_count"], 500)
         self.assertEqual(description["default_auto_rule_thresholds"]["max_table_density"], 0.5)
-        self.assertEqual(description["recommended_async_profiles"], ["large-pdf", "scan-pdf"])
+        self.assertEqual(
+            description["recommended_async_profiles"],
+            ["large-pdf", "large-pdf-catalog", "large-pdf-ledger", "scan-pdf"],
+        )
         self.assertTrue(
             any(
                 rule["profile"] == "large-pdf" and rule["recommended_async"]
@@ -85,6 +97,50 @@ class ParseProfileResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["profile"], "large-pdf")
         self.assertTrue(resolved["recommended_async"])
         self.assertIn("page_count>=500", resolved["reasons"])
+
+    def test_large_pdf_catalog_by_name_hint_takes_precedence(self) -> None:
+        resolved = resolve_parse_profile(
+            media_type="application/pdf",
+            file_name="approved-products-catalog.pdf",
+            file_size_bytes=3 * MIB,
+            page_count=500,
+            table_count=0,
+            requested_profile="auto",
+        )
+
+        self.assertEqual(resolved["profile"], "large-pdf-catalog")
+        self.assertTrue(resolved["recommended_async"])
+        self.assertIn("page_count>=500", resolved["reasons"])
+        self.assertIn("catalog_name_hint", resolved["reasons"])
+
+    def test_large_pdf_ledger_by_table_density_takes_precedence(self) -> None:
+        resolved = resolve_parse_profile(
+            media_type="application/pdf",
+            file_name="huge-report.pdf",
+            file_size_bytes=3 * MIB,
+            page_count=600,
+            table_count=500,
+            requested_profile=None,
+        )
+
+        self.assertEqual(resolved["profile"], "large-pdf-ledger")
+        self.assertTrue(resolved["recommended_async"])
+        self.assertIn("table_density>=0.5", resolved["reasons"])
+
+    def test_requested_large_pdf_catalog_profile_is_known(self) -> None:
+        resolved = resolve_parse_profile(
+            media_type="application/pdf",
+            file_name="manual.pdf",
+            file_size_bytes=1 * MIB,
+            page_count=1,
+            table_count=0,
+            requested_profile="large-pdf-catalog",
+        )
+
+        self.assertEqual(resolved["profile"], "large-pdf-catalog")
+        self.assertEqual(resolved["source"], "requested")
+        self.assertTrue(resolved["profile_known"])
+        self.assertTrue(resolved["recommended_async"])
 
     def test_table_heavy_pdf_by_density(self) -> None:
         resolved = resolve_parse_profile(

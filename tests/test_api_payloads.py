@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from parsecore.api_payloads import _document_projection
+from parsecore.api_payloads import _document_projection, _document_records_projection
 from parsecore.models import Block, BlockType, ParseJobState
 
 
@@ -73,6 +73,89 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(signals["table_header_blank_cells"]["detail"]["col_indexes"], [2])
         self.assertEqual(signals["table_header_duplicate_values"]["detail"]["values"], ["Task"])
         self.assertEqual(payload["quality_summary"]["by_code"]["table_cells_truncated"], 1)
+        self.assertEqual(payload["records_summary"]["total"], 2)
+
+        records_payload = _document_records_projection(
+            {
+                "job": job,
+                "doc_id": "doc-quality-001",
+                "blocks": blocks,
+                "chunks": (),
+            },
+            query="F",
+            limit=10,
+            offset=0,
+        )
+
+        self.assertEqual(records_payload["projection"], "records")
+        self.assertEqual(records_payload["total"], 1)
+        record = records_payload["items"][0]
+        self.assertEqual(record["record_id"], "doc-quality-001:p1:t1:r2")
+        self.assertEqual(record["fields"], {"Task": "D", "Task_2": "", "col_3": "F"})
+        self.assertEqual(record["page_start"], 1)
+
+    def test_catalog_text_blocks_become_records(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-catalog-001",
+            doc_id="doc-catalog-001",
+            state=ParseJobState.DONE,
+            media_type="application/pdf",
+            options={
+                "profile": "large-pdf-catalog",
+                "requested_profile": "large-pdf-catalog",
+                "profile_source": "requested",
+                "profile_recommended_async": True,
+            },
+        )
+        blocks = (
+            Block(
+                block_id="doc-catalog-001-title",
+                doc_id="doc-catalog-001",
+                type=BlockType.TITLE,
+                content="catalog",
+                metadata={"page": 1, "semantic_role": "title"},
+            ),
+            Block(
+                block_id="blk-text-1",
+                doc_id="doc-catalog-001",
+                type=BlockType.PARAGRAPH,
+                content=(
+                    "序号 证件编号 持证人 型别 最新批准日期\n"
+                    "1 TC001A 哈尔滨飞机制造公司 Y11B 1992-12-28\n"
+                    "2 PMA0013-01-XN 重庆兴山泉航空设备有限公司 航空专用净水器\n"
+                    "SQ-737-1518 波音 2025-01-10\n"
+                    "3 无编号公司 缺少证件编号"
+                ),
+                metadata={"page": 2, "semantic_role": "paragraph"},
+            ),
+        )
+
+        snapshot = {
+            "job": job,
+            "doc_id": "doc-catalog-001",
+            "blocks": blocks,
+            "chunks": (),
+        }
+        payload = _document_projection(snapshot, projection="structured")
+
+        self.assertEqual(payload["records_summary"]["total"], 3)
+        self.assertEqual(payload["records_summary"]["text_record_count"], 3)
+        self.assertEqual(payload["records_summary"]["by_source"]["text-block"], 3)
+        self.assertIn("row_continuation_detected", payload["quality_summary"]["by_code"])
+        self.assertIn("record_field_missing", payload["quality_summary"]["by_code"])
+
+        records_payload = _document_records_projection(snapshot, query="波音", limit=10, offset=0)
+
+        self.assertEqual(records_payload["projection"], "records")
+        self.assertEqual(records_payload["total"], 1)
+        record = records_payload["items"][0]
+        self.assertEqual(record["source"], "text-block")
+        self.assertEqual(record["row_number"], 2)
+        self.assertEqual(record["page_start"], 2)
+        self.assertEqual(record["page_end"], 2)
+        self.assertEqual(record["fields"]["certificate_or_project_no"], "PMA0013-01-XN")
+        self.assertEqual(record["fields"]["latest_date"], "2025-01-10")
+        self.assertIn("row_continuation_detected", record["quality_signal_codes"])
 
 
 if __name__ == "__main__":

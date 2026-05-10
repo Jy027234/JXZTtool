@@ -113,3 +113,32 @@ class QueueWorkerTests(unittest.TestCase):
             self.assertIsNotNone(unblocked)
             assert unblocked is not None
             self.assertEqual(unblocked.job_id, blocked.job_id)
+
+    def test_queue_claim_skips_partition_parent_job(self) -> None:
+        with TemporaryWorkspace(QUEUE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            parent = runtime.start(
+                ParseRequest(
+                    doc_id="doc-worker-parent",
+                    file_path="parent.pdf",
+                    media_type="application/pdf",
+                    options={"job_kind": "pdf_parent", "partitioned": True},
+                )
+            )
+            other = runtime.start(
+                ParseRequest(
+                    doc_id="doc-worker-other-parent-skip",
+                    file_path="other.pdf",
+                    media_type="application/pdf",
+                )
+            )
+
+            claimed = runtime.claim_next_job()
+
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            self.assertEqual(claimed.job_id, other.job_id)
+            self.assertIsNone(runtime.claim_job(job_id=parent.job_id))
+            reloaded_parent = runtime.get_job(job_id=parent.job_id)
+            assert reloaded_parent is not None
+            self.assertEqual(reloaded_parent.state, ParseJobState.PENDING)

@@ -9,6 +9,8 @@ MIB = 1024 * 1024
 KNOWN_PROFILES = {
     "default",
     "large-pdf",
+    "large-pdf-catalog",
+    "large-pdf-ledger",
     "table-heavy",
     "ocr-heavy",
     "excel-ledger",
@@ -17,12 +19,14 @@ KNOWN_PROFILES = {
 SUPPORTED_PROFILES = (
     "default",
     "large-pdf",
+    "large-pdf-catalog",
+    "large-pdf-ledger",
     "table-heavy",
     "ocr-heavy",
     "excel-ledger",
     "scan-pdf",
 )
-RECOMMENDED_ASYNC_PROFILES = ("large-pdf", "scan-pdf")
+RECOMMENDED_ASYNC_PROFILES = ("large-pdf", "large-pdf-catalog", "large-pdf-ledger", "scan-pdf")
 
 EXCEL_MEDIA_TYPES = {
     "application/vnd.ms-excel",
@@ -31,6 +35,8 @@ EXCEL_MEDIA_TYPES = {
 }
 EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".xlsb", ".csv", ".tsv"}
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+CATALOG_NAME_HINTS = ("catalog", "catalogue", "目录", "清单")
+LEDGER_NAME_HINTS = ("ledger", "statement", "register", "台账", "明细", "清册")
 
 DEFAULT_LIMITS = {
     "max_file_size_bytes": 50 * MIB,
@@ -57,6 +63,22 @@ def describe_parse_profiles() -> dict[str, Any]:
             for profile in SUPPORTED_PROFILES
         ],
         "auto_rules": [
+            {
+                "profile": "large-pdf-catalog",
+                "conditions": [
+                    f"pdf.page_count>={DEFAULT_LIMITS['max_page_count']} OR pdf.file_size_bytes>={DEFAULT_LIMITS['max_file_size_bytes']}",
+                    "file_name contains catalog/catalogue/目录/清单",
+                ],
+                "recommended_async": True,
+            },
+            {
+                "profile": "large-pdf-ledger",
+                "conditions": [
+                    f"pdf.page_count>={DEFAULT_LIMITS['max_page_count']} OR pdf.file_size_bytes>={DEFAULT_LIMITS['max_file_size_bytes']}",
+                    "file_name contains ledger/statement/register/台账/明细/清册 OR table_density threshold is reached",
+                ],
+                "recommended_async": True,
+            },
             {
                 "profile": "large-pdf",
                 "conditions": [
@@ -124,6 +146,30 @@ def resolve_parse_profile(
     is_pdf = normalized_media_type == "application/pdf" or suffix == ".pdf"
     is_excel = normalized_media_type in EXCEL_MEDIA_TYPES or suffix in EXCEL_EXTENSIONS
     is_image = (normalized_media_type or "").startswith("image/") or suffix in IMAGE_EXTENSIONS
+    is_large_pdf = bool(
+        is_pdf
+        and (
+            (page_count is not None and page_count >= DEFAULT_LIMITS["max_page_count"])
+            or (file_size_bytes is not None and file_size_bytes >= DEFAULT_LIMITS["max_file_size_bytes"])
+        )
+    )
+    table_density = _table_density(table_count, page_count)
+
+    if is_large_pdf and _contains_name_hint(file_name, CATALOG_NAME_HINTS):
+        reasons.extend(_large_pdf_reasons(page_count=page_count, file_size_bytes=file_size_bytes))
+        reasons.append("catalog_name_hint")
+        return _resolved("large-pdf-catalog", reasons, recommended_async=True)
+
+    if is_large_pdf and (
+        _contains_name_hint(file_name, LEDGER_NAME_HINTS)
+        or (table_density is not None and table_density >= DEFAULT_LIMITS["max_table_density"])
+    ):
+        reasons.extend(_large_pdf_reasons(page_count=page_count, file_size_bytes=file_size_bytes))
+        if _contains_name_hint(file_name, LEDGER_NAME_HINTS):
+            reasons.append("ledger_name_hint")
+        if table_density is not None and table_density >= DEFAULT_LIMITS["max_table_density"]:
+            reasons.append(f"table_density>={DEFAULT_LIMITS['max_table_density']}")
+        return _resolved("large-pdf-ledger", reasons, recommended_async=True)
 
     if is_pdf and page_count is not None and page_count >= DEFAULT_LIMITS["max_page_count"]:
         reasons.append(f"page_count>={DEFAULT_LIMITS['max_page_count']}")
@@ -137,7 +183,6 @@ def resolve_parse_profile(
         reasons.append("excel_input")
         return _resolved("excel-ledger", reasons)
 
-    table_density = _table_density(table_count, page_count)
     if table_density is not None and table_density >= DEFAULT_LIMITS["max_table_density"]:
         reasons.append(f"table_density>={DEFAULT_LIMITS['max_table_density']}")
         return _resolved("table-heavy", reasons)
@@ -165,6 +210,22 @@ def _table_density(table_count: int | None, page_count: int | None) -> float | N
     if table_count is None or page_count is None or page_count <= 0:
         return None
     return table_count / page_count
+
+
+def _contains_name_hint(file_name: str | None, hints: tuple[str, ...]) -> bool:
+    normalized = str(file_name or "").lower()
+    if not normalized:
+        return False
+    return any(hint.lower() in normalized for hint in hints)
+
+
+def _large_pdf_reasons(*, page_count: int | None, file_size_bytes: int | None) -> list[str]:
+    reasons: list[str] = []
+    if page_count is not None and page_count >= DEFAULT_LIMITS["max_page_count"]:
+        reasons.append(f"page_count>={DEFAULT_LIMITS['max_page_count']}")
+    if file_size_bytes is not None and file_size_bytes >= DEFAULT_LIMITS["max_file_size_bytes"]:
+        reasons.append(f"file_size_bytes>={DEFAULT_LIMITS['max_file_size_bytes']}")
+    return reasons
 
 
 def _resolved(profile: str, reasons: list[str], recommended_async: bool = False) -> dict[str, Any]:

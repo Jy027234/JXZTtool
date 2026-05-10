@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from parsecore.exports import export_structured_projection
 
@@ -89,6 +93,81 @@ class StructuredProjectionExportTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(content), delimiter="\t"))
         self.assertEqual(rows[0]["detail"], '{"tables":3}')
 
+    def test_exports_records_as_jsonl(self) -> None:
+        payload = {
+            "doc_id": "doc-records",
+            "records": [
+                {
+                    "record_id": "rec-1",
+                    "page_start": 1,
+                    "fields": {"certificate": "TC001A", "holder": "ACME"},
+                }
+            ],
+        }
+
+        result = export_structured_projection(payload, dataset="records", format="jsonl")
+
+        self.assertEqual(result["filename"], "doc-records-records.jsonl")
+        rows = [json.loads(line) for line in str(result["content"]).splitlines()]
+        self.assertEqual(rows[0]["record_id"], "rec-1")
+        self.assertEqual(rows[0]["fields"]["certificate"], "TC001A")
+
+    @unittest.skipUnless(importlib.util.find_spec("openpyxl"), "openpyxl not installed")
+    def test_exports_records_as_xlsx(self) -> None:
+        from openpyxl import load_workbook
+
+        payload = {
+            "doc_id": "doc-records",
+            "records": [
+                {
+                    "record_id": "rec-1",
+                    "page_start": 1,
+                    "fields": {"certificate": "TC001A", "holder": "ACME"},
+                }
+            ],
+        }
+
+        result = export_structured_projection(payload, dataset="records", format="xlsx", as_bytes=True)
+
+        self.assertEqual(
+            result["content_type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertEqual(result["filename"], "doc-records-records.xlsx")
+        self.assertIsInstance(result["content"], bytes)
+        workbook = load_workbook(io.BytesIO(result["content"]))  # type: ignore[arg-type]
+        worksheet = workbook.active
+        headers = [cell.value for cell in worksheet[1]]
+        values = [cell.value for cell in worksheet[2]]
+        self.assertIn("record_id", headers)
+        self.assertEqual(values[headers.index("record_id")], "rec-1")
+        self.assertEqual(json.loads(values[headers.index("fields")])["certificate"], "TC001A")
+
+    def test_exports_records_as_sqlite(self) -> None:
+        payload = {
+            "doc_id": "doc-records",
+            "records": [
+                {"record_id": "rec-1", "page_start": 1, "fields": {"name": "alpha"}},
+                {"record_id": "rec-2", "page_start": 2, "fields": {"name": "beta"}},
+            ],
+        }
+
+        result = export_structured_projection(payload, dataset="records", format="sqlite", as_bytes=True)
+
+        self.assertEqual(result["content_type"], "application/vnd.sqlite3")
+        self.assertEqual(result["filename"], "doc-records-records.sqlite")
+        self.assertIsInstance(result["content"], bytes)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.sqlite"
+            path.write_bytes(result["content"])  # type: ignore[arg-type]
+            conn = sqlite3.connect(path)
+            try:
+                rows = conn.execute("SELECT record_id, fields FROM records ORDER BY record_id").fetchall()
+            finally:
+                conn.close()
+        self.assertEqual([row[0] for row in rows], ["rec-1", "rec-2"])
+        self.assertEqual(json.loads(rows[0][1]), {"name": "alpha"})
+
     def test_empty_dataset_exports_csv_header_only_when_no_fields_exist(self) -> None:
         result = export_structured_projection({"doc_id": "doc-empty"}, dataset="tables", format="csv")
 
@@ -99,7 +178,7 @@ class StructuredProjectionExportTests(unittest.TestCase):
             export_structured_projection({}, dataset="pages", format="csv")
 
         with self.assertRaisesRegex(ValueError, "invalid_export_format"):
-            export_structured_projection({}, dataset="tables", format="xlsx")
+            export_structured_projection({}, dataset="tables", format="parquet")
 
 
 if __name__ == "__main__":

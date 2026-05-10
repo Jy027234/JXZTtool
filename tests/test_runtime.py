@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from parsecore.api_payloads import _document_projection
+from parsecore.api_payloads import _document_projection, _document_records_projection
 from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
@@ -312,6 +312,68 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(artifact.items[1].provenance["semantic_role"], SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].semantic_role, SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+
+    def test_execute_persists_document_views_for_pages_lines_and_records(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            source_path = workspace.root / "catalog.pdf"
+            source_path.write_bytes(b"%PDF-1.4\n% test\n")
+            blocks = (
+                Block(
+                    block_id="doc-views-title",
+                    doc_id="doc-views",
+                    type=BlockType.TITLE,
+                    content="Catalog",
+                    metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+                ),
+                Block(
+                    block_id="doc-views-p1",
+                    doc_id="doc-views",
+                    type=BlockType.PARAGRAPH,
+                    content="No Certificate Holder LatestDate\n1 TC001A ACME 2025-01-10",
+                    metadata={"page": 1, "semantic_role": "paragraph", "parser": "pdf-text"},
+                ),
+            )
+            chunks = (
+                Chunk(
+                    chunk_id="chunk-1",
+                    doc_id="doc-views",
+                    block_ids=("doc-views-p1",),
+                    text="1 TC001A ACME 2025-01-10",
+                    language="en",
+                    semantic_role="paragraph",
+                ),
+            )
+
+            with patch.object(runtime, "_load_blocks_for_request", return_value=blocks), patch.object(
+                runtime,
+                "_load_document_for_request",
+                return_value=None,
+            ), patch.object(runtime, "_load_chunks_for_request", return_value=chunks), patch.object(
+                runtime,
+                "_embed_chunks",
+                return_value=chunks,
+            ):
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-views",
+                        file_path=str(source_path),
+                        media_type="application/pdf",
+                        options={"profile": "large-pdf-catalog"},
+                    )
+                )
+
+            views = runtime.job_store.get_document_views(doc_id="doc-views", tenant_id="default")
+            self.assertEqual(len(views["pages"]), 1)
+            self.assertGreaterEqual(len(views["lines"]), 2)
+            self.assertEqual(len(views["records"]), 1)
+            self.assertEqual(views["records"][0]["source"], "text-block")
+            self.assertEqual(views["records"][0]["fields"]["certificate_or_project_no"], "TC001A")
+
+            snapshot = runtime.get_document(doc_id="doc-views", tenant_id="default")
+            records_payload = _document_records_projection(snapshot, query="ACME", limit=10, offset=0)
+            self.assertEqual(records_payload["total"], 1)
+            self.assertEqual(records_payload["items"][0]["record_id"], views["records"][0]["record_id"])
 
     def test_pipeline_observability_reports_cache_hit_after_repeated_resolution(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1575,6 +1637,27 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual([unit["page_start"] for unit in payload["parse_units"]], [1, 3])
             self.assertEqual([page["page_number"] for page in payload["pages"]], [1, 2, 3])
             self.assertEqual([page["text"] for page in payload["pages"]], ["one", "two", "three"])
+
+    def test_execute_refuses_partition_parent_job(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("parent-refuse.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            parent = runtime.start(
+                ParseRequest(
+                    doc_id="doc-parent-refuse",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"job_kind": "pdf_parent", "partitioned": True},
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "pdf_parent_not_executable"):
+                runtime.execute(job_id=parent.job_id)
+
+            self.assertEqual(tuple(runtime.job_store.get_blocks(doc_id="doc-parent-refuse")), ())
+            reloaded = runtime.get_job(job_id=parent.job_id)
+            assert reloaded is not None
+            self.assertEqual(reloaded.state, ParseJobState.PENDING)
 
     def test_partitioned_pdf_parent_index_replaces_only_changed_part_prefix(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

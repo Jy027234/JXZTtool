@@ -286,6 +286,7 @@ class InMemoryJobStore(JobStore):
         self.jobs: dict[str, ParseJob] = {}
         self.blocks_by_doc: dict[tuple[str, str], tuple[Block, ...]] = {}
         self.chunks_by_doc: dict[tuple[str, str], tuple[Chunk, ...]] = {}
+        self.document_views_by_doc: dict[tuple[str, str, str], tuple[dict[str, object], ...]] = {}
         self.search_layer_metrics: list[dict[str, object]] = []
 
     def create(self, request: ParseRequest) -> ParseJob:
@@ -339,6 +340,51 @@ class InMemoryJobStore(JobStore):
     def save_chunks(self, *, doc_id: str, chunks: Sequence[Chunk], tenant_id: str | None = None) -> None:
         key = ((tenant_id or "default"), doc_id)
         self.chunks_by_doc[key] = tuple(chunks)
+
+    def save_document_views(
+        self,
+        *,
+        doc_id: str,
+        pages: Sequence[Mapping[str, object]] = (),
+        lines: Sequence[Mapping[str, object]] = (),
+        records: Sequence[Mapping[str, object]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        tenant = tenant_id or "default"
+        self.document_views_by_doc[(tenant, doc_id, "pages")] = tuple(dict(item) for item in pages)
+        self.document_views_by_doc[(tenant, doc_id, "lines")] = tuple(dict(item) for item in lines)
+        self.document_views_by_doc[(tenant, doc_id, "records")] = tuple(dict(item) for item in records)
+
+    def get_document_views(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> Mapping[str, tuple[dict[str, object], ...]]:
+        return {
+            "pages": self.get_document_pages(doc_id=doc_id, tenant_id=tenant_id),
+            "lines": self.get_document_lines(doc_id=doc_id, tenant_id=tenant_id),
+            "records": self.get_document_records(doc_id=doc_id, tenant_id=tenant_id),
+        }
+
+    def get_document_pages(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, object], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="pages")
+
+    def get_document_lines(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, object], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="lines")
+
+    def get_document_records(self, *, doc_id: str, tenant_id: str | None = None) -> tuple[dict[str, object], ...]:
+        return self._get_document_view_items(doc_id=doc_id, tenant_id=tenant_id, view_type="records")
+
+    def _get_document_view_items(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        view_type: str,
+    ) -> tuple[dict[str, object], ...]:
+        key = ((tenant_id or "default"), doc_id, str(view_type or "").strip().lower())
+        return tuple(dict(item) for item in self.document_views_by_doc.get(key, ()))
 
     def replace_blocks_by_prefix(
         self,

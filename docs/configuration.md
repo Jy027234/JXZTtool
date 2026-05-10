@@ -587,6 +587,7 @@ Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http:
 - 默认接入传 `profile=auto`，由中台按文件类型、大小、页数、表格密度和 OCR 信号选择策略。
 - 表格密集文件传 `profile=table-heavy`，重点验收 `projection=structured` 下的 `tables / cells / quality_signals`。
 - 超大 PDF、长页数 PDF 或同步接口返回 `413 document_too_large_for_sync` 的文件传 `profile=large-pdf`，走 `/v1/parse/uploads + /v1/parse/jobs` 异步链路，再轮询 job 并读取 `projection=structured`。
+- 超大目录、清单、台账型 PDF 可显式传 `profile=large-pdf-catalog` 或 `profile=large-pdf-ledger`；`profile=auto` 会先按文件名提示、页数/大小和表格密度做保守路由。
 - `profile` 控制解析执行策略，`projection` 控制结果返回形态；不要用 `projection=full` 代替 profile 灰度。
 
 当前 `profile=auto` 是宿主侧最省改造的默认值：调用方只需要传一个稳定参数，中台会按文件扩展名、media type、大小和入口上下文解析为 effective profile，并把结果写入 job options 或 413 detail。宿主可先只记录 `profile / resolved_profile`，等灰度样本足够后再对少数文件类型显式覆盖。
@@ -598,6 +599,8 @@ profile 建议用法：
 | `auto` | 默认入口 | 新接入统一使用，便于中台持续升级路由规则。 |
 | `table-heavy` | PDF/DOCX 中表格密集、表头稳定性重要 | 优先双写 `tables` 和 `quality_signals`，观察表格信号密度。 |
 | `large-pdf` | 超过同步阈值、长页数 PDF、已知慢样本 | 默认走异步上传和 job 轮询，不再压同步 HTTP。 |
+| `large-pdf-catalog` | 超大目录、产品清单、批准目录类 PDF | 走异步与 part 调度，优先保留记录级可追溯数据。 |
+| `large-pdf-ledger` | 超大台账、明细表、表格密度高的 PDF | 走异步与 part 调度，重点观察 records 与列错位信号。 |
 | `ocr-heavy` | 文字层质量差、OCR fallback 多的 PDF | 重点观察 OCR trace 和 `ocr_failed_page` 类信号。 |
 | `excel-ledger` | `.xls/.xlsx/.xlsm` 台账、明细表 | 验证 sheet、cell range、merged cells 和截断信号。 |
 | `scan-pdf` | 扫描件或图片型 PDF | 走异步优先，避免同步请求长时间占用连接。 |
@@ -612,15 +615,26 @@ profile 建议用法：
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=tables&format=csv" -OutFile tables.csv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=quality_signals&format=jsonl" -OutFile quality_signals.jsonl
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=parse_units&format=tsv" -OutFile parse_units.tsv
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=jsonl" -OutFile records.jsonl
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=sqlite" -OutFile records.sqlite
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=xlsx" -OutFile records.xlsx
 ```
 
 支持参数：
 
-- `dataset=tables|quality_signals|parse_units`
-- `format=jsonl|csv|tsv`
+- `dataset=tables|quality_signals|parse_units|records`
+- `format=jsonl|csv|tsv|sqlite|xlsx`
 - `tenant_id=...` 可选，默认 `default`
 
-CSV/TSV 会把嵌套字段如 `cells/detail/warnings` 稳定序列化成 JSON 字符串。当前也已提供异步导出包 MVP：
+解析完成后，中台会把结构化 `pages / lines / records` 作为 document views 持久化到当前 JobStore；records 查询会优先读取持久化结果，缺失时再回退到 block 现场投影。记录级查询入口用于分页读取派生 records，避免把大结果集塞进主文档响应。records 可能来自结构化表格行，也可能来自 `large-pdf-catalog` / `large-pdf-ledger` 下按序号行聚合出的文本记录；消费方应按 `source / fields / raw_text / normalized_text / page_start / page_end` 宽松解析。
+
+```text
+GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0
+GET /v1/parse/documents/{doc_id}/records?query=TC001A
+GET /v1/parse/documents/{doc_id}/records?page_start=2000&page_end=2300
+```
+
+CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
 
 ```text
 POST /v1/parse/documents/{doc_id}/export-jobs
@@ -628,7 +642,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
+异步包会生成 `manifest.json` 以及按 include/formats 指定的 `tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。创建导出时建议带 `include`、`formats` 和 `filters`，例如只导出 `severity=warning/error` 或指定 `page_range`。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 

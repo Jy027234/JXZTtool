@@ -4,14 +4,17 @@ import csv
 import io
 import json
 import re
+import sqlite3
+import tempfile
+from pathlib import Path
 from typing import Any, Literal
 
 
-ExportDataset = Literal["tables", "quality_signals", "parse_units"]
-ExportFormat = Literal["jsonl", "csv", "tsv"]
+ExportDataset = Literal["tables", "quality_signals", "parse_units", "records"]
+ExportFormat = Literal["jsonl", "csv", "tsv", "xlsx", "sqlite"]
 
-EXPORT_DATASETS = {"tables", "quality_signals", "parse_units"}
-EXPORT_FORMATS = {"jsonl", "csv", "tsv"}
+EXPORT_DATASETS = {"tables", "quality_signals", "parse_units", "records"}
+EXPORT_FORMATS = {"jsonl", "csv", "tsv", "xlsx", "sqlite"}
 
 
 def export_structured_projection(
@@ -21,14 +24,16 @@ def export_structured_projection(
     format: str,
     as_bytes: bool = False,
 ) -> dict[str, str | bytes]:
-    """Export one structured projection dataset as jsonl/csv/tsv content."""
+    """Export one structured projection dataset."""
     normalized_dataset = _normalize_dataset(dataset)
     normalized_format = _normalize_format(format)
     rows = _dataset_rows(payload, normalized_dataset)
 
-    content = _serialize_rows(rows, format=normalized_format)
-    if as_bytes:
-        exported_content: str | bytes = content.encode("utf-8")
+    content = _serialize_rows(rows, dataset=normalized_dataset, format=normalized_format)
+    if isinstance(content, bytes):
+        exported_content: str | bytes = content
+    elif as_bytes:
+        exported_content = content.encode("utf-8")
     else:
         exported_content = content
 
@@ -68,9 +73,13 @@ def _dataset_rows(payload: dict[str, Any], dataset: ExportDataset) -> list[dict[
     return normalized_rows
 
 
-def _serialize_rows(rows: list[dict[str, Any]], *, format: ExportFormat) -> str:
+def _serialize_rows(rows: list[dict[str, Any]], *, dataset: ExportDataset, format: ExportFormat) -> str | bytes:
     if format == "jsonl":
         return "\n".join(_json_dumps(row) for row in rows)
+    if format == "xlsx":
+        return _serialize_xlsx(rows, dataset=dataset)
+    if format == "sqlite":
+        return _serialize_sqlite(rows, dataset=dataset)
 
     delimiter = "\t" if format == "tsv" else ","
     output = io.StringIO(newline="")
@@ -79,6 +88,75 @@ def _serialize_rows(rows: list[dict[str, Any]], *, format: ExportFormat) -> str:
     for row in rows:
         writer.writerow({field: _cell_value(row.get(field)) for field in writer.fieldnames or []})
     return output.getvalue()
+
+
+def _serialize_xlsx(rows: list[dict[str, Any]], *, dataset: ExportDataset) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError("xlsx export requires openpyxl") from exc
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = str(dataset)[:31] or "data"
+    fieldnames = _fieldnames(rows)
+    if fieldnames:
+        worksheet.append(fieldnames)
+        for row in rows:
+            worksheet.append([_cell_value(row.get(field)) for field in fieldnames])
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _serialize_sqlite(rows: list[dict[str, Any]], *, dataset: ExportDataset) -> bytes:
+    fieldnames = _fieldnames(rows)
+    table_name = _sqlite_identifier(str(dataset or "data"))
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as handle:
+            temp_path = handle.name
+        conn = sqlite3.connect(temp_path)
+        try:
+            conn.execute(
+                f"CREATE TABLE {_quote_sqlite_identifier(table_name)} ({_sqlite_columns(fieldnames)})"
+            )
+            if fieldnames and rows:
+                placeholders = ", ".join("?" for _ in fieldnames)
+                columns = ", ".join(_quote_sqlite_identifier(field) for field in fieldnames)
+                conn.executemany(
+                    f"INSERT INTO {_quote_sqlite_identifier(table_name)} ({columns}) VALUES ({placeholders})",
+                    [
+                        tuple(_cell_value(row.get(field)) for field in fieldnames)
+                        for row in rows
+                    ],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return Path(temp_path).read_bytes()
+    finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+
+
+def _sqlite_columns(fieldnames: list[str]) -> str:
+    if not fieldnames:
+        return "_empty TEXT"
+    return ", ".join(f"{_quote_sqlite_identifier(field)} TEXT" for field in fieldnames)
+
+
+def _sqlite_identifier(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "data")).strip("_")
+    if not normalized:
+        normalized = "data"
+    if normalized[0].isdigit():
+        normalized = f"_{normalized}"
+    return normalized
+
+
+def _quote_sqlite_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
 
 
 def _fieldnames(rows: list[dict[str, Any]]) -> list[str]:
@@ -113,6 +191,10 @@ def _content_type(format: ExportFormat) -> str:
         return "application/x-ndjson; charset=utf-8"
     if format == "tsv":
         return "text/tab-separated-values; charset=utf-8"
+    if format == "xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if format == "sqlite":
+        return "application/vnd.sqlite3"
     return "text/csv; charset=utf-8"
 
 

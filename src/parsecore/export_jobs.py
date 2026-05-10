@@ -131,7 +131,7 @@ def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[
     severity_filter = _severity_filter(filters.get("severity"))
     page_range = _page_range(filters.get("page_range"))
 
-    for dataset in ("tables", "quality_signals", "parse_units"):
+    for dataset in ("tables", "quality_signals", "parse_units", "records"):
         rows = filtered.get(dataset)
         if not isinstance(rows, list):
             continue

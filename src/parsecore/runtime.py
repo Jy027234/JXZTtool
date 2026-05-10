@@ -357,6 +357,8 @@ class ParseRuntime:
             )
         if job.state == ParseJobState.FAILED and str(job.failure_reason or "").strip().lower() == "cancelled":
             raise RuntimeError(f"job {job.job_id} was cancelled; refusing to execute")
+        if _job_kind(job) == _PDF_PARENT_JOB_KIND:
+            raise RuntimeError("pdf_parent_not_executable")
         if job.state == ParseJobState.PENDING:
             claimed = self.claim_job(job_id=job.job_id)
             if claimed is None:
@@ -465,6 +467,7 @@ class ParseRuntime:
                 clear_claim=True,
             )
             outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
+            self._persist_document_views(job=final_job, blocks=blocks)
             if _is_pdf_part_request(request):
                 self.refresh_partitioned_parent(
                     doc_id=str(request.options.get("source_doc_id") or request.options.get("parent_doc_id") or ""),
@@ -661,6 +664,8 @@ class ParseRuntime:
         pending = self.job_store.get_job(job_id=job_id)
         if pending is None:
             return None
+        if _job_kind(pending) == _PDF_PARENT_JOB_KIND:
+            return None
         return claim_job(
             job_id=job_id,
             lease_expires_at=_lease_expires_at_for_job(pending, self.settings.runtime),
@@ -692,6 +697,43 @@ class ParseRuntime:
         if current is None or current.claim_token != claim_token or current.state not in _ACTIVE_PART_STATES:
             raise RuntimeError("stale_claim")
 
+    def _persist_document_views(self, *, job: Any, blocks: Sequence[Any]) -> None:
+        save_document_views = getattr(self.job_store, "save_document_views", None)
+        if not callable(save_document_views):
+            return
+        try:
+            from .api_payloads import _document_view_rows
+
+            snapshot = {
+                "doc_id": getattr(job, "doc_id", ""),
+                "job": job,
+                "blocks": tuple(blocks),
+                "chunks": (),
+                "partition_parts": [],
+            }
+            views = _document_view_rows(snapshot)
+            save_document_views(
+                doc_id=str(getattr(job, "doc_id", "")),
+                tenant_id=getattr(job, "tenant_id", None),
+                pages=views.get("pages", []),
+                lines=views.get("lines", []),
+                records=views.get("records", []),
+            )
+        except Exception as exc:  # pragma: no cover - defensive observability path
+            self.event_logger.log(
+                "document_views_persist_failed",
+                job_id=getattr(job, "job_id", ""),
+                doc_id=getattr(job, "doc_id", ""),
+                error=str(exc),
+            )
+            self.event_aggregator.record_event(
+                "document_views_persist_failed",
+                tenant_id=str(getattr(job, "tenant_id", "default") or "default"),
+                quota_key=str(getattr(job, "quota_key", "default") or "default"),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                details={"error": str(exc)},
+            )
+
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
 
@@ -720,6 +762,10 @@ class ParseRuntime:
                     tenant_id=latest_job.tenant_id,
                     parent_job_id=latest_job.job_id,
                 )
+        document_views: Mapping[str, Sequence[Mapping[str, Any]]] = {}
+        get_document_views = getattr(self.job_store, "get_document_views", None)
+        if latest_job is not None and callable(get_document_views):
+            document_views = get_document_views(doc_id=doc_id, tenant_id=latest_job.tenant_id)
         describe_document = getattr(self.index, "describe_document", None)
         index_manifest = None
         if callable(describe_document):
@@ -735,6 +781,7 @@ class ParseRuntime:
             "job": latest_job,
             "blocks": blocks,
             "chunks": chunks,
+            "document_views": document_views,
             "index_manifest": index_manifest,
             "partition_parts": partition_parts,
         }
@@ -1077,8 +1124,10 @@ class ParseRuntime:
             for part_id in tuple(changed_part_ids or ())
             if str(part_id).strip()
         )
+        views_dirty = False
+        blocks_for_views: tuple[Any, ...] = ()
         if changed_ids:
-            self._refresh_partitioned_parent_incremental(
+            views_dirty = self._refresh_partitioned_parent_incremental(
                 parent_doc_id=doc_id,
                 parent_job=parent_job,
                 child_jobs=child_jobs,
@@ -1095,6 +1144,8 @@ class ParseRuntime:
                 if new_state == ParseJobState.DONE or len(blocks) >= len(existing_blocks):
                     self.job_store.save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=parent_job.tenant_id)
                     self.job_store.save_chunks(doc_id=doc_id, chunks=chunks, tenant_id=parent_job.tenant_id)
+                    blocks_for_views = tuple(blocks)
+                    views_dirty = True
                     index_manifest = self._derive_index_manifest_from_snapshot(
                         job=parent_job,
                         blocks=blocks,
@@ -1113,6 +1164,10 @@ class ParseRuntime:
                 state=new_state,
                 clear_claim=True,
             )
+        if views_dirty:
+            if not blocks_for_views:
+                blocks_for_views = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
+            self._persist_document_views(job=parent_job, blocks=blocks_for_views)
         return parent_job
 
     def _refresh_partitioned_parent_incremental(
@@ -2242,6 +2297,7 @@ class ParseRuntime:
                 job
                 for job in jobs
                 if job.state == ParseJobState.PENDING and _job_ready_for_attempt(job, now=now)
+                and _job_kind(job) != _PDF_PARENT_JOB_KIND
             ),
             key=lambda item: item.created_at,
         )
