@@ -157,6 +157,76 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(record["fields"]["latest_date"], "2025-01-10")
         self.assertIn("row_continuation_detected", record["quality_signal_codes"])
 
+    def test_record_quality_signals_detect_shifted_columns_and_bad_dates(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-record-quality",
+            doc_id="doc-record-quality",
+            state=ParseJobState.DONE,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            options={"profile": "excel-ledger"},
+        )
+        blocks = (
+            Block(
+                block_id="blk-shifted-table",
+                doc_id="doc-record-quality",
+                type=BlockType.TABLE,
+                content="Certificate\tLatest Date\tHolder\nPMA0013-01-XN\tACME\t2025-02-31",
+                metadata={
+                    "page": 4,
+                    "parser": "excel-native",
+                    "rows": 2,
+                    "cols": 3,
+                    "header_values": ["Certificate", "Latest Date", "Holder"],
+                    "cells": [["Certificate", "Latest Date", "Holder"], ["PMA0013-01-XN", "ACME", "2025-02-31"]],
+                },
+            ),
+        )
+        snapshot = {"job": job, "doc_id": "doc-record-quality", "blocks": blocks, "chunks": ()}
+
+        payload = _document_projection(snapshot, projection="structured")
+        records_payload = _document_records_projection(
+            snapshot,
+            quality_signal="column_shift_suspected",
+            limit=10,
+            offset=0,
+        )
+
+        self.assertIn("column_shift_suspected", payload["quality_summary"]["by_code"])
+        self.assertIn("date_parse_failed", payload["quality_summary"]["by_code"])
+        self.assertEqual(records_payload["total"], 1)
+        record = records_payload["items"][0]
+        self.assertIn("column_shift_suspected", record["quality_signal_codes"])
+        self.assertIn("date_parse_failed", record["quality_signal_codes"])
+
+    def test_catalog_text_record_quality_detects_date_before_certificate(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-catalog-shift",
+            doc_id="doc-catalog-shift",
+            state=ParseJobState.DONE,
+            media_type="application/pdf",
+            options={"profile": "large-pdf-catalog"},
+        )
+        blocks = (
+            Block(
+                block_id="blk-catalog-shift",
+                doc_id="doc-catalog-shift",
+                type=BlockType.PARAGRAPH,
+                content="1 2025-01-10 PMA0013-01-XN 重庆兴山泉航空设备有限公司",
+                metadata={"page": 8, "semantic_role": "paragraph"},
+            ),
+        )
+        snapshot = {"job": job, "doc_id": "doc-catalog-shift", "blocks": blocks, "chunks": ()}
+
+        records_payload = _document_records_projection(
+            snapshot,
+            quality_signal="column_shift_suspected",
+            limit=10,
+            offset=0,
+        )
+
+        self.assertEqual(records_payload["total"], 1)
+        self.assertIn("column_shift_suspected", records_payload["items"][0]["quality_signal_codes"])
+
 
 if __name__ == "__main__":
     unittest.main()

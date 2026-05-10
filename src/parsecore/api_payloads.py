@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+from datetime import date
 import re
 from typing import Any
 
@@ -20,10 +21,13 @@ _TEXT_RECORD_PROFILES = {"large-pdf-catalog", "large-pdf-ledger"}
 _TEXT_RECORD_START_PATTERN = re.compile(r"^\s*(?P<row>\d{1,8})\s+(?P<body>.+?)\s*$")
 _TEXT_RECORD_HEADER_PATTERN = re.compile(r"(?:序号|证件编号|项目编号|持证人|最新批准日期|批准日期)")
 _TEXT_RECORD_DATE_PATTERN = re.compile(r"\b(19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b")
+_TEXT_RECORD_ANY_DATE_PATTERN = re.compile(r"\b(19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\b")
 _TEXT_RECORD_CERT_PATTERN = re.compile(
     r"\b(?:TC|STC|PMA|MDA|CTSOA|VTC|VSTC|VDA|TDA|TSOA)[A-Z0-9-]*\b",
     re.IGNORECASE,
 )
+_DATE_FIELD_HINTS = ("date", "日期", "批准日期", "latest", "有效期")
+_IDENTIFIER_FIELD_HINTS = ("certificate", "project", "编号", "证件", "项目", "no", "number")
 
 # Increment when the shape of pages[] or top-level fields changes in a
 # backwards-incompatible way.  Consumers can gate on this string.
@@ -236,6 +240,7 @@ def _document_records_projection(
     offset: int = 0,
     query: str | None = None,
     table_id: str | None = None,
+    quality_signal: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
@@ -246,6 +251,7 @@ def _document_records_projection(
         records,
         query=query,
         table_id=table_id,
+        quality_signal=quality_signal,
         page_start=page_start,
         page_end=page_end,
     )
@@ -310,14 +316,16 @@ def _structured_lines_from_blocks(
     lines: list[dict[str, Any]] = []
     for block_index, block in enumerate(blocks, start=1):
         metadata = block.metadata or {}
-        page_number = _safe_int(metadata.get("page"), default=1)
         role = str(metadata.get("semantic_role") or "paragraph")
+        if block.type == BlockType.TITLE or role in _ARTIFACT_SEMANTIC_ROLES:
+            continue
+        page_number = _safe_int(metadata.get("page"), default=1)
         parser = str(metadata.get("parser") or "")
         for line_index, text in enumerate(_block_lines(block.content), start=1):
             line_number = len(lines) + 1
             lines.append(
                 {
-                    "line_id": f"{doc_id}:line:{line_number}",
+                    "line_id": f"{block.block_id}:line:{line_index}",
                     "doc_id": doc_id or block.doc_id,
                     "parse_run_id": parse_run_id,
                     "block_id": block.block_id,
@@ -524,6 +532,7 @@ def _structured_records(
             record: dict[str, Any] = {
                 "record_id": f"{table_id}:r{row_index}",
                 "doc_id": str(table.get("source_doc_id") or ""),
+                "source": "table-row",
                 "table_id": table_id,
                 "block_id": table.get("block_id"),
                 "page_start": page_number,
@@ -538,6 +547,9 @@ def _structured_records(
             for key in ("section", "sheet_name", "table_title", "table_type"):
                 if table.get(key) is not None:
                     record[key] = table.get(key)
+            record["quality_signal_codes"] = list(
+                dict.fromkeys(list(record.get("quality_signal_codes") or []) + _table_record_signal_codes(record))
+            )
             records.append(record)
     if str(profile or "").strip().lower() in _TEXT_RECORD_PROFILES:
         records.extend(
@@ -623,9 +635,8 @@ def _text_block_records(
                 finish_current()
                 row_number = int(match.group("row"))
                 body = str(match.group("body") or "").strip()
-                record_index = existing_count + len(records) + 1
                 current = {
-                    "record_id": f"{doc_id or 'doc'}:text:r{record_index}",
+                    "record_id": f"{block_id}:text:r{row_number}:l{line_index}",
                     "doc_id": str(doc_id or block.doc_id),
                     "source": "text-block",
                     "page_start": page_number,
@@ -700,13 +711,27 @@ def _extract_certificate_or_project_no(text: str) -> str | None:
 
 def _extract_latest_date(text: str) -> str | None:
     matches = [match.group(0) for match in _TEXT_RECORD_DATE_PATTERN.finditer(str(text or ""))]
-    if not matches:
+    for match in reversed(matches):
+        normalized = _normalize_record_date(match)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_record_date(value: str) -> str | None:
+    normalized = str(value or "").replace("/", "-").replace(".", "-")
+    parts = normalized.split("-")
+    if len(parts) != 3:
         return None
-    latest = matches[-1].replace("/", "-").replace(".", "-")
-    parts = latest.split("-")
-    if len(parts) == 3:
-        return f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-    return latest
+    try:
+        parsed = date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+    return parsed.isoformat()
+
+
+def _contains_valid_record_date(value: str) -> bool:
+    return any(_normalize_record_date(match.group(0)) for match in _TEXT_RECORD_DATE_PATTERN.finditer(str(value or "")))
 
 
 def _holder_or_name_start(text: str, *, certificate: str | None, latest_date: str | None) -> str | None:
@@ -722,13 +747,75 @@ def _holder_or_name_start(text: str, *, certificate: str | None, latest_date: st
 def _text_record_signal_codes(record: dict[str, Any]) -> list[str]:
     codes: list[str] = []
     fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    raw_text = str(record.get("raw_text") or "")
     if not fields.get("certificate_or_project_no"):
         codes.append("record_field_missing")
+    if _TEXT_RECORD_ANY_DATE_PATTERN.search(raw_text) and not fields.get("latest_date"):
+        codes.append("date_parse_failed")
+    if _record_column_shift_suspected(record):
+        codes.append("column_shift_suspected")
     if bool(record.get("row_continuation_detected")):
         codes.append("row_continuation_detected")
-    if "\n" in str(record.get("raw_text") or "") and not bool(record.get("row_continuation_detected")):
+    if "\n" in raw_text and not bool(record.get("row_continuation_detected")):
         codes.append("record_boundary_uncertain")
-    return codes
+    return list(dict.fromkeys(codes))
+
+
+def _table_record_signal_codes(record: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    if not fields:
+        return codes
+    values = [str(value or "") for value in fields.values()]
+    has_valid_date = any(_contains_valid_record_date(value) for value in values)
+    has_any_date = any(_TEXT_RECORD_ANY_DATE_PATTERN.search(value) for value in values)
+    if has_any_date and not has_valid_date:
+        codes.append("date_parse_failed")
+    if _record_column_shift_suspected(record):
+        codes.append("column_shift_suspected")
+    return list(dict.fromkeys(codes))
+
+
+def _record_column_shift_suspected(record: dict[str, Any]) -> bool:
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    if not fields:
+        return False
+    raw_text = str(record.get("raw_text") or "")
+    certificate = str(fields.get("certificate_or_project_no") or "")
+    latest_date = str(fields.get("latest_date") or "")
+    if certificate and latest_date:
+        cert_pos = raw_text.find(certificate)
+        date_pos = raw_text.find(latest_date)
+        if cert_pos >= 0 and date_pos >= 0 and date_pos < cert_pos:
+            return True
+
+    date_field_values: list[str] = []
+    non_date_values: list[str] = []
+    identifier_field_values: list[str] = []
+    non_identifier_values: list[str] = []
+    for raw_key, raw_value in fields.items():
+        key = str(raw_key or "").strip().lower()
+        value = str(raw_value or "")
+        if _field_has_hint(key, _DATE_FIELD_HINTS):
+            date_field_values.append(value)
+        else:
+            non_date_values.append(value)
+        if _field_has_hint(key, _IDENTIFIER_FIELD_HINTS):
+            identifier_field_values.append(value)
+        else:
+            non_identifier_values.append(value)
+    date_in_unexpected_field = any(_TEXT_RECORD_ANY_DATE_PATTERN.search(value) for value in non_date_values)
+    date_field_valid = any(_contains_valid_record_date(value) for value in date_field_values)
+    identifier_in_unexpected_field = any(_extract_certificate_or_project_no(value) for value in non_identifier_values)
+    identifier_field_has_value = any(_extract_certificate_or_project_no(value) for value in identifier_field_values)
+    return (date_in_unexpected_field and not date_field_valid) or (
+        identifier_in_unexpected_field and not identifier_field_has_value
+    )
+
+
+def _field_has_hint(value: str, hints: tuple[str, ...]) -> bool:
+    normalized = str(value or "").strip().lower()
+    return any(hint in normalized for hint in hints)
 
 
 def _record_quality_signals(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -818,11 +905,13 @@ def _filter_records(
     *,
     query: str | None,
     table_id: str | None,
+    quality_signal: str | None,
     page_start: int | None,
     page_end: int | None,
 ) -> list[dict[str, Any]]:
     normalized_query = str(query or "").strip().lower()
     normalized_table_id = str(table_id or "").strip()
+    normalized_quality_signal = str(quality_signal or "").strip()
     start = int(page_start) if page_start is not None else None
     end = int(page_end) if page_end is not None else None
     if start is not None and end is not None and start > end:
@@ -831,6 +920,10 @@ def _filter_records(
     filtered: list[dict[str, Any]] = []
     for record in records:
         if normalized_table_id and str(record.get("table_id") or "") != normalized_table_id:
+            continue
+        if normalized_quality_signal and normalized_quality_signal not in {
+            str(code or "") for code in list(record.get("quality_signal_codes") or [])
+        }:
             continue
         record_start = _safe_int(record.get("page_start"), default=1)
         record_end = _safe_int(record.get("page_end"), default=record_start)
@@ -1092,6 +1185,8 @@ def _quality_signal_message(code: str) -> str:
         "table_formula_cells": "Table contains formula cells",
         "table_header_blank_cells": "Table header row has blank cells",
         "table_header_duplicate_values": "Table header row has duplicate values",
+        "column_shift_suspected": "Record fields may be shifted across columns",
+        "date_parse_failed": "Record date field could not be parsed",
         "record_field_missing": "Record is missing an expected field",
         "row_continuation_detected": "Record spans continuation lines",
         "record_boundary_uncertain": "Record boundary is uncertain",

@@ -41,6 +41,38 @@ class BootstrapRoutingTests(unittest.TestCase):
         self.assertEqual(tenant_b["records"][0]["record_id"], "record-2")
         self.assertEqual(store.get_document_records(doc_id="doc-views", tenant_id="missing"), ())
 
+    def test_inmemory_store_replaces_document_views_by_part_prefix(self) -> None:
+        store = InMemoryJobStore()
+        prefix = "doc:merged:part-1:"
+        store.save_document_views(
+            doc_id="doc",
+            pages=[
+                {"page_number": 1, "text": "old", "page_start": 1, "page_end": 1},
+                {"page_number": 2, "text": "keep", "page_start": 2, "page_end": 2},
+            ],
+            lines=[
+                {"line_id": f"{prefix}old:line:1", "text": "old", "page_number": 1},
+                {"line_id": "doc:merged:part-2:keep:line:1", "text": "keep", "page_number": 2},
+            ],
+            records=[
+                {"record_id": "old", "block_id": f"{prefix}old", "fields": {"text": "old"}, "page_start": 1},
+                {"record_id": "keep", "block_id": "doc:merged:part-2:keep", "fields": {"text": "keep"}, "page_start": 2},
+            ],
+        )
+
+        store.replace_document_views_by_prefix(
+            doc_id="doc",
+            item_id_prefix=prefix,
+            pages=[{"page_number": 1, "text": "new", "page_start": 1, "page_end": 1}],
+            lines=[{"line_id": f"{prefix}new:line:1", "text": "new", "page_number": 1}],
+            records=[{"record_id": "new", "block_id": f"{prefix}new", "fields": {"text": "new"}, "page_start": 1}],
+        )
+
+        views = store.get_document_views(doc_id="doc")
+        self.assertEqual([page["text"] for page in views["pages"]], ["new", "keep"])
+        self.assertEqual([line["text"] for line in views["lines"]], ["new", "keep"])
+        self.assertEqual([record["fields"]["text"] for record in views["records"]], ["new", "keep"])
+
     def test_unknown_scheme_raises(self) -> None:
         with self.assertRaises(ValueError):
             _build_job_store("mysql://localhost/db")

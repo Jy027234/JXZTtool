@@ -65,6 +65,15 @@ def _document_view_rows(
 
 
 def _document_view_item_id(*, view_type: str, item: Mapping[str, Any], position: int) -> str:
+    if view_type == "records":
+        block_id = item.get("block_id")
+        if block_id is None:
+            source_block_ids = item.get("source_block_ids")
+            if isinstance(source_block_ids, (list, tuple)):
+                block_id = next((block_id for block_id in source_block_ids if str(block_id or "").strip()), None)
+        record_id = str(item.get("record_id") or f"record:{position + 1}")
+        if block_id is not None and str(block_id).strip():
+            return f"{block_id}:record:{record_id}"
     candidate_keys = {
         "pages": ("page_id", "page_number"),
         "lines": ("line_id", "id"),
@@ -106,6 +115,22 @@ def _load_document_view_payloads(rows: Sequence[Sequence[Any]]) -> tuple[dict[st
         if isinstance(payload, dict):
             payloads.append(payload)
     return tuple(payloads)
+
+
+def _document_view_bounds(rows: Sequence[Sequence[Any]]) -> tuple[int | None, int | None]:
+    starts = [row[5] for row in rows if row[5] is not None]
+    ends = [row[6] for row in rows if row[6] is not None]
+    if not starts and not ends:
+        return None, None
+    start_values = [int(value) for value in starts + ends]
+    end_values = [int(value) for value in ends + starts]
+    return min(start_values), max(end_values)
+
+
+def _with_document_view_position(row: Sequence[Any], position: int) -> tuple[Any, ...]:
+    values = list(row)
+    values[3] = position
+    return tuple(values)
 
 
 class SQLiteJobStore(JobStore):
@@ -301,6 +326,62 @@ class SQLiteJobStore(JobStore):
                     rows,
                 )
 
+    def replace_document_views_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        item_id_prefix: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(item_id_prefix or "")
+        if not prefix:
+            self.save_document_views(
+                doc_id=doc_id,
+                pages=pages,
+                lines=lines,
+                records=records,
+                tenant_id=tenant_id,
+            )
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        updated_at = _utc_now()
+        rows_by_view = {
+            "pages": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="pages",
+                items=pages,
+                updated_at=updated_at,
+            ),
+            "lines": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="lines",
+                items=lines,
+                updated_at=updated_at,
+            ),
+            "records": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="records",
+                items=records,
+                updated_at=updated_at,
+            ),
+        }
+        with self._connect() as conn:
+            for view_type, rows in rows_by_view.items():
+                self._replace_document_view_rows(
+                    conn=conn,
+                    doc_id=doc_id,
+                    tenant_id=normalized_tenant,
+                    view_type=view_type,
+                    item_id_prefix=prefix,
+                    rows=rows,
+                )
+
     def get_document_views(
         self,
         *,
@@ -337,11 +418,81 @@ class SQLiteJobStore(JobStore):
                 SELECT payload_json
                 FROM document_views
                 WHERE doc_id = ? AND tenant_id = ? AND view_type = ?
-                ORDER BY position ASC
+                ORDER BY COALESCE(page_start, 0) ASC, position ASC
                 """,
                 (doc_id, normalized_tenant, normalized_view_type),
             ).fetchall()
         return _load_document_view_payloads(rows)
+
+    def _replace_document_view_rows(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        doc_id: str,
+        tenant_id: str,
+        view_type: str,
+        item_id_prefix: str,
+        rows: Sequence[Sequence[Any]],
+    ) -> None:
+        page_start, page_end = _document_view_bounds(rows)
+        params: list[Any] = [doc_id, tenant_id, view_type, len(item_id_prefix), item_id_prefix]
+        range_clause = ""
+        if page_start is not None and page_end is not None:
+            range_clause = " OR (page_start IS NOT NULL AND page_end IS NOT NULL AND page_start <= ? AND page_end >= ?)"
+            params.extend([page_end, page_start])
+        row = conn.execute(
+            f"""
+            SELECT MIN(position), MAX(position), COUNT(*)
+            FROM document_views
+            WHERE doc_id = ? AND tenant_id = ? AND view_type = ?
+              AND (substr(item_id, 1, ?) = ?{range_clause})
+            """,
+            tuple(params),
+        ).fetchone()
+        min_position = row[0] if row is not None else None
+        old_count = int(row[2] or 0) if row is not None else 0
+        conn.execute(
+            f"""
+            DELETE FROM document_views
+            WHERE doc_id = ? AND tenant_id = ? AND view_type = ?
+              AND (substr(item_id, 1, ?) = ?{range_clause})
+            """,
+            tuple(params),
+        )
+        if not rows:
+            return
+        if min_position is None:
+            max_row = conn.execute(
+                """
+                SELECT MAX(position)
+                FROM document_views
+                WHERE doc_id = ? AND tenant_id = ? AND view_type = ?
+                """,
+                (doc_id, tenant_id, view_type),
+            ).fetchone()
+            insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+        else:
+            insert_at = int(min_position)
+        delta = len(rows) - old_count
+        if delta and min_position is not None:
+            conn.execute(
+                """
+                UPDATE document_views
+                SET position = position + ?
+                WHERE doc_id = ? AND tenant_id = ? AND view_type = ? AND position > ?
+                """,
+                (delta, doc_id, tenant_id, view_type, int(min_position) + old_count - 1),
+            )
+        conn.executemany(
+            """
+            INSERT INTO document_views (
+                doc_id, tenant_id, view_type, position, item_id,
+                page_start, page_end, payload_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [_with_document_view_position(row, insert_at + index) for index, row in enumerate(rows)],
+        )
 
     def replace_blocks_by_prefix(
         self,
@@ -1385,6 +1536,62 @@ class PostgresJobStore(JobStore):
                     rows,
                 )
 
+    def replace_document_views_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        item_id_prefix: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(item_id_prefix or "")
+        if not prefix:
+            self.save_document_views(
+                doc_id=doc_id,
+                pages=pages,
+                lines=lines,
+                records=records,
+                tenant_id=tenant_id,
+            )
+            return
+        normalized_tenant = _normalize_tenant_id(tenant_id)
+        updated_at = _utc_now()
+        rows_by_view = {
+            "pages": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="pages",
+                items=pages,
+                updated_at=updated_at,
+            ),
+            "lines": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="lines",
+                items=lines,
+                updated_at=updated_at,
+            ),
+            "records": _document_view_rows(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                view_type="records",
+                items=records,
+                updated_at=updated_at,
+            ),
+        }
+        with self._connect() as conn, conn.cursor() as cur:
+            for view_type, rows in rows_by_view.items():
+                self._replace_document_view_rows(
+                    cur=cur,
+                    doc_id=doc_id,
+                    tenant_id=normalized_tenant,
+                    view_type=view_type,
+                    item_id_prefix=prefix,
+                    rows=rows,
+                )
+
     def get_document_views(
         self,
         *,
@@ -1421,12 +1628,84 @@ class PostgresJobStore(JobStore):
                 SELECT payload_json
                 FROM document_views
                 WHERE doc_id = %s AND tenant_id = %s AND view_type = %s
-                ORDER BY position ASC
+                ORDER BY COALESCE(page_start, 0) ASC, position ASC
                 """,
                 (doc_id, normalized_tenant, normalized_view_type),
             )
             rows = cur.fetchall()
         return _load_document_view_payloads(rows)
+
+    def _replace_document_view_rows(
+        self,
+        *,
+        cur: Any,
+        doc_id: str,
+        tenant_id: str,
+        view_type: str,
+        item_id_prefix: str,
+        rows: Sequence[Sequence[Any]],
+    ) -> None:
+        page_start, page_end = _document_view_bounds(rows)
+        params: list[Any] = [doc_id, tenant_id, view_type, len(item_id_prefix), item_id_prefix]
+        range_clause = ""
+        if page_start is not None and page_end is not None:
+            range_clause = " OR (page_start IS NOT NULL AND page_end IS NOT NULL AND page_start <= %s AND page_end >= %s)"
+            params.extend([page_end, page_start])
+        cur.execute(
+            f"""
+            SELECT MIN(position), MAX(position), COUNT(*)
+            FROM document_views
+            WHERE doc_id = %s AND tenant_id = %s AND view_type = %s
+              AND (LEFT(item_id, %s) = %s{range_clause})
+            """,
+            tuple(params),
+        )
+        row = cur.fetchone()
+        min_position = row[0] if row is not None else None
+        old_count = int(row[2] or 0) if row is not None else 0
+        cur.execute(
+            f"""
+            DELETE FROM document_views
+            WHERE doc_id = %s AND tenant_id = %s AND view_type = %s
+              AND (LEFT(item_id, %s) = %s{range_clause})
+            """,
+            tuple(params),
+        )
+        if not rows:
+            return
+        if min_position is None:
+            cur.execute(
+                """
+                SELECT MAX(position)
+                FROM document_views
+                WHERE doc_id = %s AND tenant_id = %s AND view_type = %s
+                """,
+                (doc_id, tenant_id, view_type),
+            )
+            max_row = cur.fetchone()
+            insert_at = int(max_row[0] + 1) if max_row is not None and max_row[0] is not None else 0
+        else:
+            insert_at = int(min_position)
+        delta = len(rows) - old_count
+        if delta and min_position is not None:
+            cur.execute(
+                """
+                UPDATE document_views
+                SET position = position + %s
+                WHERE doc_id = %s AND tenant_id = %s AND view_type = %s AND position > %s
+                """,
+                (delta, doc_id, tenant_id, view_type, int(min_position) + old_count - 1),
+            )
+        cur.executemany(
+            """
+            INSERT INTO document_views (
+                doc_id, tenant_id, view_type, position, item_id,
+                page_start, page_end, payload_json, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [_with_document_view_position(row, insert_at + index) for index, row in enumerate(rows)],
+        )
 
     def replace_blocks_by_prefix(
         self,

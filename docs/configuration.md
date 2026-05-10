@@ -632,6 +632,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0
 GET /v1/parse/documents/{doc_id}/records?query=TC001A
 GET /v1/parse/documents/{doc_id}/records?page_start=2000&page_end=2300
+GET /v1/parse/documents/{doc_id}/records?quality_signal=column_shift_suspected
 ```
 
 CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
@@ -653,7 +654,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts?state
 Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts/demo-doc-part-3/rerun"
 ```
 
-`/parts/plan` 会基于最新 PDF job 轻量探测页数，生成物理 part PDF 和子 job。每个子 job 使用独立 `part_doc_id`，避免覆盖父文档；子 part 完成后会刷新父文档的 blocks/chunks、structured projection、`parse_units` 和 part 状态。`/parts` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`。
+`/parts/plan` 会基于最新 PDF job 轻量探测页数，生成物理 part PDF 和子 job。每个子 job 使用独立 `part_doc_id`，避免覆盖父文档；子 part 完成后会刷新父文档的 blocks/chunks、structured projection、`parse_units`、document views 和 part 状态。当前 store 已支持按 part 前缀替换 `pages / lines / records`，因此单 part 复跑会优先局部替换对应视图；无法局部替换时再回退到父文档视图重建。`/parts` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`。
 
 文档级重跑仍保留：
 

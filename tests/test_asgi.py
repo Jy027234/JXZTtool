@@ -1474,6 +1474,12 @@ class ParseApiTests(unittest.TestCase):
                     "row_continuation_detected",
                     records_payload["items"][0]["quality_signal_codes"],
                 )
+                continuation_records = client.get(
+                    "/v1/parse/documents/doc-pdf-catalog-records/records",
+                    params={"quality_signal": "row_continuation_detected"},
+                )
+                self.assertEqual(continuation_records.status_code, 200)
+                self.assertEqual(continuation_records.json()["total"], 1)
 
                 exported_records = client.get(
                     "/v1/parse/documents/doc-pdf-catalog-records/exports",

@@ -905,6 +905,7 @@ class ApiRoutes:
                     offset=offset,
                     query=request.query_params.get("query"),
                     table_id=request.query_params.get("table_id"),
+                    quality_signal=request.query_params.get("quality_signal"),
                     page_start=page_start,
                     page_end=page_end,
                 )

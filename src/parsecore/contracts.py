@@ -132,6 +132,17 @@ class JobStore(Protocol):
         tenant_id: str | None = None,
     ) -> None: ...
 
+    def replace_document_views_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        item_id_prefix: str,
+        pages: Sequence[Mapping[str, Any]] = (),
+        lines: Sequence[Mapping[str, Any]] = (),
+        records: Sequence[Mapping[str, Any]] = (),
+        tenant_id: str | None = None,
+    ) -> None: ...
+
     def replace_blocks_by_prefix(
         self,
         *,

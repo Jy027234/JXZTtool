@@ -1637,6 +1637,9 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual([unit["page_start"] for unit in payload["parse_units"]], [1, 3])
             self.assertEqual([page["page_number"] for page in payload["pages"]], [1, 2, 3])
             self.assertEqual([page["text"] for page in payload["pages"]], ["one", "two", "three"])
+            views = runtime.job_store.get_document_views(doc_id="doc-partitioned")
+            self.assertEqual([page["text"] for page in views["pages"]], ["one", "two", "three"])
+            self.assertEqual(len(views["lines"]), 3)
 
     def test_execute_refuses_partition_parent_job(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
@@ -1757,6 +1760,33 @@ class ParseRuntimeTests(unittest.TestCase):
                     ),
                 ],
             )
+            runtime.job_store.save_document_views(
+                doc_id="doc-parent",
+                pages=[
+                    {"page_number": 1, "text": "old one", "page_start": 1, "page_end": 1},
+                    {"page_number": 2, "text": "keep", "page_start": 2, "page_end": 2},
+                ],
+                lines=[
+                    {"line_id": f"{prefix}old-a:line:1", "page_number": 1, "text": "old one"},
+                    {"line_id": "doc-parent:merged:part-2:keep:line:1", "page_number": 2, "text": "keep"},
+                ],
+                records=[
+                    {
+                        "record_id": f"{prefix}old-a:text:r1:l1",
+                        "block_id": f"{prefix}old-a",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "fields": {"text": "old one"},
+                    },
+                    {
+                        "record_id": "doc-parent:merged:part-2:keep:text:r1:l1",
+                        "block_id": "doc-parent:merged:part-2:keep",
+                        "page_start": 2,
+                        "page_end": 2,
+                        "fields": {"text": "keep"},
+                    },
+                ],
+            )
 
             runtime.job_store.replace_blocks_by_prefix(
                 doc_id="doc-parent",
@@ -1782,6 +1812,21 @@ class ParseRuntimeTests(unittest.TestCase):
                     )
                 ],
             )
+            runtime.job_store.replace_document_views_by_prefix(
+                doc_id="doc-parent",
+                item_id_prefix=prefix,
+                pages=[{"page_number": 1, "text": "new", "page_start": 1, "page_end": 1}],
+                lines=[{"line_id": f"{prefix}new:line:1", "page_number": 1, "text": "new"}],
+                records=[
+                    {
+                        "record_id": f"{prefix}new:text:r1:l1",
+                        "block_id": f"{prefix}new",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "fields": {"text": "new"},
+                    }
+                ],
+            )
 
             self.assertEqual(
                 [block.block_id for block in runtime.job_store.get_blocks(doc_id="doc-parent")],
@@ -1791,6 +1836,10 @@ class ParseRuntimeTests(unittest.TestCase):
                 [chunk.chunk_id for chunk in runtime.job_store.get_chunks(doc_id="doc-parent")],
                 [f"{prefix}new", "doc-parent:merged:part-2:keep"],
             )
+            views = runtime.job_store.get_document_views(doc_id="doc-parent")
+            self.assertEqual([page["text"] for page in views["pages"]], ["new", "keep"])
+            self.assertEqual([line["text"] for line in views["lines"]], ["new", "keep"])
+            self.assertEqual([record["fields"]["text"] for record in views["records"]], ["new", "keep"])
 
     def test_rerun_pdf_part_creates_replacement_child_job(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
@@ -1835,6 +1884,9 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertNotEqual(after_part_two["index_version"], before_part_two["index_version"])
             self.assertEqual(after_part_two["page_range"], {"start": 2, "end": 2})
             self.assertTrue(after_part_two["chunk_ids"])
+            views = runtime.job_store.get_document_views(doc_id="doc-rerun-part")
+            self.assertEqual([page["text"] for page in views["pages"]], ["one", "two"])
+            self.assertEqual(len(views["lines"]), 2)
 
     def test_batch_rerun_defaults_to_failed_parts_only(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

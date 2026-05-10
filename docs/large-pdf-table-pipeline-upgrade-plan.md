@@ -334,6 +334,12 @@ default_exports = ["sqlite", "jsonl", "csv", "xlsx"]
 - `large-pdf-catalog` / `large-pdf-ledger` 下已支持从 PDF 文本块按“序号开头行 + 续行”聚合 text-derived records，并输出 `record_field_missing`、`row_continuation_detected` 等记录级质量信号。
 - 解析完成后已将 `pages / lines / records` 作为 document views 持久化到 JobStore，SQLite、Postgres、InMemory 三种 store 具备同名读写方法；records API 会优先读取持久化结果，缺失时回退到现有 block 投影。
 
+2026-05-10 第二轮继续落地：
+
+- records 质量信号新增 `column_shift_suspected` 与 `date_parse_failed`，可标记日期出现在非日期字段、日期字段无法解析、证件编号/日期顺序异常等疑似错位情况。
+- records 查询新增 `quality_signal` 过滤参数，可直接读取疑似错列、字段缺失、续行等记录集合。
+- document views 新增 `replace_document_views_by_prefix`，PDF part 增量刷新时会优先按 `doc_id:merged:{part_id}:` 前缀局部替换 `pages / lines / records`，为单 part 复跑后不重建全量视图打底。
+
 ## 风险与应对
 
 | 风险 | 应对 |
@@ -351,7 +357,7 @@ default_exports = ["sqlite", "jsonl", "csv", "xlsx"]
 - [x] 可产出并持久化 pages、lines、records 三层数据。
 - [x] records 支持分页查询和关键词查询。
 - [x] 可导出 Excel、SQLite、CSV、JSONL。
-- [ ] 质量报告包含列错位、字段缺失、日期异常、边界不确定等信号。
+- [x] 质量报告包含列错位、字段缺失、日期异常、边界不确定等基础信号。
 - [ ] 异常 part 可单独复跑，非异常 part 结果保持不变。
 - [ ] perf baseline 能对比页数、行数、记录数、章节分布、耗时和导出结果。
 

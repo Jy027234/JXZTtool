@@ -33,6 +33,69 @@ def _prefix_insert_index(*, existing_ids: Sequence[str], retained_ids: Sequence[
     )
 
 
+def _view_item_id(view_type: str, item: Mapping[str, object], position: int) -> str:
+    if view_type == "records":
+        block_id = item.get("block_id")
+        if block_id is None:
+            source_block_ids = item.get("source_block_ids")
+            if isinstance(source_block_ids, (list, tuple)):
+                block_id = next((value for value in source_block_ids if str(value or "").strip()), None)
+        record_id = str(item.get("record_id") or f"record:{position + 1}")
+        if block_id is not None and str(block_id).strip():
+            return f"{block_id}:record:{record_id}"
+    if view_type == "pages" and item.get("page_number") is not None:
+        return f"page:{item.get('page_number')}"
+    if view_type == "lines" and item.get("line_id") is not None:
+        return str(item.get("line_id"))
+    return str(item.get("id") or f"{view_type}:{position + 1}")
+
+
+def _view_page_range(item: Mapping[str, object]) -> tuple[int | None, int | None]:
+    page_start = item.get("page_start")
+    page_end = item.get("page_end")
+    page_number = item.get("page_number", item.get("page"))
+    if page_start is None and page_number is not None:
+        page_start = page_number
+    if page_end is None:
+        page_end = page_start
+    return _optional_int(page_start), _optional_int(page_end)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _view_ranges_overlap(item: Mapping[str, object], range_start: int | None, range_end: int | None) -> bool:
+    if range_start is None or range_end is None:
+        return False
+    item_start, item_end = _view_page_range(item)
+    if item_start is None and item_end is None:
+        return False
+    if item_start is None:
+        item_start = item_end
+    if item_end is None:
+        item_end = item_start
+    return int(item_start or 0) <= range_end and int(item_end or 0) >= range_start
+
+
+def _view_bounds(items: Sequence[Mapping[str, object]]) -> tuple[int | None, int | None]:
+    values: list[int] = []
+    for item in items:
+        start, end = _view_page_range(item)
+        if start is not None:
+            values.append(start)
+        if end is not None:
+            values.append(end)
+    if not values:
+        return None, None
+    return min(values), max(values)
+
+
 class StubParser(ParserAdapter):
     def __init__(self, *, name: str, media_types: Sequence[str], extensions: Sequence[str]) -> None:
         self.name = name
@@ -355,6 +418,48 @@ class InMemoryJobStore(JobStore):
         self.document_views_by_doc[(tenant, doc_id, "lines")] = tuple(dict(item) for item in lines)
         self.document_views_by_doc[(tenant, doc_id, "records")] = tuple(dict(item) for item in records)
 
+    def replace_document_views_by_prefix(
+        self,
+        *,
+        doc_id: str,
+        item_id_prefix: str,
+        pages: Sequence[Mapping[str, object]] = (),
+        lines: Sequence[Mapping[str, object]] = (),
+        records: Sequence[Mapping[str, object]] = (),
+        tenant_id: str | None = None,
+    ) -> None:
+        prefix = str(item_id_prefix or "")
+        if not prefix:
+            self.save_document_views(
+                doc_id=doc_id,
+                pages=pages,
+                lines=lines,
+                records=records,
+                tenant_id=tenant_id,
+            )
+            return
+        self._replace_document_view_items(
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            view_type="pages",
+            items=tuple(dict(item) for item in pages),
+            item_id_prefix=prefix,
+        )
+        self._replace_document_view_items(
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            view_type="lines",
+            items=tuple(dict(item) for item in lines),
+            item_id_prefix=prefix,
+        )
+        self._replace_document_view_items(
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            view_type="records",
+            items=tuple(dict(item) for item in records),
+            item_id_prefix=prefix,
+        )
+
     def get_document_views(
         self,
         *,
@@ -384,7 +489,50 @@ class InMemoryJobStore(JobStore):
         view_type: str,
     ) -> tuple[dict[str, object], ...]:
         key = ((tenant_id or "default"), doc_id, str(view_type or "").strip().lower())
-        return tuple(dict(item) for item in self.document_views_by_doc.get(key, ()))
+        rows = tuple(dict(item) for item in self.document_views_by_doc.get(key, ()))
+        return tuple(
+            sorted(
+                rows,
+                key=lambda item: (
+                    _view_page_range(item)[0] if _view_page_range(item)[0] is not None else 0,
+                    _view_item_id(str(view_type or "").strip().lower(), item, 0),
+                ),
+            )
+        )
+
+    def _replace_document_view_items(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None,
+        view_type: str,
+        items: tuple[dict[str, object], ...],
+        item_id_prefix: str,
+    ) -> None:
+        tenant = tenant_id or "default"
+        key = (tenant, doc_id, view_type)
+        existing = tuple(dict(item) for item in self.document_views_by_doc.get(key, ()))
+        range_start, range_end = _view_bounds(items)
+        retained = tuple(
+            item
+            for index, item in enumerate(existing)
+            if not _view_item_id(view_type, item, index).startswith(item_id_prefix)
+            and not _view_ranges_overlap(item, range_start, range_end)
+        )
+        deleted_ids = [
+            _view_item_id(view_type, item, index)
+            for index, item in enumerate(existing)
+            if _view_item_id(view_type, item, index).startswith(item_id_prefix)
+            or _view_ranges_overlap(item, range_start, range_end)
+        ]
+        insert_at = _prefix_insert_index(
+            existing_ids=[_view_item_id(view_type, item, index) for index, item in enumerate(existing)],
+            retained_ids=[_view_item_id(view_type, item, index) for index, item in enumerate(retained)],
+            prefix=item_id_prefix,
+        )
+        if not deleted_ids and range_start is not None:
+            insert_at = len([item for item in retained if (_view_page_range(item)[0] or 0) < range_start])
+        self.document_views_by_doc[key] = retained[:insert_at] + items + retained[insert_at:]
 
     def replace_blocks_by_prefix(
         self,

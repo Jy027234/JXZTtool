@@ -697,10 +697,19 @@ class ParseRuntime:
         if current is None or current.claim_token != claim_token or current.state not in _ACTIVE_PART_STATES:
             raise RuntimeError("stale_claim")
 
-    def _persist_document_views(self, *, job: Any, blocks: Sequence[Any]) -> None:
+    def _persist_document_views(
+        self,
+        *,
+        job: Any,
+        blocks: Sequence[Any],
+        replace_prefix: str | None = None,
+    ) -> bool:
         save_document_views = getattr(self.job_store, "save_document_views", None)
-        if not callable(save_document_views):
-            return
+        replace_document_views = getattr(self.job_store, "replace_document_views_by_prefix", None)
+        if replace_prefix and not callable(replace_document_views):
+            return False
+        if not replace_prefix and not callable(save_document_views):
+            return False
         try:
             from .api_payloads import _document_view_rows
 
@@ -712,13 +721,24 @@ class ParseRuntime:
                 "partition_parts": [],
             }
             views = _document_view_rows(snapshot)
-            save_document_views(
-                doc_id=str(getattr(job, "doc_id", "")),
-                tenant_id=getattr(job, "tenant_id", None),
-                pages=views.get("pages", []),
-                lines=views.get("lines", []),
-                records=views.get("records", []),
-            )
+            if replace_prefix:
+                replace_document_views(
+                    doc_id=str(getattr(job, "doc_id", "")),
+                    tenant_id=getattr(job, "tenant_id", None),
+                    item_id_prefix=replace_prefix,
+                    pages=views.get("pages", []),
+                    lines=views.get("lines", []),
+                    records=views.get("records", []),
+                )
+            else:
+                save_document_views(
+                    doc_id=str(getattr(job, "doc_id", "")),
+                    tenant_id=getattr(job, "tenant_id", None),
+                    pages=views.get("pages", []),
+                    lines=views.get("lines", []),
+                    records=views.get("records", []),
+                )
+            return True
         except Exception as exc:  # pragma: no cover - defensive observability path
             self.event_logger.log(
                 "document_views_persist_failed",
@@ -733,6 +753,7 @@ class ParseRuntime:
                 doc_id=str(getattr(job, "doc_id", "") or ""),
                 details={"error": str(exc)},
             )
+            return False
 
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
@@ -1125,9 +1146,10 @@ class ParseRuntime:
             if str(part_id).strip()
         )
         views_dirty = False
+        views_updated = False
         blocks_for_views: tuple[Any, ...] = ()
         if changed_ids:
-            views_dirty = self._refresh_partitioned_parent_incremental(
+            views_dirty, views_updated = self._refresh_partitioned_parent_incremental(
                 parent_doc_id=doc_id,
                 parent_job=parent_job,
                 child_jobs=child_jobs,
@@ -1164,7 +1186,7 @@ class ParseRuntime:
                 state=new_state,
                 clear_claim=True,
             )
-        if views_dirty:
+        if views_dirty and not views_updated:
             if not blocks_for_views:
                 blocks_for_views = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
             self._persist_document_views(job=parent_job, blocks=blocks_for_views)
@@ -1177,7 +1199,7 @@ class ParseRuntime:
         parent_job: Any,
         child_jobs: Sequence[Any],
         changed_part_ids: Sequence[str],
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         child_by_part_id = {
             str((getattr(job, "options", {}) or {}).get("part_id") or job.doc_id): job
             for job in child_jobs
@@ -1206,9 +1228,10 @@ class ParseRuntime:
                     document=None,
                     index_manifest=index_manifest,
                 )
-                return True
-            return False
+                return True, False
+            return False, False
 
+        views_updated_all = True
         for part_id in changed_part_ids:
             child = child_by_part_id.get(str(part_id))
             if child is None or child.state != ParseJobState.DONE:
@@ -1232,10 +1255,14 @@ class ParseRuntime:
                 chunk_id_prefix=prefix,
                 tenant_id=parent_job.tenant_id,
             )
+            views_updated_all = (
+                self._persist_document_views(job=parent_job, blocks=blocks, replace_prefix=prefix)
+                and views_updated_all
+            )
             replaced.append((prefix, chunks))
 
         if not replaced:
-            return False
+            return False, False
 
         all_blocks = tuple(self.job_store.get_blocks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
         all_chunks = tuple(self.job_store.get_chunks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
@@ -1263,7 +1290,7 @@ class ParseRuntime:
                 document=None,
                 index_manifest=index_manifest,
             )
-        return True
+        return True, views_updated_all
 
     def _start_pdf_part_job(
         self,
