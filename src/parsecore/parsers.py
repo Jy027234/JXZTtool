@@ -1199,6 +1199,9 @@ class PdfTextParser(ParserAdapter):
         self._merge_highlights_enabled = bool(
             post_process.get("merge_highlights_entries", True)
         )
+        self._merge_cross_page_enabled = bool(
+            post_process.get("merge_cross_page_paragraphs", True)
+        )
         # A3 dual-channel: use pdfplumber for layout-aware tables + text.
         # Default off so existing pypdf-only behaviour is preserved.
         self._dual_channel_enabled = bool(
@@ -1278,6 +1281,7 @@ class PdfTextParser(ParserAdapter):
             self._merge_table_enabled = False
             self._merge_figure_caption_enabled = False
             self._merge_highlights_enabled = False
+            self._merge_cross_page_enabled = False
 
     def supports(self, *, media_type: str | None, suffix: str) -> bool:
         normalized_type = (media_type or "").lower()
@@ -1597,6 +1601,8 @@ class PdfTextParser(ParserAdapter):
                     )
                 )
                 position += 1
+        if self._merge_cross_page_enabled:
+            blocks = _merge_cross_page_paragraph_blocks(blocks)
         if len(blocks) == 1:
             raise RuntimeError("No extractable text found in PDF")
         return tuple(blocks)
@@ -1616,6 +1622,158 @@ def _split_pdf_page_text(text: str) -> list[str]:
     if current_lines:
         paragraphs.append("\n".join(current_lines))
     return paragraphs
+
+
+_PDF_CROSS_PAGE_TERMINAL_PATTERN = re.compile(r"[。！？.!?][\"'”’）)\]\s]*$")
+_PDF_CROSS_PAGE_CONTINUATION_REJECT_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"第\s*[\d一二三四五六七八九十百千]+\s*[章节条款]|"
+    r"\d+(?:\.\d+)*[.)、]?\s+\S|"
+    r"[A-Z]\.\s+\S|"
+    r"\([0-9A-Za-z]\)\s+\S|"
+    r"[•·\-–—]\s+\S|"
+    r"NOTE[:：]|WARNING[:：]|CAUTION[:：]"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _merge_cross_page_paragraph_blocks(blocks: Sequence[Block]) -> list[Block]:
+    """Merge obvious paragraph continuations split only by a PDF page break."""
+
+    if len(blocks) <= 2:
+        return list(blocks)
+
+    merged: list[Block] = []
+    for block in blocks:
+        if merged and _should_merge_cross_page_blocks(merged[-1], block):
+            previous = merged[-1]
+            previous_page = _block_page(previous)
+            current_page = _block_page(block)
+            metadata = dict(previous.metadata)
+            metadata["page_end"] = current_page
+            metadata["cross_page_continuation"] = True
+            block_ids = list(metadata.get("merged_block_ids") or [previous.block_id])
+            block_ids.append(block.block_id)
+            metadata["merged_block_ids"] = block_ids
+            merged[-1] = Block(
+                block_id=previous.block_id,
+                doc_id=previous.doc_id,
+                type=previous.type,
+                content=_join_cross_page_paragraph_text(previous.content, block.content),
+                metadata=metadata,
+            )
+            continue
+        merged.append(block)
+    return merged
+
+
+def _should_merge_cross_page_blocks(previous: Block, current: Block) -> bool:
+    if previous.type != BlockType.PARAGRAPH or current.type != BlockType.PARAGRAPH:
+        return False
+    if previous.doc_id != current.doc_id:
+        return False
+    previous_page = _block_page(previous)
+    current_page = _block_page(current)
+    if previous_page is None or current_page is None:
+        return False
+    previous_end_page = _block_page_end(previous) or previous_page
+    if current_page != previous_end_page + 1:
+        return False
+    if not _is_body_paragraph_block(previous) or not _is_body_paragraph_block(current):
+        return False
+
+    left = previous.content.strip()
+    right = current.content.strip()
+    if len(left) < 12 or len(right) < 2:
+        return False
+    if _PDF_CROSS_PAGE_TERMINAL_PATTERN.search(left):
+        return False
+    if _PDF_CROSS_PAGE_CONTINUATION_REJECT_PATTERN.match(right):
+        return False
+    if _looks_like_pdf_heading(right):
+        return False
+    if _starts_with_sentence_continuation(right):
+        return True
+    if left[-1:] in {",", "，", "、", ";", "；", ":", "：", "-", "‑", "–", "—", "/"}:
+        return True
+    return _is_cjk(left[-1:]) and _is_cjk(right[:1])
+
+
+def _is_body_paragraph_block(block: Block) -> bool:
+    role = str(block.metadata.get("semantic_role") or SemanticRole.PARAGRAPH.value)
+    if role != SemanticRole.PARAGRAPH.value:
+        return False
+    page_type = str(block.metadata.get("page_type") or "body")
+    return page_type not in {"toc", "front_matter", "signature"}
+
+
+def _block_page(block: Block) -> int | None:
+    try:
+        return int(block.metadata.get("page"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _block_page_end(block: Block) -> int | None:
+    try:
+        return int(block.metadata.get("page_end"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _join_cross_page_paragraph_text(left: str, right: str) -> str:
+    left = left.rstrip()
+    right = right.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.endswith(("-", "‑")):
+        return left[:-1] + right
+    separator = " " if _needs_boundary_space(left[-1], right[0]) else ""
+    return f"{left}{separator}{right}"
+
+
+def _needs_boundary_space(left_char: str, right_char: str) -> bool:
+    if not left_char or not right_char:
+        return False
+    if right_char in "，,。.!?！？；;：:、)]}）】":
+        return False
+    if left_char in "([（【":
+        return False
+    if _is_cjk(left_char) or _is_cjk(right_char):
+        return False
+    return left_char.isalnum() and right_char.isalnum()
+
+
+def _is_cjk(char: str) -> bool:
+    return bool(char) and "\u3400" <= char <= "\u9fff"
+
+
+def _starts_with_sentence_continuation(text: str) -> bool:
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    first = stripped[0]
+    return first.islower() or _is_cjk(first)
+
+
+def _looks_like_pdf_heading(text: str) -> bool:
+    compact = " ".join(text.split())
+    if len(compact) > 80:
+        return False
+    if _DOCX_CHAPTER_HEADING_PATTERN.match(compact):
+        return True
+    if _DOCX_NUMBERED_HEADING_PATTERN.match(compact):
+        return True
+    return bool(
+        re.match(
+            r"^(?:Chapter|Section|Appendix|Annex)\s+[A-Z0-9一二三四五六七八九十]",
+            compact,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _build_page_content_sequence(

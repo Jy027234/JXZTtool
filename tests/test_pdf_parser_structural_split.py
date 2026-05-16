@@ -4,9 +4,11 @@ import unittest
 
 from parsecore.parsers import (
     PdfTextParser,
+    _merge_cross_page_paragraph_blocks,
     _split_inline_structural_items,
     _split_structural_items,
 )
+from parsecore.models import Block, BlockType, SemanticRole
 
 
 _MAINTENANCE_PARAGRAPH = "\n".join(
@@ -105,6 +107,7 @@ class PdfTextParserStructuralOptionTests(unittest.TestCase):
         self.assertEqual(parser._structural_min_lines, 10)
         self.assertTrue(parser._split_inline_structural_enabled)
         self.assertEqual(parser._inline_structural_min_length, 120)
+        self.assertTrue(parser._merge_cross_page_enabled)
 
     def test_option_can_disable_structural_split(self) -> None:
         parser = PdfTextParser(
@@ -116,6 +119,7 @@ class PdfTextParserStructuralOptionTests(unittest.TestCase):
                     "structural_min_lines_trigger": 25,
                     "split_inline_structural_items": False,
                     "inline_structural_min_length_trigger": 250,
+                    "merge_cross_page_paragraphs": False,
                 }
             },
         )
@@ -123,6 +127,121 @@ class PdfTextParserStructuralOptionTests(unittest.TestCase):
         self.assertEqual(parser._structural_min_lines, 25)
         self.assertFalse(parser._split_inline_structural_enabled)
         self.assertEqual(parser._inline_structural_min_length, 250)
+        self.assertFalse(parser._merge_cross_page_enabled)
+
+    def test_full_fidelity_disables_cross_page_paragraph_merge(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"fidelity_profile": "full_fidelity"},
+        )
+        self.assertFalse(parser._merge_cross_page_enabled)
+
+
+class MergeCrossPageParagraphBlocksTests(unittest.TestCase):
+    def test_merges_body_paragraph_continuation_across_pages(self) -> None:
+        blocks = [
+            Block(
+                block_id="doc-title",
+                doc_id="doc-cross-page",
+                type=BlockType.TITLE,
+                content="Manual",
+                metadata={"page": 1, "semantic_role": SemanticRole.TITLE.value},
+            ),
+            Block(
+                block_id="doc-p-1",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="8. 关键 DME。如果某个 DME 不可用时，将导致 DME/DME 不能提供满足导航服务，则该 DME 台",
+                metadata={
+                    "page": 13,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
+            ),
+            Block(
+                block_id="doc-p-2",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="被称作关键 DME。这里假定飞机的 RNAV 系统满足最低标准。",
+                metadata={
+                    "page": 14,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
+            ),
+        ]
+
+        merged = _merge_cross_page_paragraph_blocks(blocks)
+
+        self.assertEqual(len(merged), 2)
+        self.assertIn("DME 台被称作关键 DME", merged[1].content)
+        self.assertEqual(merged[1].metadata["page"], 13)
+        self.assertEqual(merged[1].metadata["page_end"], 14)
+        self.assertTrue(merged[1].metadata["cross_page_continuation"])
+        self.assertEqual(merged[1].metadata["merged_block_ids"], ["doc-p-1", "doc-p-2"])
+
+    def test_keeps_new_numbered_item_separate_across_pages(self) -> None:
+        blocks = [
+            Block(
+                block_id="doc-p-1",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="这里假定飞机的 RNAV 系统满足 AC-91FS-2008-09 中规定的最低标准",
+                metadata={
+                    "page": 14,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
+            ),
+            Block(
+                block_id="doc-p-2",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="1. RNAV 航路。基于 RNAV 飞行方法划设的航路。",
+                metadata={
+                    "page": 15,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
+            ),
+        ]
+
+        merged = _merge_cross_page_paragraph_blocks(blocks)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].content, blocks[0].content)
+        self.assertEqual(merged[1].content, blocks[1].content)
+
+    def test_keeps_headings_separate_across_pages(self) -> None:
+        blocks = [
+            Block(
+                block_id="doc-p-1",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="前一页最后一个正文段落没有标点",
+                metadata={
+                    "page": 2,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.PARAGRAPH.value,
+                },
+            ),
+            Block(
+                block_id="doc-p-2",
+                doc_id="doc-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="第 3 章 维修能力说明",
+                metadata={
+                    "page": 3,
+                    "page_type": "body",
+                    "semantic_role": SemanticRole.BODY_SECTION.value,
+                },
+            ),
+        ]
+
+        merged = _merge_cross_page_paragraph_blocks(blocks)
+
+        self.assertEqual(len(merged), 2)
 
 
 if __name__ == "__main__":
