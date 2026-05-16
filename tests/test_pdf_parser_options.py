@@ -9,7 +9,14 @@ from unittest.mock import patch
 from parsecore.config import OcrProviderSettings
 from parsecore.models import ParseRequest
 from parsecore.ocr import OcrRequestError
-from parsecore.parsers import ImageOcrParser, PdfTextParser, _ocr_fallback_reason_for_page, build_parser
+from parsecore.parsers import (
+    ImageOcrParser,
+    PdfTextParser,
+    _extract_pdf_figure_regions,
+    _filter_repeated_pdf_figure_regions,
+    _ocr_fallback_reason_for_page,
+    build_parser,
+)
 
 
 class _FakePdfPage:
@@ -36,11 +43,30 @@ class _FakeTable:
         return "\n".join("\t".join(cell for cell in row) for row in self.cells)
 
 
+class _FakePdfImagePage:
+    def __init__(
+        self,
+        *,
+        width: float,
+        height: float,
+        images: list[dict[str, object]],
+        words: list[dict[str, object]] | None = None,
+    ) -> None:
+        self.width = width
+        self.height = height
+        self.images = images
+        self._words = words or []
+
+    def extract_words(self) -> list[dict[str, object]]:
+        return list(self._words)
+
+
 def _fake_page_layout(
     *,
     text_without_tables: str,
     ocr_fallback_reason: str | None,
     tables: list[object] | None = None,
+    figure_regions: list[object] | None = None,
     column_count_hint: int = 1,
     layout_reading_order_applied: bool = False,
     layout_reading_order_strategy: str | None = None,
@@ -48,6 +74,7 @@ def _fake_page_layout(
     return SimpleNamespace(
         text_without_tables=text_without_tables,
         tables=tables or [],
+        figure_regions=figure_regions or [],
         width=100.0,
         height=100.0,
         column_count_hint=column_count_hint,
@@ -56,13 +83,25 @@ def _fake_page_layout(
         layout_elapsed_s=0.0,
         ocr_attempt_reason=ocr_fallback_reason,
         ocr_fallback_reason=ocr_fallback_reason,
+        ocr_acceptance_reason=None,
+        ocr_rejection_reason=None,
         ocr_error_reason=None,
         ocr_engine_init_elapsed_s=0.0,
         ocr_render_elapsed_s=0.0,
+        ocr_input_prepare_elapsed_s=0.0,
+        ocr_engine_exec_elapsed_s=0.0,
         ocr_call_elapsed_s=0.0,
         ocr_provider_elapsed_s=0.0,
+        ocr_provider_det_elapsed_s=0.0,
+        ocr_provider_cls_elapsed_s=0.0,
+        ocr_provider_rec_elapsed_s=0.0,
+        ocr_provider_crop_count=0,
+        ocr_provider_cls_rotate_positive_count=0,
+        ocr_provider_cls_rotate_high_count=0,
         ocr_postprocess_elapsed_s=0.0,
         ocr_total_elapsed_s=0.0,
+        native_text_token_count=0,
+        final_text_token_count=0,
     )
 
 
@@ -357,6 +396,186 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertEqual(blocks[2].metadata["table_index"], 1)
         self.assertEqual(blocks[3].type.value, "paragraph")
         self.assertEqual(blocks[3].content, "Closing paragraph")
+
+    def test_figures_are_emitted_as_image_blocks_by_vertical_anchor(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "layout_reading_order": True}},
+        )
+
+        def fake_extract_pdfplumber_layout(*_args, **_kwargs):
+            return [
+                _fake_page_layout(
+                    text_without_tables="Intro paragraph\n\nClosing paragraph",
+                    ocr_fallback_reason=None,
+                    figure_regions=[
+                        SimpleNamespace(
+                            bbox=(12.0, 38.0, 88.0, 72.0),
+                            description="Figure 2-1. Flight deck layout",
+                            source_kind="pdf-image",
+                            object_name="Image001",
+                            caption_confidence=0.95,
+                            figure_kind="diagram",
+                        )
+                    ],
+                    column_count_hint=1,
+                    layout_reading_order_applied=True,
+                    layout_reading_order_strategy="column-reflow",
+                )
+            ]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-figure-order",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                blocks = parser.parse(request)
+
+        self.assertEqual(blocks[1].type.value, "paragraph")
+        self.assertEqual(blocks[2].type.value, "image")
+        self.assertEqual(blocks[2].content, "Figure 2-1. Flight deck layout")
+        self.assertEqual(blocks[2].metadata["semantic_role"], "image")
+        self.assertEqual(blocks[2].metadata["bbox"], (12.0, 38.0, 88.0, 72.0))
+        self.assertEqual(blocks[2].metadata["source_kind"], "pdf-image")
+        self.assertEqual(blocks[2].metadata["caption_confidence"], 0.95)
+        self.assertEqual(blocks[2].metadata["figure_kind"], "diagram")
+        self.assertEqual(blocks[3].type.value, "paragraph")
+
+    def test_pdf_image_extraction_filters_margin_noise(self) -> None:
+        page = _FakePdfImagePage(
+            width=600.0,
+            height=800.0,
+            images=[
+                {"x0": 50.0, "x1": 150.0, "top": -8.0, "bottom": 36.0, "name": "LogoTop"},
+                {"x0": 460.0, "x1": 560.0, "top": 24.0, "bottom": 72.0, "name": "LogoHeader"},
+                {"x0": 50.0, "x1": 150.0, "top": 735.0, "bottom": 780.0, "name": "LogoFooter"},
+            ],
+        )
+
+        regions = _extract_pdf_figure_regions(page, page_number=3, table_bboxes=())
+
+        self.assertEqual(regions, [])
+
+    def test_pdf_image_extraction_keeps_captioned_structure_figures(self) -> None:
+        page = _FakePdfImagePage(
+            width=600.0,
+            height=800.0,
+            images=[
+                {"x0": 80.0, "x1": 520.0, "top": 48.0, "bottom": 190.0, "name": "ImageStruct"},
+            ],
+            words=[
+                {
+                    "text": "图 2-1 质量体系结构图",
+                    "x0": 170.0,
+                    "x1": 430.0,
+                    "top": 198.0,
+                    "bottom": 214.0,
+                },
+            ],
+        )
+
+        regions = _extract_pdf_figure_regions(page, page_number=2, table_bboxes=())
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].description, "图 2-1 质量体系结构图")
+        self.assertEqual(regions[0].figure_kind, "structure")
+        self.assertGreaterEqual(regions[0].caption_confidence, 0.8)
+
+    def test_pdf_image_extraction_keeps_captioned_full_page_figures(self) -> None:
+        page = _FakePdfImagePage(
+            width=600.0,
+            height=800.0,
+            images=[
+                {"x0": 12.0, "x1": 588.0, "top": 16.0, "bottom": 720.0, "name": "FullPageFlow"},
+            ],
+            words=[
+                {
+                    "text": "Figure 4-2. Maintenance workflow diagram",
+                    "x0": 120.0,
+                    "x1": 480.0,
+                    "top": 732.0,
+                    "bottom": 748.0,
+                },
+            ],
+        )
+
+        regions = _extract_pdf_figure_regions(page, page_number=4, table_bboxes=())
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].description, "Figure 4-2. Maintenance workflow diagram")
+        self.assertEqual(regions[0].figure_kind, "flowchart")
+        self.assertGreaterEqual(regions[0].caption_confidence, 0.8)
+
+    def test_pdf_image_extraction_keeps_captioned_footer_workflow_figures(self) -> None:
+        page = _FakePdfImagePage(
+            width=600.0,
+            height=800.0,
+            images=[
+                {"x0": 170.0, "x1": 430.0, "top": 642.0, "bottom": 702.0, "name": "FooterWorkflow"},
+            ],
+            words=[
+                {
+                    "text": "Maintenance workflow - approval process",
+                    "x0": 155.0,
+                    "x1": 445.0,
+                    "top": 612.0,
+                    "bottom": 626.0,
+                },
+            ],
+        )
+
+        regions = _extract_pdf_figure_regions(page, page_number=7, table_bboxes=())
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].description, "Maintenance workflow - approval process")
+        self.assertEqual(regions[0].figure_kind, "flowchart")
+        self.assertGreaterEqual(regions[0].caption_confidence, 0.8)
+
+    def test_repeated_generic_small_images_are_filtered_but_captioned_figures_remain(self) -> None:
+        repeated_bbox = (250.0, 300.0, 300.0, 350.0)
+        layouts = [
+            SimpleNamespace(
+                width=600.0,
+                height=800.0,
+                figure_regions=[
+                    SimpleNamespace(
+                        bbox=repeated_bbox,
+                        description=f"第 {index} 页图示区域",
+                        caption_confidence=0.15,
+                        figure_kind="generic",
+                    )
+                ],
+            )
+            for index in range(1, 4)
+        ]
+        layouts.append(
+            SimpleNamespace(
+                width=600.0,
+                height=800.0,
+                figure_regions=[
+                    SimpleNamespace(
+                        bbox=repeated_bbox,
+                        description="Figure 4-1. Fuel flow diagram",
+                        caption_confidence=0.9,
+                        figure_kind="diagram",
+                    )
+                ],
+            )
+        )
+
+        _filter_repeated_pdf_figure_regions(layouts)
+
+        self.assertTrue(all(not layout.figure_regions for layout in layouts[:3]))
+        self.assertEqual(len(layouts[3].figure_regions), 1)
+        self.assertEqual(layouts[3].figure_regions[0].description, "Figure 4-1. Fuel flow diagram")
 
     def test_request_enable_ocr_false_disables_ocr_callback_even_if_config_default_on(self) -> None:
         parser = PdfTextParser(

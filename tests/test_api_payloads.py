@@ -3,11 +3,60 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from parsecore.api_payloads import _document_projection, _document_records_projection
-from parsecore.models import Block, BlockType, ParseJobState
+from parsecore.api_payloads import _document_projection, _document_records_projection, _project_pages
+from parsecore.models import Block, BlockType, ParseJobState, SemanticRole
 
 
 class DocumentProjectionQualitySignalTests(unittest.TestCase):
+    def test_project_pages_preserves_image_artifacts_and_descriptions(self) -> None:
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-text-1",
+                    doc_id="doc-image-001",
+                    type=BlockType.PARAGRAPH,
+                    content="The hydraulic system narrative remains searchable.",
+                    metadata={
+                        "page": 4,
+                        "page_type": "body",
+                        "semantic_role": SemanticRole.PARAGRAPH.value,
+                    },
+                ),
+                Block(
+                    block_id="blk-image-1",
+                    doc_id="doc-image-001",
+                    type=BlockType.IMAGE,
+                    content="Figure 4-2. Hydraulic layout overview",
+                    metadata={
+                        "page": 4,
+                        "page_type": "body",
+                        "semantic_role": SemanticRole.IMAGE.value,
+                        "bbox": (120.0, 240.0, 420.0, 540.0),
+                        "source_kind": "pdf-image",
+                        "page_width": 612.0,
+                        "page_height": 792.0,
+                        "caption_confidence": 0.91234,
+                        "figure_kind": "diagram",
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(len(pages), 1)
+        page = pages[0]
+        self.assertEqual(page["page_number"], 4)
+        self.assertEqual(page["text"], "The hydraulic system narrative remains searchable.")
+        self.assertEqual(page["image_descriptions"], ["Figure 4-2. Hydraulic layout overview"])
+        self.assertEqual(len(page["artifacts"]), 1)
+        artifact = page["artifacts"][0]
+        self.assertEqual(artifact["semantic_role"], "image")
+        self.assertEqual(artifact["bbox"], (120.0, 240.0, 420.0, 540.0))
+        self.assertEqual(artifact["source_kind"], "pdf-image")
+        self.assertEqual(artifact["page_width"], 612.0)
+        self.assertEqual(artifact["page_height"], 792.0)
+        self.assertEqual(artifact["caption_confidence"], 0.9123)
+        self.assertEqual(artifact["figure_kind"], "diagram")
+
     def test_table_metadata_becomes_quality_signals(self) -> None:
         job = SimpleNamespace(
             job_id="job-quality-001",
@@ -235,6 +284,53 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
 
         self.assertEqual(records_payload["total"], 1)
         self.assertIn("column_shift_suspected", records_payload["items"][0]["quality_signal_codes"])
+
+    def test_catalog_text_records_continue_across_pages_while_skipping_image_artifacts(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-catalog-cross-page",
+            doc_id="doc-catalog-cross-page",
+            state=ParseJobState.DONE,
+            media_type="application/pdf",
+            options={"profile": "large-pdf-catalog"},
+        )
+        blocks = (
+            Block(
+                block_id="blk-row-start",
+                doc_id="doc-catalog-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="12 PMA0013-01-XN 重庆兴山泉航空设备有限公司 航空专用净水器",
+                metadata={"page": 5, "semantic_role": "paragraph"},
+            ),
+            Block(
+                block_id="blk-workflow-artifact",
+                doc_id="doc-catalog-cross-page",
+                type=BlockType.IMAGE,
+                content="Maintenance workflow - approval process",
+                metadata={"page": 5, "semantic_role": SemanticRole.IMAGE.value},
+            ),
+            Block(
+                block_id="blk-row-continuation",
+                doc_id="doc-catalog-cross-page",
+                type=BlockType.PARAGRAPH,
+                content="SQ-737-1518 波音 2025-01-10",
+                metadata={"page": 6, "semantic_role": "paragraph"},
+            ),
+        )
+        snapshot = {"job": job, "doc_id": "doc-catalog-cross-page", "blocks": blocks, "chunks": ()}
+
+        payload = _document_projection(snapshot, projection="structured")
+        records_payload = _document_records_projection(snapshot, query="波音", limit=10, offset=0)
+
+        self.assertEqual(payload["records_summary"]["text_record_count"], 1)
+        self.assertEqual(records_payload["total"], 1)
+        record = records_payload["items"][0]
+        self.assertEqual(record["page_start"], 5)
+        self.assertEqual(record["page_end"], 6)
+        self.assertEqual(record["fields"]["certificate_or_project_no"], "PMA0013-01-XN")
+        self.assertEqual(record["fields"]["latest_date"], "2025-01-10")
+        self.assertIn("row_continuation_detected", record["quality_signal_codes"])
+        self.assertIn("SQ-737-1518 波音 2025-01-10", record["raw_text"])
+        self.assertNotIn("Maintenance workflow", record["raw_text"])
 
 
 if __name__ == "__main__":

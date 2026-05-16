@@ -17,6 +17,7 @@ _ARTIFACT_SEMANTIC_ROLES = {
     "parse_artifact",
     "version_cell",
     "page_ref_cell",
+    "image",
 }
 _TEXT_RECORD_PROFILES = {"large-pdf-catalog", "large-pdf-ledger"}
 _TEXT_RECORD_START_PATTERN = re.compile(r"^\s*(?P<row>\d{1,8})\s+(?P<body>.+?)\s*$")
@@ -1506,11 +1507,39 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "tables_markdown": [],
                 "tables": [],
                 "artifacts": [],
+                "image_descriptions": [],
                 "confidence_parts": [],
             },
         )
         if role in _ARTIFACT_SEMANTIC_ROLES:
-            entry["artifacts"].append({"text": block.content, "semantic_role": role})
+            artifact_entry: dict[str, Any] = {
+                "text": block.content,
+                "semantic_role": role,
+            }
+            bbox = block.metadata.get("bbox")
+            if bbox is not None:
+                artifact_entry["bbox"] = bbox
+            source_kind = block.metadata.get("source_kind")
+            if isinstance(source_kind, str) and source_kind:
+                artifact_entry["source_kind"] = source_kind
+            object_name = block.metadata.get("object_name")
+            if isinstance(object_name, str) and object_name:
+                artifact_entry["object_name"] = object_name
+            caption_confidence = block.metadata.get("caption_confidence")
+            if isinstance(caption_confidence, (int, float)):
+                artifact_entry["caption_confidence"] = round(float(caption_confidence), 4)
+            figure_kind = block.metadata.get("figure_kind")
+            if isinstance(figure_kind, str) and figure_kind:
+                artifact_entry["figure_kind"] = figure_kind
+            page_width = block.metadata.get("page_width")
+            if isinstance(page_width, (int, float)) and page_width > 0:
+                artifact_entry["page_width"] = float(page_width)
+            page_height = block.metadata.get("page_height")
+            if isinstance(page_height, (int, float)) and page_height > 0:
+                artifact_entry["page_height"] = float(page_height)
+            entry["artifacts"].append(artifact_entry)
+            if role == "image" and block.content.strip():
+                entry["image_descriptions"].append(block.content.strip())
         elif block.type == BlockType.TABLE:
             if block.content.strip():
                 entry["tables_markdown"].append(block.content)
@@ -1541,6 +1570,7 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "tables_markdown": [],
                 "tables": [],
                 "artifacts": [],
+                "image_descriptions": [],
                 "confidence_parts": [],
             },
         )
@@ -1575,6 +1605,13 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
             "artifacts": entry["artifacts"],
             "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 1.0,
         }
+        image_descriptions = [
+            description
+            for description in entry.get("image_descriptions", [])
+            if isinstance(description, str) and description.strip()
+        ]
+        if image_descriptions:
+            page_entry["image_descriptions"] = image_descriptions
         cid_total = sum(sig.get("cid_token_counts", []))
         if cid_total > 0:
             page_entry["cid_token_count"] = cid_total

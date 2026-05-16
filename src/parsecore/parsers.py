@@ -1535,6 +1535,41 @@ class PdfTextParser(ParserAdapter):
                     _attach_page_layout_metadata(blocks[-1].metadata, page_layout)
                     position += 1
                     continue
+                if kind == "image":
+                    if page_layout is None:
+                        continue
+                    figure = page_layout.figure_regions[item_index]
+                    caption_confidence = getattr(figure, "caption_confidence", None)
+                    figure_kind = str(getattr(figure, "figure_kind", "") or "").strip()
+                    metadata = {
+                        "page": page_number,
+                        "page_type": page_type,
+                        "parser": self.name,
+                        "position": position,
+                        "kind": "image",
+                        "semantic_role": SemanticRole.IMAGE.value,
+                        "bbox": figure.bbox,
+                        "source_kind": figure.source_kind,
+                        "figure_index": item_index + 1,
+                    }
+                    if isinstance(caption_confidence, (int, float)):
+                        metadata["caption_confidence"] = float(caption_confidence)
+                    if figure_kind:
+                        metadata["figure_kind"] = figure_kind
+                    if figure.object_name:
+                        metadata["object_name"] = figure.object_name
+                    _attach_page_layout_metadata(metadata, page_layout)
+                    blocks.append(
+                        Block(
+                            block_id=f"{request.doc_id}-i-{position}",
+                            doc_id=request.doc_id,
+                            type=BlockType.IMAGE,
+                            content=figure.description,
+                            metadata=metadata,
+                        )
+                    )
+                    position += 1
+                    continue
 
                 paragraph = paragraphs[item_index]
                 semantic_role = paragraph_roles[item_index]
@@ -1589,29 +1624,47 @@ def _build_page_content_sequence(
     page_layout: _PageLayout | None,
 ) -> list[tuple[str, int]]:
     paragraph_count = len(paragraphs)
-    if page_layout is None or not page_layout.tables:
+    tables = list(getattr(page_layout, "tables", []) or [])
+    figure_regions = list(getattr(page_layout, "figure_regions", []) or [])
+    if page_layout is None or (not tables and not figure_regions):
         return [("paragraph", index) for index in range(paragraph_count)]
     if paragraph_count == 0:
-        return [("table", index) for index in range(len(page_layout.tables))]
+        items = [
+            ("image", index, float(region.bbox[1]) if len(region.bbox) >= 2 else 0.0)
+            for index, region in enumerate(figure_regions)
+        ] + [
+            ("table", index, float(table.bbox[1]) if len(table.bbox) >= 2 else 0.0)
+            for index, table in enumerate(tables)
+        ]
+        items.sort(key=lambda item: (item[2], item[0], item[1]))
+        return [(kind, index) for kind, index, _top in items]
 
     height = float(page_layout.height or 0.0)
-    anchored_tables: list[tuple[int, float, int]] = []
-    for table_index, table in enumerate(page_layout.tables):
+    anchored_items: list[tuple[int, float, str, int]] = []
+    for table_index, table in enumerate(tables):
         top = float(table.bbox[1]) if len(table.bbox) >= 2 else 0.0
         anchor = _estimate_table_anchor_index(
             top=top,
             page_height=height,
             paragraph_count=paragraph_count,
         )
-        anchored_tables.append((anchor, top, table_index))
-    anchored_tables.sort(key=lambda item: (item[0], item[1], item[2]))
+        anchored_items.append((anchor, top, "table", table_index))
+    for figure_index, figure in enumerate(figure_regions):
+        top = float(figure.bbox[1]) if len(figure.bbox) >= 2 else 0.0
+        anchor = _estimate_table_anchor_index(
+            top=top,
+            page_height=height,
+            paragraph_count=paragraph_count,
+        )
+        anchored_items.append((anchor, top, "image", figure_index))
+    anchored_items.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
 
     sequence: list[tuple[str, int]] = []
-    table_cursor = 0
+    item_cursor = 0
     for paragraph_index in range(paragraph_count + 1):
-        while table_cursor < len(anchored_tables) and anchored_tables[table_cursor][0] == paragraph_index:
-            sequence.append(("table", anchored_tables[table_cursor][2]))
-            table_cursor += 1
+        while item_cursor < len(anchored_items) and anchored_items[item_cursor][0] == paragraph_index:
+            sequence.append((anchored_items[item_cursor][2], anchored_items[item_cursor][3]))
+            item_cursor += 1
         if paragraph_index < paragraph_count:
             sequence.append(("paragraph", paragraph_index))
     return sequence
@@ -1632,6 +1685,440 @@ def _estimate_table_anchor_index(
         paragraph_count,
         max(0, int(round((clamped_top / page_height) * paragraph_count))),
     )
+
+
+def _extract_pdf_figure_regions(
+    page: Any,
+    *,
+    page_number: int,
+    table_bboxes: Sequence[tuple[float, float, float, float]],
+) -> list[_FigureRegion]:
+    page_width = float(page.width or 0.0)
+    page_height = float(page.height or 0.0)
+    if page_width <= 0.0 or page_height <= 0.0:
+        return []
+
+    try:
+        raw_images = list(getattr(page, "images", None) or [])
+    except Exception:
+        return []
+    if not raw_images:
+        return []
+
+    text_lines = _extract_pdf_text_lines(page)
+    figure_regions: list[_FigureRegion] = []
+    for raw_image in raw_images:
+        bbox = _extract_pdf_object_bbox(raw_image, page_height=page_height)
+        if bbox is None:
+            continue
+        description = _describe_pdf_figure_region(
+            bbox=bbox,
+            text_lines=text_lines,
+            page_number=page_number,
+        )
+        if not _is_meaningful_pdf_figure_bbox(
+            bbox,
+            page_width=page_width,
+            page_height=page_height,
+            table_bboxes=table_bboxes,
+            caption_confidence=description.caption_confidence,
+        ):
+            continue
+        object_name = str(raw_image.get("name") or "").strip() or None
+        figure_regions.append(
+            _FigureRegion(
+                bbox=bbox,
+                description=description.text,
+                source_kind="pdf-image",
+                object_name=object_name,
+                caption_confidence=description.caption_confidence,
+                figure_kind=description.figure_kind,
+            )
+        )
+    return figure_regions
+
+
+def _extract_pdf_object_bbox(
+    obj: Mapping[str, Any],
+    *,
+    page_height: float,
+) -> tuple[float, float, float, float] | None:
+    x0 = _coerce_float(obj.get("x0"))
+    x1 = _coerce_float(obj.get("x1"))
+    top = _coerce_float(obj.get("top"))
+    bottom = _coerce_float(obj.get("bottom"))
+    if top is None or bottom is None:
+        y0 = _coerce_float(obj.get("y0"))
+        y1 = _coerce_float(obj.get("y1"))
+        if y0 is None or y1 is None:
+            return None
+        top = page_height - y1
+        bottom = page_height - y0
+    if x0 is None or x1 is None:
+        return None
+    left = min(x0, x1)
+    right = max(x0, x1)
+    upper = min(top, bottom)
+    lower = max(top, bottom)
+    if right - left <= 1.0 or lower - upper <= 1.0:
+        return None
+    return (left, upper, right, lower)
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (result == result):
+        return None
+    return result
+
+
+def _is_meaningful_pdf_figure_bbox(
+    bbox: tuple[float, float, float, float],
+    *,
+    page_width: float,
+    page_height: float,
+    table_bboxes: Sequence[tuple[float, float, float, float]],
+    caption_confidence: float = 0.0,
+) -> bool:
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    if width < 18.0 or height < 18.0:
+        return False
+    if page_width <= 0.0 or page_height <= 0.0:
+        return False
+    area_ratio = _bbox_area(bbox) / max(page_width * page_height, 1.0)
+    if area_ratio >= 0.8 and caption_confidence < 0.8:
+        return False
+    if area_ratio < 0.0015 and caption_confidence < 0.8:
+        return False
+    if _is_pdf_header_footer_noise_bbox(
+        bbox,
+        page_width=page_width,
+        page_height=page_height,
+        area_ratio=area_ratio,
+        caption_confidence=caption_confidence,
+    ):
+        return False
+    for table_bbox in table_bboxes:
+        if _bbox_overlap_ratio(bbox, table_bbox) >= 0.75:
+            return False
+    return True
+
+
+def _is_pdf_header_footer_noise_bbox(
+    bbox: tuple[float, float, float, float],
+    *,
+    page_width: float,
+    page_height: float,
+    area_ratio: float,
+    caption_confidence: float,
+) -> bool:
+    if page_width <= 0.0 or page_height <= 0.0:
+        return False
+    if caption_confidence >= 0.8:
+        return False
+
+    top_edge = bbox[1] <= page_height * 0.12 and bbox[3] <= page_height * 0.22
+    bottom_edge = bbox[3] >= page_height * 0.88 and bbox[1] >= page_height * 0.76
+    negative_top_margin = bbox[1] < 0.0 and bbox[3] <= page_height * 0.24
+    near_horizontal_edge = bbox[0] <= page_width * 0.08 or bbox[2] >= page_width * 0.92
+
+    if negative_top_margin:
+        return True
+    if area_ratio <= 0.055 and (top_edge or bottom_edge):
+        return True
+    if area_ratio <= 0.018 and near_horizontal_edge and (bbox[1] <= page_height * 0.2 or bbox[3] >= page_height * 0.8):
+        return True
+    return False
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _bbox_intersection_area(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    overlap_x0 = max(left[0], right[0])
+    overlap_y0 = max(left[1], right[1])
+    overlap_x1 = min(left[2], right[2])
+    overlap_y1 = min(left[3], right[3])
+    if overlap_x1 <= overlap_x0 or overlap_y1 <= overlap_y0:
+        return 0.0
+    return (overlap_x1 - overlap_x0) * (overlap_y1 - overlap_y0)
+
+
+def _bbox_overlap_ratio(
+    bbox: tuple[float, float, float, float],
+    other: tuple[float, float, float, float],
+) -> float:
+    bbox_area = _bbox_area(bbox)
+    if bbox_area <= 0.0:
+        return 0.0
+    return _bbox_intersection_area(bbox, other) / bbox_area
+
+
+def _extract_pdf_text_lines(page: Any) -> list[_PdfTextLine]:
+    try:
+        words = page.extract_words() or []
+    except Exception:
+        return []
+    if not words:
+        return []
+
+    normalized_words: list[tuple[float, float, float, float, str]] = []
+    for word in words:
+        text = " ".join(str(word.get("text") or "").split())
+        if not text:
+            continue
+        x0 = _coerce_float(word.get("x0"))
+        x1 = _coerce_float(word.get("x1"))
+        top = _coerce_float(word.get("top"))
+        bottom = _coerce_float(word.get("bottom"))
+        if x0 is None or x1 is None or top is None or bottom is None:
+            continue
+        normalized_words.append((min(x0, x1), min(top, bottom), max(x0, x1), max(top, bottom), text))
+    if not normalized_words:
+        return []
+
+    normalized_words.sort(key=lambda item: (item[1], item[0]))
+    lines: list[_PdfTextLine] = []
+    current_words: list[tuple[float, float, float, float, str]] = []
+    current_top = 0.0
+    for word in normalized_words:
+        if not current_words:
+            current_words = [word]
+            current_top = word[1]
+            continue
+        if abs(word[1] - current_top) <= 3.0:
+            current_words.append(word)
+            current_top = min(current_top, word[1])
+            continue
+        lines.append(_build_pdf_text_line(current_words))
+        current_words = [word]
+        current_top = word[1]
+    if current_words:
+        lines.append(_build_pdf_text_line(current_words))
+    return lines
+
+
+def _build_pdf_text_line(words: Sequence[tuple[float, float, float, float, str]]) -> _PdfTextLine:
+    text = " ".join(word[4] for word in words)
+    return _PdfTextLine(
+        text=text,
+        x0=min(word[0] for word in words),
+        top=min(word[1] for word in words),
+        x1=max(word[2] for word in words),
+        bottom=max(word[3] for word in words),
+    )
+
+
+def _describe_pdf_figure_region(
+    *,
+    bbox: tuple[float, float, float, float],
+    text_lines: Sequence[_PdfTextLine],
+    page_number: int,
+) -> _FigureDescription:
+    nearby_lines: list[tuple[int, float, int]] = []
+    center_x = (bbox[0] + bbox[2]) / 2.0
+    for index, line in enumerate(text_lines):
+        line_text = " ".join(line.text.split())
+        if not line_text:
+            continue
+        overlap_ratio = _horizontal_overlap_ratio(bbox[0], bbox[2], line.x0, line.x1)
+        if overlap_ratio < 0.18 and not (line.x0 <= center_x <= line.x1):
+            continue
+        below_distance = line.top - bbox[3]
+        above_distance = bbox[1] - line.bottom
+        if -6.0 <= below_distance <= 60.0:
+            nearby_lines.append((0, below_distance, index))
+        elif 0.0 <= above_distance <= 28.0:
+            nearby_lines.append((1, above_distance, index))
+
+    keyword_matches = [
+        candidate
+        for candidate in nearby_lines
+        if _PDF_FIGURE_KEYWORD_PATTERN.search(text_lines[candidate[2]].text)
+        or _FIGURE_CAPTION_LABEL_PATTERN.match(text_lines[candidate[2]].text.strip())
+    ]
+    if not keyword_matches:
+        text = f"第 {page_number} 页图示区域"
+        return _FigureDescription(text=text, caption_confidence=0.15, figure_kind="generic")
+
+    keyword_matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    line_index = keyword_matches[0][2]
+    primary = " ".join(text_lines[line_index].text.split())
+    if not primary:
+        text = f"第 {page_number} 页图示区域"
+        return _FigureDescription(text=text, caption_confidence=0.15, figure_kind="generic")
+
+    parts = [primary]
+    primary_is_label = bool(_FIGURE_CAPTION_LABEL_PATTERN.match(primary))
+    appended_following = False
+    if line_index + 1 < len(text_lines):
+        following = text_lines[line_index + 1]
+        following_text = " ".join(following.text.split())
+        if (
+            following_text
+            and following.top - text_lines[line_index].bottom <= 16.0
+            and _horizontal_overlap_ratio(bbox[0], bbox[2], following.x0, following.x1) >= 0.12
+            and not _looks_heading_like(following_text)
+        ):
+            if primary_is_label or len(primary) <= 28:
+                parts.append(following_text)
+                appended_following = True
+
+    description = " ".join(part for part in parts if part).strip()
+    if description:
+        description = description[:160]
+        return _FigureDescription(
+            text=description,
+            caption_confidence=_pdf_figure_caption_confidence(
+                description,
+                primary_is_label=primary_is_label,
+                appended_following=appended_following,
+            ),
+            figure_kind=_infer_pdf_figure_kind(description),
+        )
+    text = f"第 {page_number} 页图示区域"
+    return _FigureDescription(text=text, caption_confidence=0.15, figure_kind="generic")
+
+
+def _pdf_figure_caption_confidence(
+    description: str,
+    *,
+    primary_is_label: bool,
+    appended_following: bool,
+) -> float:
+    if _is_generic_pdf_figure_description(description):
+        return 0.15
+    has_keyword = bool(_PDF_FIGURE_KEYWORD_PATTERN.search(description))
+    if primary_is_label and appended_following:
+        return 0.95
+    if primary_is_label or has_keyword:
+        return 0.9
+    return 0.65
+
+
+def _infer_pdf_figure_kind(description: str) -> str:
+    text = str(description or "")
+    if not text or _is_generic_pdf_figure_description(text):
+        return "generic"
+    if re.search(r"(?:流程图|flow\s*chart|flowchart|workflow)", text, re.IGNORECASE):
+        return "flowchart"
+    if re.search(r"(?:结构图|组织机构图|组织架构|structure|organization(?:al)?\s+chart)", text, re.IGNORECASE):
+        return "structure"
+    if re.search(r"(?:示意图|原理图|布置图|diagram|schematic|layout)", text, re.IGNORECASE):
+        return "diagram"
+    if re.search(r"(?:Chart|Graph|曲线图|柱状图|折线图|图表)", text, re.IGNORECASE):
+        return "chart"
+    if re.search(r"(?:Photo|Image|Illustration|图片|照片|插图)", text, re.IGNORECASE):
+        return "illustration"
+    if re.search(r"(?:Fig\.?|Figure|图\s*[A-Za-z0-9一二三四五六七八九十.-]+)", text, re.IGNORECASE):
+        return "figure"
+    return "figure"
+
+
+def _horizontal_overlap_ratio(left0: float, left1: float, right0: float, right1: float) -> float:
+    overlap = min(left1, right1) - max(left0, right0)
+    if overlap <= 0.0:
+        return 0.0
+    shortest = min(max(left1 - left0, 1.0), max(right1 - right0, 1.0))
+    return overlap / shortest
+
+
+def _filter_repeated_pdf_figure_regions(layouts: Sequence[_PageLayout]) -> None:
+    repeated_signatures: dict[tuple[int, int, int, int], int] = {}
+    for layout in layouts:
+        for figure in layout.figure_regions:
+            signature = _pdf_figure_signature(figure.bbox, page_width=layout.width, page_height=layout.height)
+            if signature is None:
+                continue
+            repeated_signatures[signature] = repeated_signatures.get(signature, 0) + 1
+
+    for layout in layouts:
+        if not layout.figure_regions:
+            continue
+        filtered: list[_FigureRegion] = []
+        for figure in layout.figure_regions:
+            signature = _pdf_figure_signature(figure.bbox, page_width=layout.width, page_height=layout.height)
+            repeat_count = repeated_signatures.get(signature, 0) if signature is not None else 0
+            if _should_drop_repeated_pdf_figure_region(
+                figure,
+                repeat_count=repeat_count,
+                page_width=layout.width,
+                page_height=layout.height,
+            ):
+                continue
+            filtered.append(figure)
+        layout.figure_regions = filtered
+
+
+def _should_drop_repeated_pdf_figure_region(
+    figure: _FigureRegion,
+    *,
+    repeat_count: int,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    if repeat_count < 3 or page_width <= 0.0 or page_height <= 0.0:
+        return False
+    caption_confidence = float(getattr(figure, "caption_confidence", 0.0) or 0.0)
+    if caption_confidence >= 0.75:
+        return False
+
+    figure_kind = str(getattr(figure, "figure_kind", "") or "").strip().lower()
+    if figure_kind and figure_kind not in {"generic", "image", "illustration"}:
+        return False
+
+    area_ratio = _bbox_area(figure.bbox) / max(page_width * page_height, 1.0)
+    if not _is_generic_pdf_figure_description(figure.description) and area_ratio > 0.012:
+        return False
+    if _is_margin_figure_region(figure.bbox, page_width=page_width, page_height=page_height):
+        return True
+    if area_ratio <= 0.012:
+        return True
+    return repeat_count >= 5 and area_ratio <= 0.03
+
+
+def _pdf_figure_signature(
+    bbox: tuple[float, float, float, float],
+    *,
+    page_width: float,
+    page_height: float,
+) -> tuple[int, int, int, int] | None:
+    if page_width <= 0.0 or page_height <= 0.0:
+        return None
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    return (
+        int(round((bbox[0] / page_width) * 100)),
+        int(round((bbox[1] / page_height) * 100)),
+        int(round((width / page_width) * 100)),
+        int(round((height / page_height) * 100)),
+    )
+
+
+def _is_margin_figure_region(
+    bbox: tuple[float, float, float, float],
+    *,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    if page_width <= 0.0 or page_height <= 0.0:
+        return False
+    area_ratio = _bbox_area(bbox) / max(page_width * page_height, 1.0)
+    if area_ratio > 0.03:
+        return False
+    return bbox[1] <= page_height * 0.18 or bbox[3] >= page_height * 0.82
+
+
+def _is_generic_pdf_figure_description(description: str) -> bool:
+    return bool(_GENERIC_PDF_FIGURE_DESCRIPTION_PATTERN.match(description.strip()))
 
 
 _LEP_ENTRY_PATTERN = re.compile(r"(?:LIST OF EFFECTIVE PAGES|\bPage\s+[A-Z0-9.\-/]+)", re.IGNORECASE)
@@ -1671,7 +2158,7 @@ _TABLE_COLUMN_HEADER_PATTERN = re.compile(
 _TABLE_NOTE_PATTERN = re.compile(r"^\s*NOTE\s*[:：]", re.IGNORECASE)
 
 _FIGURE_CAPTION_LABEL_PATTERN = re.compile(
-    r"^\s*(?:FIG(?:URE)?\.?|ILLUSTRATION|IMAGE|PHOTO)\s*(?:NO\.?|NUMBER|#)?\s*[A-Za-z]?\d+(?:[.-]\d+)*(?:\s*[A-Za-z])?\s*[:.)\]-]?\s*$",
+    r"^\s*(?:(?:FIG(?:URE)?\.?|ILLUSTRATION|IMAGE|PHOTO)\s*(?:NO\.?|NUMBER|#)?\s*[A-Za-z]?\d+(?:[.-]\d+)*(?:\s*[A-Za-z])?|图\s*[A-Za-z0-9一二三四五六七八九十]+(?:[.-]\d+)*(?:\s*[A-Za-z])?)\s*[:.)\]-]?\s*$",
     re.IGNORECASE,
 )
 
@@ -2382,6 +2869,32 @@ class _PdfTable:
         return "\n".join(lines)
 
 
+@dataclass(slots=True, frozen=True)
+class _FigureDescription:
+    text: str
+    caption_confidence: float
+    figure_kind: str
+
+
+@dataclass(slots=True, frozen=True)
+class _FigureRegion:
+    bbox: tuple[float, float, float, float]
+    description: str
+    source_kind: str = "pdf-image"
+    object_name: str | None = None
+    caption_confidence: float = 0.15
+    figure_kind: str = "generic"
+
+
+@dataclass(slots=True, frozen=True)
+class _PdfTextLine:
+    text: str
+    x0: float
+    top: float
+    x1: float
+    bottom: float
+
+
 @dataclass(slots=True)
 class _PageLayout:
     page_number: int
@@ -2389,6 +2902,7 @@ class _PageLayout:
     height: float
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
+    figure_regions: list[_FigureRegion] = _dc_field(default_factory=list)
     column_count_hint: int = 1
     layout_reading_order_applied: bool = False
     layout_reading_order_strategy: str | None = None
@@ -2440,6 +2954,14 @@ class _OcrLine:
     text: str
     confidence: float
     column_index: int = 0
+
+
+_PDF_FIGURE_KEYWORD_PATTERN = re.compile(
+    r"(?:流程图|流程|示意图|结构图|架构图|关系图|原理图|布置图|组织机构图|图示|图片|照片|Figure|Fig\.?|Illustration|Image|Photo|Chart|Diagram|Flow\s*Chart|Flowchart|Workflow|Process\s+Map|Architecture\s+Diagram)",
+    re.IGNORECASE,
+)
+
+_GENERIC_PDF_FIGURE_DESCRIPTION_PATTERN = re.compile(r"^第\s*\d+\s*页图示区域$")
 
 
 def _estimate_token_count(text: str | None) -> int:
@@ -2497,6 +3019,11 @@ def _extract_pdfplumber_layout(
                 bbox = tuple(float(value) for value in table.bbox)
                 tables.append(_PdfTable(bbox=bbox, cells=cells))  # type: ignore[arg-type]
                 table_bboxes.append(bbox)  # type: ignore[arg-type]
+            figure_regions = _extract_pdf_figure_regions(
+                page,
+                page_number=index,
+                table_bboxes=table_bboxes,
+            )
 
             column_count_hint = _estimate_column_count(page)
             text_without_tables: str | None
@@ -2574,6 +3101,7 @@ def _extract_pdfplumber_layout(
                     height=float(page.height or 0.0),
                     text_without_tables=text_without_tables,
                     tables=tables,
+                    figure_regions=figure_regions,
                     column_count_hint=column_count_hint,
                     layout_reading_order_applied=layout_reading_order_applied,
                     layout_reading_order_strategy=layout_reading_order_strategy,
@@ -2601,6 +3129,7 @@ def _extract_pdfplumber_layout(
                     ocr_total_elapsed_s=ocr_timings.total_elapsed_s,
                 )
             )
+    _filter_repeated_pdf_figure_regions(layouts)
     return layouts
 
 
