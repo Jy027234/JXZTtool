@@ -15,7 +15,16 @@ PERF_COLUMNS = (
     "provider_s",
     "rec_s",
     "max_page_ocr_s",
+    "peak_memory_mb",
+    "throughput_mb_s",
+    "part_throughput_s",
 )
+
+EXTENDED_METRICS = {
+    "peak_memory_mb": "peak_memory",
+    "throughput_mb_s": "file_size_mb / elapsed_s",
+    "part_throughput_s": "part_count / total_elapsed_s",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,6 +32,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("report", help="Path to a self-check JSON report")
     parser.add_argument("--out-md", help="Optional Markdown output path")
     parser.add_argument("--out-json", help="Optional compact JSON summary output path")
+    parser.add_argument(
+        "--trend-reports",
+        nargs="+",
+        help="Multiple self-check JSON reports for multi-version trend analysis",
+    )
     return parser
 
 
@@ -85,7 +99,73 @@ def build_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def render_markdown(payload: dict[str, Any]) -> str:
+def build_trend_summary(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a cross-version trend summary from 2+ self-check JSON reports."""
+    if len(reports) < 2:
+        return {"available": False, "reason": "need_at_least_2_reports"}
+
+    versions: list[dict[str, Any]] = []
+    for report in reports:
+        summary = build_summary(report)
+        overview = summary.get("overview") or {}
+        slowest = overview.get("slowest_sample") or {}
+        versions.append({
+            "version": report.get("version") or report.get("generated_at") or report.get("timestamp") or "?",
+            "status": summary.get("status"),
+            "elapsed_s_p50": _extract_elapsed_p50(summary.get("samples") or []),
+            "elapsed_s_p95": _extract_elapsed_p95(summary.get("samples") or []),
+            "peak_memory_mb": overview.get("peak_memory_mb"),
+            "slowest_sample": slowest.get("name"),
+        })
+
+    elapsed_values = [v["elapsed_s_p50"] for v in versions if v["elapsed_s_p50"] is not None]
+    trend_direction = "stable"
+    change_pct: float | None = None
+    if len(elapsed_values) >= 2:
+        first, last = elapsed_values[0], elapsed_values[-1]
+        if first > 0:
+            change_pct = round((last - first) / first * 100, 1)
+        if last > first * 1.1:
+            trend_direction = "regressing"
+        elif last < first * 0.9:
+            trend_direction = "improving"
+
+    return {
+        "available": True,
+        "version_count": len(versions),
+        "versions": versions,
+        "trend_direction": trend_direction,
+        "elapsed_s_p50_first": elapsed_values[0] if elapsed_values else None,
+        "elapsed_s_p50_last": elapsed_values[-1] if elapsed_values else None,
+        "elapsed_s_p50_change_pct": change_pct,
+    }
+
+
+def _extract_elapsed_p50(samples: list[dict[str, Any]]) -> float | None:
+    values = sorted(
+        float(s.get("elapsed_s"))
+        for s in samples
+        if isinstance(s.get("elapsed_s"), (int, float))
+    )
+    if not values:
+        return None
+    mid = len(values) // 2
+    return values[mid]
+
+
+def _extract_elapsed_p95(samples: list[dict[str, Any]]) -> float | None:
+    values = sorted(
+        float(s.get("elapsed_s"))
+        for s in samples
+        if isinstance(s.get("elapsed_s"), (int, float))
+    )
+    if not values:
+        return None
+    idx = max(0, int(len(values) * 0.95) - 1)
+    return values[min(idx, len(values) - 1)]
+
+
+def render_markdown(payload: dict[str, Any], *, trend_reports: list[dict[str, Any]] | None = None) -> str:
     summary = build_summary(payload)
     lines: list[str] = [
         "# ParseCore Perf Gate",
@@ -107,8 +187,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
             [
                 "## Perf Samples",
                 "",
-                "| sample | elapsed_s | ocr_total_s | call_s | provider_s | rec_s | max_page_ocr_s |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| sample | elapsed_s | ocr_total_s | call_s | provider_s | rec_s | max_page_ocr_s | peak_memory_mb | throughput_mb_s | part_throughput_s |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for sample in samples:
@@ -120,7 +200,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
                 for metric in PERF_COLUMNS
             }
             lines.append(
-                "| {name} | {elapsed_s} | {ocr_total_s} | {call_s} | {provider_s} | {rec_s} | {max_page_ocr_s} |".format(
+                "| {name} | {elapsed_s} | {ocr_total_s} | {call_s} | {provider_s} | {rec_s} | {max_page_ocr_s} | {peak_memory_mb} | {throughput_mb_s} | {part_throughput_s} |".format(
                     name=sample.get("name", "?"),
                     **values,
                 )
@@ -146,8 +226,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
             [
                 "## Perf Deltas Vs Previous Report",
                 "",
-                "| sample | delta_elapsed_s | delta_ocr_total_s | delta_call_s | delta_provider_s | delta_rec_s | delta_max_page_ocr_s |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| sample | delta_elapsed_s | delta_ocr_total_s | delta_call_s | delta_provider_s | delta_rec_s | delta_max_page_ocr_s | delta_peak_memory_mb | delta_throughput_mb_s | delta_part_throughput_s |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for sample in comparison.get("samples", []) or []:
@@ -159,7 +239,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
                 for metric in PERF_COLUMNS
             }
             lines.append(
-                "| {name} | {elapsed_s} | {ocr_total_s} | {call_s} | {provider_s} | {rec_s} | {max_page_ocr_s} |".format(
+                "| {name} | {elapsed_s} | {ocr_total_s} | {call_s} | {provider_s} | {rec_s} | {max_page_ocr_s} | {peak_memory_mb} | {throughput_mb_s} | {part_throughput_s} |".format(
                     name=sample.get("name", "?"),
                     **values,
                 )
@@ -202,20 +282,61 @@ def render_markdown(payload: dict[str, Any]) -> str:
         for key in ("toc_recog", "chapter_cov", "noise_ratio", "heading_bind", "evidence_bind"):
             if key in structure:
                 lines.append(f"| {key} | {float(structure[key]):.4f} |")
+
+    # P6-T07: multi-version trend section
+    if trend_reports and len(trend_reports) >= 2:
+        trend = build_trend_summary(trend_reports)
+        if trend.get("available"):
+            lines.extend(
+                [
+                    "",
+                    "## Multi-Version Trend",
+                    "",
+                    "| version | status | elapsed_s_p50 | elapsed_s_p95 | peak_memory_mb | trend |",
+                    "| --- | --- | ---: | ---: | ---: | --- |",
+                ]
+            )
+            for version in trend["versions"]:
+                lines.append(
+                    "| {version} | {status} | {p50} | {p95} | {mem} | - |".format(
+                        version=version.get("version", "?"),
+                        status=version.get("status", "?"),
+                        p50=_format_metric(version.get("elapsed_s_p50"), digits=1),
+                        p95=_format_metric(version.get("elapsed_s_p95"), digits=1),
+                        mem=_format_metric(version.get("peak_memory_mb"), digits=1),
+                    )
+                )
+            change = trend.get("elapsed_s_p50_change_pct")
+            change_label = f"{change:+.1f}%" if change is not None else "n/a"
+            lines.extend(
+                [
+                    "",
+                    f"- trend_direction: **{trend.get('trend_direction', 'stable')}**",
+                    f"- elapsed_s_p50 change: {change_label}",
+                    "",
+                ]
+            )
+
     return "\n".join(lines) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     payload = _load_report(args.report)
-    markdown = render_markdown(payload)
+    trend_payload: list[dict[str, Any]] | None = None
+    if args.trend_reports:
+        trend_payload = [payload] + [_load_report(p) for p in args.trend_reports]
+    markdown = render_markdown(payload, trend_reports=trend_payload)
     if args.out_md:
         Path(args.out_md).write_text(markdown, encoding="utf-8")
     else:
         print(markdown, end="")
     if args.out_json:
+        summary = build_summary(payload)
+        if trend_payload and len(trend_payload) >= 2:
+            summary["trend"] = build_trend_summary(trend_payload)
         Path(args.out_json).write_text(
-            json.dumps(build_summary(payload), ensure_ascii=False, indent=2) + "\n",
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     return 0

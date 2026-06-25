@@ -4,11 +4,12 @@
 
 当前默认质量门禁已经完全收口到 ParseCore 自身验证。
 
-这套门禁用于回答三个问题：
+这套门禁用于回答四个问题：
 
 1. 代码改动后，基础可靠性是否仍然成立。
 2. 默认运行时是否还能正常装配。
-3. 解析质量和长尾性能是否出现明显退化。
+3. 已冻结的 payload contract 是否仍和真实输出一致。
+4. 解析质量和长尾性能是否出现明显退化。
 
 ## 默认入口
 
@@ -42,32 +43,92 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile perf --compare-report var/self-check/previous.perf.json
 ```
 
-说明：默认入口是 `parsecore self-check`（源码 checkout 下可用 `python -m parsecore.cli self-check`），内部仍复用 `tools/self_check.py`。该入口支持三档门禁。默认 `fast` profile 会跑 `var/regression/suite.fast.json`，只覆盖日常主线 baseline；`slow`（等价别名 `full`）会切到 `var/regression/suite.full.json`，保留主线加中等时长 slow baseline；`perf` 会切到 `var/regression/suite.perf.json`，单独跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本。对应回归超时默认值分别为 `900s`、`4200s` 和 `4200s`。
+说明：默认入口是 `parsecore self-check`（源码 checkout 下可用 `python -m parsecore.cli self-check`），内部仍复用 `tools/self_check.py`。该入口支持三档门禁。默认 `fast` profile 会跑 `var/regression/suite.fast.json`，只覆盖日常主线 baseline；`slow`（等价别名 `full`）会切到 `var/regression/suite.full.json`，保留主线加中等时长 slow baseline；`perf` 会切到 `var/regression/suite.perf.json`，单独跟踪 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个重样本。对应回归超时默认值分别为 `900s`、`4200s` 和 `4200s`。此外，`fast`/`full`/`perf` profile 现在都会优先尝试自动带上各自的 `var/regression/provider-suite.*.json` 本地 Provider 对比门禁；如果 suite 或样本缺失，则会以 `provider_comparison_suite.status = "skipped"` 的方式安全降级，而不是把“环境里没有样本”误报成代码回归。
+
+如需单独校验冻结契约，可直接执行：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
+```
 
 `perf` profile 现在会在输出 JSON 中额外写入 `perf_tracking.samples / overview / comparison`。当 `--compare-report` 指向上一份 self-check JSON 时，会按样本生成 `elapsed_s / ocr_total_s / call_s / provider_s / rec_s / max_page_ocr_s` 的 delta，便于 CI 或自托管 runner 长期跟踪趋势。
 
 在 GitHub Actions 的 `performance` job 中，若 runner 提供 `PARSECORE_PERF_HISTORY_DIR`，workflow 会自动读取其中的 `latest.perf.json` 作为 compare report，并在本次执行后把新报告覆盖写回该目录。
 
-输出会同时打印到终端。默认 `fast` profile 写入 [var/self-check/latest.json](../var/self-check/latest.json)，`slow/full` 默认写入 [var/self-check/latest.full.json](../var/self-check/latest.full.json)，`perf` 默认写入 [var/self-check/latest.perf.json](../var/self-check/latest.perf.json)；显式传 `--out` 时仍以手工路径为准。
+输出会同时打印到终端。默认 `fast` profile 写入 [var/self-check/latest.json](../var/self-check/latest.json)，`slow/full` 默认写入 [var/self-check/latest.full.json](../var/self-check/latest.full.json)，`perf` 默认写入 [var/self-check/latest.perf.json](../var/self-check/latest.perf.json)；显式传 `--out` 时仍以手工路径为准。若 provider comparison 实际执行，self-check 还会在同目录额外落盘 `provider-comparison.fast/full/perf.json/.md`，并把这些路径写回 self-check JSON 的 `provider_comparison_artifacts` 与 `checks[].details.report_json/report_markdown`，便于后续排障和复盘。当前 provider comparison 结果还会额外输出 `provider_identity_summary`，收口每个 provider id 的 `provider_version / adapter_version / status_counts`；同时新增 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action`、`requires_config_update`、`drift_fields` 和 `config_patch`。self-check 会把这两份摘要分别写进 `checks[].details.provider_identity_summary` 和 `checks[].details.provider_admission_summary`，并在终端 summary 中追加 `identity_drift / admission_ready / admission_update`，用于提示“同一个 provider 名称是否混入多版实现”“有哪些候选已具备进入 route 的条件”“哪些现有配置建议回写”。如果 provider suite 配置了 `max_providers_requiring_config_update`、`max_providers_with_route_mode_drift`、`max_providers_with_gate_status_drift`、`max_providers_with_gate_checks_drift`、`max_providers_with_route_ready_drift` 这五类 admission drift 预算，self-check 会沿用 provider comparison 的 fail/warn 结果，把“准入配置还没收敛”直接升级成标准门禁信号。
 
 CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径和 `fixture_relative_path` 元数据；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。若仍缺样本，workflow 才会把 fast 降级为 smoke-only，并跳过 full/perf 专项门禁，而不是直接失败。
 
 ## 覆盖范围
 
-`parsecore self-check` 当前串联三类检查：
+`parsecore self-check` 当前串联四类检查：
 
 1. 单测：`unittest discover -s tests -p "test_*.py"`
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
-3. 回归基线：
+3. Payload contract 校验：`parsecore.cli payload-contract-check`
+4. 回归基线：
 	- `fast`：`tools/regression_baseline.py check-suite --suite var/regression/suite.fast.json`
 	- `slow/full`：`tools/regression_baseline.py check-suite --suite var/regression/suite.full.json`
 	- `perf`：`tools/regression_baseline.py check-suite --suite var/regression/suite.perf.json`
+
+默认 provider suite：
+
+	- `fast`：`var/regression/provider-suite.fast.json`
+	- `slow/full`：`var/regression/provider-suite.full.json`
+	- `perf`：`var/regression/provider-suite.perf.json`
+
+如需显式跑本地 Provider 发布门禁，可额外执行：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/provider-suite.fast.json --fixture-root D:/app/uploads --progress
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/provider-suite.full.json --fixture-root D:/app/uploads --progress
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/provider-suite.perf.json --fixture-root D:/app/uploads --progress
+```
+
+`--progress` 会把每个样本的开始和结束信息写到 stderr，不改变 JSON stdout；`self-check` 调用 provider comparison 时会默认启用该进度输出，避免长样本门禁看起来像无响应。
+
+`provider-suite.fast.json` 当前镜像 `suite.fast.json` 的三条主线 baseline；`provider-suite.full.json` 镜像 `suite.full.json` 的五个主线 PDF baseline；两者都先用 `max_samples_best_provider_differs_from_route_primary = 0` 约束 route-plan 主候选与实测最佳 Provider 的偏差不要被放大，同时把 `max_providers_with_multiple_provider_versions = 0`、`max_providers_with_multiple_adapter_versions = 0` 以及五类 admission drift 预算固定为默认值 `0`，避免“同一个 Provider 名称实际切到另一版上游库/Adapter”或“suite 建议已变化但主配置还没收敛”悄悄混进灰度结果。`provider-suite.perf.json` 则继续收口 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个 provider 对比重样本，并同样约束 identity drift 与 admission drift。现阶段已支持十类 gate policy 预算：`max_provider_reading_order_warning_runs`、`max_provider_quality_warning_runs`、`max_samples_best_provider_differs_from_route_primary`、`max_providers_with_multiple_provider_versions`、`max_providers_with_multiple_adapter_versions`，以及 `max_providers_requiring_config_update`、`max_providers_with_route_mode_drift`、`max_providers_with_gate_status_drift`、`max_providers_with_gate_checks_drift`、`max_providers_with_route_ready_drift`。前五类用于约束读序 warning、Provider 质量 warning、route primary 与实测 best provider 的偏差，以及 Provider 身份漂移是否被放大；后五类用于约束 admission 配置回写数量和 `route_mode / gate_status / gate_checks / route_ready` 的收敛状态。
 
 ## 退出码语义
 
 1. `0`：全部通过
 2. `1`：至少一项必需检查失败
 3. `2`：没有硬失败，但存在退化或超时
+
+## Provider Comparison Check
+
+### 启用方式
+
+```powershell
+# 显式指定 suite
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tools.self_check --provider-suite var/regression/provider-suite.fast.json
+
+# 自动发现（suite 文件放在 var/regression/ 下）
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tools.self_check
+```
+
+### 输出位置
+
+- JSON: `var/self-check/provider-comparison.{profile}.json`
+- Markdown: `var/self-check/provider-comparison.{profile}.md`
+
+`self_check` JSON 中的标准化字段：
+
+| 字段 | 说明 |
+|------|------|
+| `checks[].details.name` | `provider_comparison_suite` |
+| `checks[].details.status` | `ok` / `degraded` / `failed` / `timeout` |
+| `checks[].details.sample_count` | suite 样本数 |
+| `checks[].details.output_json_path` | provider comparison JSON 工件路径 |
+| `checks[].details.output_md_path` | provider comparison Markdown 工件路径 |
+| `checks[].details.summary` | 样本和 provider 统计摘要 |
+| `checks[].details.gate_summary` | gate 判定结果和 warning 计数 |
+
+### 判定规则
+
+- `status=ok`：所有样本通过 gate policy
+- `status=degraded`：有样本超时或降级
+- `status=failed`：有样本硬失败或 gate policy 不通过
 
 ## 2026-05-10 当前结论
 

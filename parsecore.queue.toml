@@ -43,6 +43,15 @@ strategy = "lazy"
 [product]
 adapter = "embedded"
 
+[quality_gate]
+enabled = true
+min_text_page_coverage = 0.98
+min_table_unit_coverage = 0.95
+min_unit_chunk_coverage = 0.98
+min_reading_order_confidence = 0.75
+allow_local_rerun = true
+allow_manual_review = true
+
 [providers.ocr]
 enabled = true
 provider = "rapidocr"
@@ -54,6 +63,90 @@ provider = "rapidocr"
 # max_retries = 2
 # options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" } }
 # options.det_use_dilation = true
+
+[providers.local_parser_routing]
+enabled = false
+fallback_to_default = true
+include_disabled = false
+
+[[providers.local_parsers]]
+id = "pdf-text"
+enabled = true
+priority = 100
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["default", "table-heavy", "large-pdf", "large-pdf-catalog", "large-pdf-ledger"]
+capabilities = ["native-text", "layout", "tables", "local-ocr-fallback"]
+route_mode = "route"
+gate_status = "passed"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "docx-native"
+enabled = true
+priority = 100
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+profiles = ["default"]
+capabilities = ["native-structure", "tables", "lists"]
+route_mode = "route"
+gate_status = "passed"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "excel-native"
+enabled = true
+priority = 100
+media_types = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "application/vnd.ms-excel",
+]
+extensions = [".xlsx", ".xlsm", ".xls"]
+profiles = ["default", "excel-ledger"]
+capabilities = ["sheets", "records", "merged-cells"]
+route_mode = "route"
+gate_status = "passed"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "pymupdf4llm-local"
+enabled = false
+priority = 80
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["default", "table-heavy"]
+capabilities = ["markdown", "json", "rag-baseline"]
+route_mode = "evaluate"
+gate_status = "pending"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "docling-local"
+enabled = false
+priority = 70
+media_types = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]
+extensions = [".pdf", ".docx"]
+profiles = ["default", "table-heavy", "scan-pdf"]
+capabilities = ["layout", "tables", "reading-order"]
+route_mode = "evaluate"
+gate_status = "pending"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "mineru-local"
+enabled = false
+priority = 60
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["scan-pdf", "table-heavy"]
+capabilities = ["layout", "tables", "formula", "local-model"]
+route_mode = "evaluate"
+gate_status = "pending"
+gate_checks = ["samples", "license", "performance", "observability"]
 
 [[parsers]]
 name = "docx-native"

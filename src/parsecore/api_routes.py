@@ -17,6 +17,7 @@ from starlette.routing import Route
 from .api_payloads import (
     _batch_success_response,
     _document_projection,
+    _document_providers_projection,
     _document_quality_projection,
     _document_view_rows,
     _parse_success_response,
@@ -38,6 +39,7 @@ from .api_support import (
 from .export_jobs import create_export_package, export_file_path, load_export_manifest
 from .exports import EXPORT_DATASETS, EXPORT_FORMATS, export_structured_projection
 from .models import ParseRequest
+from .payload_schemas import payload_schema, payload_schema_names, payload_schema_registry
 from .parts import PART_STATE_FILTERS, document_parts_projection
 from .pdf_parts import detect_pdf_page_count
 from .profiles import describe_parse_profiles, resolve_parse_profile
@@ -70,6 +72,10 @@ class ApiRoutes:
             Route("/v1/parse", self.parse_upload, methods=["POST"]),
             Route("/v1/runtime", self.describe, methods=["GET"]),
             Route("/v1/parse/profiles", self.parse_profiles, methods=["GET"]),
+            Route("/v1/parse/providers", self.parse_providers, methods=["GET"]),
+            Route("/v1/parse/providers/route-plan", self.parse_provider_route_plan, methods=["GET"]),
+            Route("/v1/parse/schemas", self.parse_schemas, methods=["GET"]),
+            Route("/v1/parse/schemas/{schema_name}", self.get_parse_schema, methods=["GET"]),
             Route("/v1/parse/uploads", self.stage_upload, methods=["POST"]),
             Route("/v1/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse/jobs", self.create_job, methods=["POST"]),
@@ -84,6 +90,9 @@ class ApiRoutes:
             Route("/v1/parse/dashboard", self.tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/coverage", self.get_document_coverage, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/providers", self.get_document_providers, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/reader", self.get_document_reader, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/records", self.get_document_records, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/exports", self.export_document, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/export-jobs", self.create_export_job, methods=["POST"]),
@@ -145,6 +154,41 @@ class ApiRoutes:
 
     async def parse_profiles(self, request: Request) -> JSONResponse:
         return JSONResponse(describe_parse_profiles())
+
+    async def parse_providers(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        return JSONResponse(runtime_obj.provider_registry())
+
+    async def parse_provider_route_plan(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        file_name = str(request.query_params.get("file_name") or "").strip()
+        media_type = _resolve_media_type(file_name, request.query_params.get("media_type")) if file_name else request.query_params.get("media_type")
+        return JSONResponse(
+            runtime_obj.provider_route_plan(
+                media_type=media_type,
+                extension=request.query_params.get("extension"),
+                file_name=file_name or None,
+                profile=request.query_params.get("profile"),
+                required_capabilities=_query_csv_list(request, "capability", "capabilities", "required_capabilities"),
+                include_disabled=_coerce_bool(request.query_params.get("include_disabled"), default=True),
+            )
+        )
+
+    async def parse_schemas(self, request: Request) -> JSONResponse:
+        return JSONResponse(payload_schema_registry())
+
+    async def get_parse_schema(self, request: Request) -> JSONResponse:
+        schema_name = str(request.path_params.get("schema_name") or "")
+        try:
+            return JSONResponse(payload_schema(schema_name))
+        except KeyError:
+            return _error_response(
+                request,
+                code="schema_not_found",
+                message="Schema not found",
+                status_code=404,
+                detail={"allowed": list(payload_schema_names())},
+            )
 
     async def create_job(self, request: Request) -> JSONResponse:
         payload = await request.json()
@@ -875,9 +919,33 @@ class ApiRoutes:
                     code="invalid_projection",
                     message="Invalid projection",
                     status_code=400,
-                    detail={"allowed": ["compat", "structured", "full"]},
+                    detail={"allowed": ["compat", "structured", "full", "ir", "coverage", "reader"]},
                 )
             raise
+
+    async def get_document_coverage(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        return JSONResponse(_document_projection(snapshot, projection="coverage"))
+
+    async def get_document_reader(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        return JSONResponse(_document_projection(snapshot, projection="reader"))
+
+    async def get_document_providers(self, request: Request) -> JSONResponse:
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+        if snapshot["job"] is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        return JSONResponse(_document_providers_projection(snapshot))
 
     async def get_document_quality(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
@@ -962,6 +1030,20 @@ class ApiRoutes:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
             payload = _minimal_export_payload_from_records(records_payload, tenant_id=tenant_id)
             payload["records"] = records_payload["items"]
+        elif normalized_dataset == "coverage":
+            snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+            if snapshot["job"] is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+            coverage_payload = _document_projection(snapshot, projection="coverage")
+            payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+            payload["coverage"] = coverage_payload["coverage"]["pages"]
+        elif normalized_dataset == "reader":
+            snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
+            if snapshot["job"] is None:
+                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+            reader_payload = _document_projection(snapshot, projection="reader")
+            payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+            payload["reader"] = reader_payload["blocks"]
         else:
             snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
             if snapshot["job"] is None:
@@ -1065,7 +1147,12 @@ class ApiRoutes:
         except QuotaExceededError as exc:
             _record_quota_exceeded_event(request, request.app.state.runtime, exc)
             return self._quota_error_response(request, exc)
-        return JSONResponse(_to_payload(result), status_code=202)
+        payload = _to_payload(result)
+        payload["contracts"] = _part_rerun_contracts(
+            doc_id=request.path_params["doc_id"],
+            submitted=[payload],
+        )
+        return JSONResponse(payload, status_code=202)
 
     async def rerun_document_part(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
@@ -1076,6 +1163,7 @@ class ApiRoutes:
                 part_id=request.path_params["part_id"],
                 tenant_id=tenant_id,
                 profile=payload.get("profile"),
+                provider_route_plan=payload.get("provider_route_plan"),
             )
         except LookupError:
             return _error_response(request, code="part_not_found", message="Part not found", status_code=404)
@@ -1089,7 +1177,12 @@ class ApiRoutes:
         except QuotaExceededError as exc:
             _record_quota_exceeded_event(request, request.app.state.runtime, exc)
             return self._quota_error_response(request, exc)
-        return JSONResponse(_to_payload(result), status_code=202)
+        response_payload = _to_payload(result)
+        response_payload["contracts"] = _part_rerun_contracts(
+            doc_id=request.path_params["doc_id"],
+            submitted=[response_payload],
+        )
+        return JSONResponse(response_payload, status_code=202)
 
     async def rerun_document_parts(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
@@ -1103,6 +1196,7 @@ class ApiRoutes:
                 failed_only=failed_only,
                 state_filter=_includes_payload(payload.get("state"), field_name="state"),
                 profile=payload.get("profile"),
+                provider_route_plan=payload.get("provider_route_plan"),
             )
         except LookupError:
             return _error_response(request, code="part_not_found", message="Part not found", status_code=404)
@@ -1116,9 +1210,15 @@ class ApiRoutes:
         except QuotaExceededError as exc:
             _record_quota_exceeded_event(request, request.app.state.runtime, exc)
             return self._quota_error_response(request, exc)
+        payload = _to_payload(result)
+        if payload.get("submitted"):
+            payload["contracts"] = _part_rerun_contracts(
+                doc_id=request.path_params["doc_id"],
+                submitted=payload.get("submitted") or [],
+            )
         if not result.get("submitted"):
-            return JSONResponse(_to_payload(result), status_code=409)
-        return JSONResponse(_to_payload(result), status_code=202)
+            return JSONResponse(payload, status_code=409)
+        return JSONResponse(payload, status_code=202)
 
     async def cancel_document_part(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
@@ -1143,6 +1243,9 @@ class ApiRoutes:
             formats = _formats_payload(payload.get("formats"))
             normalized_includes = {str(item).strip().lower() for item in includes or ()}
             view_names = tuple(name for name in ("pages", "lines") if name in normalized_includes)
+            include_coverage = bool(normalized_includes) and "coverage" in normalized_includes
+            include_reader = bool(normalized_includes) and "reader" in normalized_includes
+            default_export = not normalized_includes
             snapshot = runtime_obj.get_document(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1150,7 +1253,9 @@ class ApiRoutes:
             )
             if snapshot["job"] is None:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
-            view_only_export = bool(normalized_includes) and not (normalized_includes - {"pages", "lines", "records"})
+            view_only_export = bool(normalized_includes) and not (
+                normalized_includes - {"pages", "lines", "records", "coverage", "reader"}
+            )
             if view_only_export:
                 export_payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
             else:
@@ -1176,6 +1281,12 @@ class ApiRoutes:
                         status_code=404,
                     )
                 export_payload["records"] = records_payload["items"]
+            if include_coverage or default_export:
+                coverage_payload = _document_projection(snapshot, projection="coverage")
+                export_payload["coverage"] = coverage_payload["coverage"]["pages"]
+            if include_reader:
+                reader_payload = _document_projection(snapshot, projection="reader")
+                export_payload["reader"] = reader_payload["blocks"]
             manifest = create_export_package(
                 export_payload,
                 _export_root(runtime_obj),
@@ -1518,6 +1629,176 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _part_rerun_contracts(
+    *,
+    doc_id: str,
+    submitted: list[dict[str, Any]],
+) -> dict[str, Any]:
+    submitted_items = [item for item in submitted if isinstance(item, dict)]
+    attention_parts: list[dict[str, Any]] = []
+    submitted_part_ids: list[str] = []
+    submitted_job_ids: list[str] = []
+    monitor_requests: list[dict[str, Any]] = []
+    for item in submitted_items:
+        part_payload = _part_rerun_attention_part_payload(item)
+        if str(part_payload.get("part_id") or "").strip():
+            attention_parts.append(part_payload)
+            submitted_part_ids.append(str(part_payload["part_id"]))
+        job = item.get("job")
+        job_id = str((job.get("job_id") if isinstance(job, dict) else getattr(job, "job_id", "")) or "").strip()
+        if job_id:
+            submitted_job_ids.append(job_id)
+            monitor_requests.append(
+                {
+                    "contract_id": f"monitor:{len(monitor_requests) + 1}",
+                    "action_id": "monitor_rerun_job",
+                    "scope": "job",
+                    "auto_execute": False,
+                    "request": {
+                        "method": "GET",
+                        "endpoint": f"/v1/parse/jobs/{job_id}",
+                    },
+                    "context": {
+                        "part_id": str(part_payload.get("part_id") or "").strip() or None,
+                        "submitted_part_ids": submitted_part_ids,
+                    },
+                }
+            )
+
+    context = {
+        "submitted_part_ids": submitted_part_ids,
+        "submitted_job_ids": submitted_job_ids,
+        "coverage_gap_part_ids": [
+            str(item.get("part_id") or "")
+            for item in attention_parts
+            if _optional_int(item.get("coverage_gap_count")) and _optional_int(item.get("coverage_gap_count")) > 0
+        ],
+        "coverage_gap_unit_part_ids": [
+            str(item.get("part_id") or "")
+            for item in attention_parts
+            if _optional_int(item.get("coverage_gap_unit_count")) and _optional_int(item.get("coverage_gap_unit_count")) > 0
+        ],
+        "unembedded_part_ids": [
+            str(item.get("part_id") or "")
+            for item in attention_parts
+            if _optional_int(item.get("unembedded_unit_count")) and _optional_int(item.get("unembedded_unit_count")) > 0
+        ],
+        "gap_unit_ids": sorted(
+            {
+                str(unit_id)
+                for item in attention_parts
+                for unit_id in item.get("gap_unit_ids", [])
+                if str(unit_id)
+            }
+        ),
+        "attention_parts": attention_parts,
+    }
+    verify_requests = [
+        {
+            "contract_id": "verify:parts",
+            "action_id": "open_parts",
+            "scope": "document_view",
+            "auto_execute": False,
+            "request": {
+                "method": "GET",
+                "endpoint": f"/v1/parse/documents/{doc_id}/parts",
+                "params": {"state": "warning|failed"},
+            },
+            "context": context,
+        },
+        {
+            "contract_id": "verify:quality",
+            "action_id": "open_quality",
+            "scope": "document_view",
+            "auto_execute": False,
+            "request": {
+                "method": "GET",
+                "endpoint": f"/v1/parse/documents/{doc_id}/quality",
+            },
+            "context": context,
+        },
+        {
+            "contract_id": "verify:coverage",
+            "action_id": "open_coverage",
+            "scope": "document_view",
+            "auto_execute": False,
+            "request": {
+                "method": "GET",
+                "endpoint": f"/v1/parse/documents/{doc_id}/coverage",
+            },
+            "context": context,
+        },
+    ]
+    return {
+        "monitor_requests": monitor_requests,
+        "verify_requests": verify_requests,
+        "preferred_verify_request": verify_requests[0] if verify_requests else None,
+        "workflow": {
+            "default_phase": "monitor" if monitor_requests else "verify",
+            "phases": [
+                {
+                    "phase": "monitor",
+                    "label": "Monitor rerun jobs",
+                    "preferred_contract_id": monitor_requests[0]["contract_id"] if monitor_requests else None,
+                    "contract_ids": [
+                        str(item.get("contract_id") or "")
+                        for item in monitor_requests
+                        if str(item.get("contract_id") or "")
+                    ],
+                    "ready": bool(monitor_requests),
+                },
+                {
+                    "phase": "verify",
+                    "label": "Verify rerun results",
+                    "preferred_contract_id": verify_requests[0]["contract_id"] if verify_requests else None,
+                    "contract_ids": [
+                        str(item.get("contract_id") or "")
+                        for item in verify_requests
+                        if str(item.get("contract_id") or "")
+                    ],
+                    "ready": bool(verify_requests),
+                },
+            ],
+        },
+    }
+
+
+def _part_rerun_attention_part_payload(item: dict[str, Any]) -> dict[str, Any]:
+    previous = item.get("previous_part_observation")
+    previous_payload = previous if isinstance(previous, dict) else {}
+    coverage_summary = previous_payload.get("coverage_summary")
+    coverage_summary_payload = coverage_summary if isinstance(coverage_summary, dict) else {}
+    return {
+        "part_id": str(item.get("part_id") or "").strip(),
+        "previous_job_id": str(previous_payload.get("job_id") or "") or None,
+        "previous_state": str(previous_payload.get("state") or "") or None,
+        "quality_signal_codes": [
+            str(code)
+            for code in previous_payload.get("quality_signal_codes", [])
+            if str(code)
+        ],
+        "coverage_gap_count": (
+            _optional_int(previous_payload.get("coverage_gap_count"))
+            or _optional_int(coverage_summary_payload.get("pages_with_coverage_gaps"))
+            or 0
+        ),
+        "coverage_gap_unit_count": len(
+            [
+                str(unit_id)
+                for unit_id in coverage_summary_payload.get("gap_unit_ids", [])
+                if str(unit_id)
+            ]
+        ),
+        "gap_unit_ids": [
+            str(unit_id)
+            for unit_id in coverage_summary_payload.get("gap_unit_ids", [])
+            if str(unit_id)
+        ],
+        "unembedded_unit_count": _optional_int(coverage_summary_payload.get("unembedded_unit_count")) or 0,
+        "selected_provider_id": str(previous_payload.get("selected_provider_id") or "") or None,
+    }
+
+
 def _minimal_export_payload(snapshot: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
     job = snapshot.get("job")
     options = getattr(job, "options", {}) if job is not None else {}
@@ -1630,6 +1911,14 @@ def _force_sync_requested(payload: Any, options: dict[str, Any]) -> bool:
         if isinstance(options, dict) and _coerce_bool(options.get(key), default=False):
             return True
     return False
+
+
+def _query_csv_list(request: Request, *names: str) -> list[str]:
+    items: list[str] = []
+    for name in names:
+        for value in request.query_params.getlist(name):
+            items.extend(part.strip() for part in str(value or "").split(",") if part.strip())
+    return items
 
 
 def _safe_file_size(file_path: str) -> int | None:

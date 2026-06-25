@@ -45,6 +45,17 @@ def is_ocr_provider_available(settings: OcrProviderSettings) -> bool:
     return False
 
 
+def _rapidocr_constructor() -> Any:
+    try:
+        from rapidocr_onnxruntime import RapidOCR  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "rapidocr_onnxruntime is required for OCR provider 'rapidocr'; "
+            "install via `pip install rapidocr_onnxruntime`"
+        ) from exc
+    return RapidOCR
+
+
 def build_ocr_engine(settings: OcrProviderSettings) -> Any:
     if not settings.enabled:
         raise OcrConfigurationError(
@@ -53,14 +64,7 @@ def build_ocr_engine(settings: OcrProviderSettings) -> Any:
 
     provider = _normalized_provider_name(settings.provider)
     if provider in {"rapidocr", "rapidocr-onnxruntime", "rapidocr_onnxruntime"}:
-        try:
-            from rapidocr_onnxruntime import RapidOCR  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError(
-                "rapidocr_onnxruntime is required for OCR provider 'rapidocr'; "
-                "install via `pip install rapidocr_onnxruntime`"
-            ) from exc
-
+        RapidOCR = _rapidocr_constructor()
         options, adapter_options = _split_rapidocr_options(settings.options)
         inner = RapidOCR(**options) if options else RapidOCR()
         return RapidOcrEngineAdapter(inner, options=adapter_options)

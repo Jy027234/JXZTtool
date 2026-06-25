@@ -107,3 +107,45 @@ docker compose up -d --build
 ```
 
 需要临时关闭上传限制时，将对应配置中的 `max_upload_bytes` 改为 `0` 后重启 API。需要临时关闭 OCR fallback 时，把 PDF parser 的 `ocr_bad_pages` 改为 `false` 后重启 API / worker。
+
+### 专项回滚：Local Provider Routing
+
+当 Provider 灰度导致解析质量下降、耗时异常、依赖错误或 route primary 与实测 best provider 偏差扩大时，先关闭执行路由，不要立即删除 Provider 配置：
+
+```toml
+[providers.local_parser_routing]
+enabled = false
+fallback_to_default = true
+include_disabled = false
+```
+
+关闭后重启 API / worker。`/providers/route-plan` 仍可继续只读评估候选，实际解析会回到 `[[parsers]]` 的默认顺序。
+
+### 专项回滚：候选 Provider 配置
+
+若只需要撤回某个候选 Provider，把对应 `[[providers.local_parsers]]` 调整为 evaluation-only：
+
+```toml
+enabled = false
+route_mode = "evaluate"
+gate_status = "pending"
+```
+
+若该 Provider 已被加入 `[[parsers]]` 执行列表，同时删除或注释对应 parser 块，避免 route fallback 仍命中它。调整后运行：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
+```
+
+### 专项回滚：Profile 灰度
+
+如果某个 profile 灰度异常，优先让宿主停止显式传该 profile，回到 `profile=auto` 或 `default`。服务端配置中应保持候选 profile 不作为默认全量入口；必要时把相关 parser/provider 的 `profiles` 列表临时移除该 profile。
+
+### 专项回滚：Reader 接入
+
+如果宿主阅读页接入 `projection=reader` 后出现渲染问题，优先在宿主侧降级为旧阅读页或 `projection=structured`，ParseCore 侧保留 `reader` 投影继续用于诊断。不要删除 reader 字段或降低 schema version；后续通过固定样本和截图验收修复 reader block/table/figure 渲染问题。
+
+### 专项回滚：Part Rerun
+
+如果局部 rerun 导致质量退化，先停止自动执行 `rerun_warning_parts`，保留 `inspect -> compare` 只读路径。对已有异常文档优先查看 `/parts` 的 `rerun_comparison` 和 `/quality.attention_summary.contracts`，确认是 provider 变更、coverage gap 扩大，还是 chunk/embedding 未闭环，再决定是否整文档 reparse。

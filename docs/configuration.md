@@ -37,7 +37,15 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip 
 
 # Worker 与 Postgres/pgvector
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[worker,storage]"
+
+# 可选 PDF baseline provider（pymupdf4llm）
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[pymupdf4llm]"
+
+# 可选 Docling 统一结构 provider
+# d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[docling]"
 ```
+
+> `pymupdf4llm` 和 `docling` 是可选 extra，不会随 `.[parsers]` 自动安装。启用前请参阅下文 [可选 Provider 安装](#可选-provider-安装) 章节。
 
 生产或灰度环境通常安装：
 
@@ -118,6 +126,9 @@ log_path = "var/logs/job_events.jsonl"
 | `poll_interval_ms` | `1000` | 正整数 | Worker 拉取待处理 job 的轮询间隔。 |
 | `max_upload_bytes` | `0` | 字节数 | `/parse`、`/v1/parse`、`/parse/batch`、`/v1/parse/batch` 同步上传保护；`0` 表示不限制。推荐生产保留 50 MiB 或按业务调整。 |
 | `staged_upload_max_bytes` | `0` | 字节数 | `/parse/uploads` 与 `/v1/parse/uploads` 桥接暂存上限；`0` 表示不限制，用于承接同步入口拒绝的大文件。 |
+| `staged_upload_retention_seconds` | `86400` | 秒数 | 桥接暂存文件保留期，过期上传会在上传入口触发清理。 |
+| `part_artifact_retention_seconds` | `604800` | 秒数 | part PDF 等局部解析工件建议保留期，配合 `cleanup_artifacts()` 或运维任务清理。 |
+| `export_artifact_retention_seconds` | `2592000` | 秒数 | 异步导出包建议保留期，生产可按容量和审计要求调整。 |
 | `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
 | `quota_enforce` | `false` | bool | 开启后按租户和 `quota_key` 做硬限校验。 |
@@ -277,6 +288,33 @@ adapter = "embedded"
 | `translation.strategy` | 当前建议保持 `lazy`。 |
 | `product.adapter` | 兼容旧配置字段，当前会归一化为 `embedded`。 |
 
+## Quality Gate 配置
+
+质量门禁用于把 IR / coverage / RAG 覆盖审计收敛成统一动作建议。当前为 report-only：只在 `/v1/runtime`、`projection=structured|ir|coverage`、`/quality` 和 `/providers` 输出 `quality_gate`，不主动阻断解析、不自动触发复跑。
+
+```toml
+[quality_gate]
+enabled = true
+min_text_page_coverage = 0.98
+min_table_unit_coverage = 0.95
+min_unit_chunk_coverage = 0.98
+min_reading_order_confidence = 0.75
+allow_local_rerun = true
+allow_manual_review = true
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `enabled` | 是否输出门禁判定；关闭后返回 `gate = "disabled"`。 |
+| `min_text_page_coverage` | 正文页产生可入库 KnowledgeUnit 的最低比例。 |
+| `min_table_unit_coverage` | 表格页产生表格/摘要 KnowledgeUnit 的最低比例。 |
+| `min_unit_chunk_coverage` | 可入库 KnowledgeUnit 进入 chunk 的最低比例。 |
+| `min_reading_order_confidence` | 阅读顺序置信度阈值；当前会消费页级 `reading_order_confidence`，低于阈值时进入 `quality_gate` 并优先建议 `layout` 能力的本地 Provider 重跑。 |
+| `allow_local_rerun` | 当覆盖缺口更适合重跑本地 Provider 时，允许输出 `gate = "local_rerun"`。 |
+| `allow_manual_review` | 当覆盖缺口需要人工复核时，允许输出 `gate = "manual_review"`。 |
+
+`quality_gate` 输出包含 `gate / passed / blocking / enforcement / recommended_action / action_suggestions / flags / warnings / thresholds / observed`。本阶段 `enforcement = "report_only"` 且 `blocking = false`，宿主产品可先用于质量面板、运营抽检和局部复跑按钮。`action_suggestions` 只描述可用操作，不自动执行；每条建议包含 `action_id / method / endpoint / scope / reason_codes / auto_execute`，并可带 `params / payload / context`。常见动作包括 `reparse_document`、`rechunk_document`、`reembed_document`、`rerun_warning_parts`、`review_parse_ir` 和 `review_quality`。RAG 表格缺 unit 会优先建议本地 Provider 重跑；图示缺 caption 会进入 IR/质量报告复核；阅读顺序置信度低于 `min_reading_order_confidence` 时，会进入 `reading_order_confidence_below_threshold`，并把本地 Provider 能力要求收敛到 `layout`。若 `rerun_warning_parts` 已拿到 `parse_units[].rerun_comparison`，则会把已有 rerun 记录的 warning part 放入 `context.rerun_candidates.skipped_parts`，避免批量建议里重复包含同一页段；当前 `rerun_candidates` 还会补 `eligible_parts / coverage_gap_unit_part_ids / gap_unit_ids`，把“为什么建议重跑这些 part”直接收口到 part 与 KnowledgeUnit。对于 `/providers` 投影，`quality_gate` 还会额外挂出 `provider_comparison.primary_provider_id / best_provider_id / summary / actions`，并把 Provider 对比类动作合并进 `quality_gate.action_suggestions`，让接入方不必同时拼装两套诊断按钮。与此同时，`/quality` 投影也开始补 `provider_diagnostics`、`parts_diagnostics` 和 `attention_summary`，把 Provider 对比摘要、comparison actions、part 汇总、attention parts 以及一组已排好顺序的 `recommended_actions` 收口成默认诊断入口；其中 `attention_summary.entrypoints` 会额外提供 `quality / providers / parts / coverage` 四个视图的 endpoint、attention 状态、badge 数和推荐落点，并通过 `providers.context / parts.context / coverage.context` 补当前需要聚焦的 provider、part 和 coverage gap 上下文。进一步地，`attention_summary.contracts` 会把推荐动作规范成统一的 `request` 契约，并补充 `default_request / inspect_requests / execute_requests / preferred_execute_request / entrypoint_requests / parts_batch_rerun_requests / workflow`，方便宿主把查看和执行分成两条稳定路径；当前只要推荐执行落在 `/parts/rerun`，`preferred_execute_request` 与 `parts_batch_rerun_requests` 也会同步带上 `attention_parts / coverage_gap_unit_part_ids / gap_unit_ids` 这类执行上下文，适合作为批量 rerun 抽屉或确认弹窗的数据源；`workflow` 会额外给出 `inspect -> compare -> execute -> verify` 的阶段化落点，适合作为诊断抽屉、侧边栏或动作向导的默认状态机。
+
 ## Provider 配置
 
 ### OCR Provider
@@ -380,6 +418,113 @@ options.max_calls_per_doc = 50
 
 生产建议先保持关闭；若开启，应先用固定样本跑 `self_check` 和解析性能基线，确认没有时延和成本异常。
 
+### Local Provider Registry
+
+本地 Provider Registry 用于声明内置解析器和候选本地解析引擎，供 `/v1/parse/providers`、`/v1/parse/providers/route-plan`、`/v1/runtime`、`projection=ir` 和灰度路由读取。默认只读，不改变实际解析器；只有显式开启 `providers.local_parser_routing.enabled` 后，ParseCore 才会按 route-plan 的 primary/fallback 在已注册 `[[parsers]]` 中选择实际 parser。
+
+```toml
+[providers.local_parser_routing]
+enabled = false
+fallback_to_default = true
+include_disabled = false
+
+[[providers.local_parsers]]
+id = "pdf-text"
+enabled = true
+priority = 100
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["default", "table-heavy", "large-pdf"]
+capabilities = ["native-text", "layout", "tables", "local-ocr-fallback"]
+route_mode = "route"
+gate_status = "passed"
+gate_checks = ["samples", "license", "performance", "observability"]
+
+[[providers.local_parsers]]
+id = "pymupdf4llm-local"
+enabled = false
+priority = 80
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["default", "table-heavy"]
+capabilities = ["markdown", "json", "rag-baseline"]
+route_mode = "evaluate"
+gate_status = "pending"
+gate_checks = ["samples", "license", "performance", "observability"]
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | Provider ID，建议使用 `{engine}-{mode}`，如 `docling-local`。 |
+| `enabled` | 是否允许进入灰度路由；`false` 时仍可被发现和评估。 |
+| `priority` | 同一文件类型/profile 下的排序权重，数值越高越靠前。 |
+| `media_types` / `extensions` | 该 provider 声明支持的输入类型。 |
+| `profiles` | 适用的 ParseCore profile。 |
+| `capabilities` | 能力标签，例如 `layout`、`tables`、`reading-order`、`rag-baseline`。 |
+| `route_mode` | `route` 表示允许进入执行路由候选；`evaluate` 表示仅保留在 registry、route-plan 和 provider-suite 中做评测/对照。 |
+| `gate_status` | `passed` / `pending` / `failed`。只有 `passed` 才允许进入执行路由。 |
+| `gate_checks` | 当前针对该 provider 记录的门禁维度，推荐固定为 `samples / license / performance / observability`。 |
+| `options` | 可选 provider 私有选项；本阶段只配置和透传，不触发外部服务调用。 |
+
+`providers.local_parser_routing` 控制实际解析路由：
+
+| 字段 | 说明 |
+| --- | --- |
+| `enabled` | 默认 `false`，route-plan 仅用于解释和报告；设为 `true` 后才会按 primary/fallback 选择已注册 parser。 |
+| `fallback_to_default` | 当 route-plan 选出的 provider 没有对应 `[[parsers]]` 或不支持当前文件时，是否回退到原有 parser 顺序。建议生产保持 `true`。 |
+| `include_disabled` | 是否允许 disabled provider 进入执行路由候选。建议保持 `false`，disabled provider 仅用于发现、报告和离线评估。 |
+
+本阶段推荐只把内置主链 provider 设为 `route_mode = "route"` 且 `gate_status = "passed"`；候选 provider 先保持 `route_mode = "evaluate"`，待 adapter、固定样本、许可证、性能基线和可观测性门禁确认后，再切到正式执行路由。开启执行路由后，job options 以及 `structured / ir / coverage / reader / quality / providers` 投影都会写入 `local_provider_routing` 决策，包含 `selected_provider_id / route_status / eligible_provider_ids / requested`，便于回溯当时为什么用了哪个 parser。质量门禁建议本地 Provider 重跑时，`action_suggestions[].context.local_provider_routing` 会同时返回当前路由配置、是否处于 `inspect_only`、以及是否需要先启用 `providers.local_parser_routing.enabled`，避免把只读 route-plan 误当成已生效的执行路由；文本覆盖类能力要求使用 `native-text / local-ocr-fallback`，不把外部 OCR API 作为 route-plan 候选条件。
+
+只读路由计划示例：
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/providers/route-plan?file_name=manual.pdf&profile=table-heavy&capability=tables"
+```
+
+响应会返回 `selection.primary_provider_id / fallback_provider_ids / candidates[].route_role / candidates[].exclusion_reasons / candidates[].admission`。其中 `evaluation_only`、`gate_pending`、`gate_failed` 会把 provider 保留在对照视图里，但排除出执行路由。默认不会自动替换解析器，只有开启 `providers.local_parser_routing.enabled` 后才参与实际 parser 选择，也不会调用任何外部服务。
+
+## 可选 Provider 安装
+
+`pymupdf4llm-local` 已有可选 adapter。启用前需要安装额外依赖：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[pymupdf4llm]"
+```
+
+然后显式增加 parser 配置：
+
+```toml
+[[parsers]]
+name = "pymupdf4llm-local"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+options = { page_chunks = true, detect_tables = true }
+```
+
+建议先只在测试环境或指定 profile 中使用它做 baseline 对照，不替换默认 `pdf-text` 主链路。
+
+`docling-local` 现也提供可选 adapter。启用前需要安装额外依赖：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[docling]"
+```
+
+然后显式增加 parser 配置：
+
+```toml
+[[parsers]]
+name = "docling-local"
+media_types = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]
+extensions = [".pdf", ".docx"]
+options = { detect_tables = true }
+```
+
+`docling-local` 适合作为 PDF / DOCX 的统一结构对照 provider。建议先在 route-plan、provider-suite 或问题页段灰度中使用，再决定是否进入执行路由。
+
 ## Parser 配置
 
 每个 parser 使用一个 `[[parsers]]` 块：
@@ -399,6 +544,8 @@ extensions = [".xlsx", ".xlsm", ".xls"]
 | --- | --- | --- |
 | `docx-native` | `.docx` | 原生 DOCX 解析。 |
 | `pdf-text` | `.pdf` | PDF 文本、结构、表格、OCR fallback。 |
+| `pymupdf4llm-local` | `.pdf` | 可选 PDF Markdown/JSON baseline provider，需安装 `.[pymupdf4llm]`。 |
+| `docling-local` | `.pdf` / `.docx` | 可选 Docling 统一结构 provider，需安装 `.[docling]`。 |
 | `image-ocr` | `.png` / `.jpg` / `.jpeg` | 图片 OCR。 |
 | `excel-native` | `.xls` / `.xlsx` / `.xlsm` | 原生表格解析，输出 `TABLE` block。 |
 | `text-native` | `.txt` / `.md` | 纯文本/Markdown。 |
@@ -530,6 +677,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/o
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --config parsecore.toml
 ```
@@ -546,6 +694,18 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .pdf,.docx,.xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
 ```
 
+该报告除 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables` 外，还会为每个样本写入 `provider_report.comparison_report`，并在 Markdown 中展示 `primary_provider / best_provider / provider_score`，用于把固定样本性能与本地 Provider 对比口径放在同一份报告中。
+
+本地 Provider 离线对比：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.json --out-md var/self-check/provider-comparison.md
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/suite.fast.json --fixture-root D:/app/uploads --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.suite.json --out-md var/self-check/provider-comparison.suite.md
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
+```
+
+该工具对同一样本逐个运行已配置的本地 parser，输出 `ir_summary / coverage_summary / rag_coverage_quality / provider_report.comparison_report`。未配置、依赖缺失或不支持文件类型的候选会写成 `skipped/failed`，不会中断整批样本；远程 OCR provider 会在该离线工具中禁用，避免 Provider 对比时触发外部 OCR API。`--suite` 可读取新的 `samples / fixtures / cases` 清单，也可直接复用现有 `entries -> baseline -> fixtures` 回归套件；每个样本可用 `providers / provider_ids / profile / fixture_relative_path / page_range` 覆盖全局参数，suite 顶层还可声明 `gate_policy.max_provider_reading_order_warning_runs`、`gate_policy.max_provider_quality_warning_runs`、`gate_policy.max_samples_best_provider_differs_from_route_primary`、`gate_policy.max_providers_with_multiple_provider_versions`、`gate_policy.max_providers_with_multiple_adapter_versions` 这类基础门禁预算。仓库当前内置了 `var/regression/provider-suite.fast.json`、`var/regression/provider-suite.full.json` 与 `var/regression/provider-suite.perf.json` 三套工件，分别对应 `fast`、`full` 与 `perf` 自检默认 Provider 门禁。默认 auto route-plan 模式下，报告仍会保留 disabled/未接入候选的 `skipped` 解释，但 gate 不再把这类 `parser_not_configured` / `unsupported_media_type_or_extension` 直接当成 warning；只有显式指定的 Provider 被跳过，或出现非预期 skipped，才会进入 `provider_runs_skipped`。现在每次 provider run 还会显式回填 `provider_version / adapter_version`，suite 顶层新增 `provider_identity_summary`，用于追踪“同一个 provider id 实际跑的是哪版上游库/哪版 Adapter”；一旦同名 Provider 混入多版上游库或多版 Adapter，gate 会先给出 drift warning，再按上面的 budget 决定是否 fail。与此同时，报告还会输出 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action` 与 `requires_config_update`，并补齐 `drift_fields / drift_details / config_patch`，便于把对比结论直接回写到 `providers.local_parsers` 配置。如果希望把“准入建议还没收敛”也纳入 fail gate，suite 顶层还支持 `gate_policy.max_providers_requiring_config_update`、`gate_policy.max_providers_with_route_mode_drift`、`gate_policy.max_providers_with_gate_status_drift`、`gate_policy.max_providers_with_gate_checks_drift`、`gate_policy.max_providers_with_route_ready_drift` 五类 admission drift 预算，分别约束待回写 provider 数量以及 `route_mode / gate_status / gate_checks / route_ready` 四类配置漂移。`parsecore self-check` 在实际执行 provider comparison 时，会把 identity 和 admission 两份摘要一起带回检查结果，并在 summary 中追加 `identity_drift / admission_ready / admission_update` 计数。与此同时，self-check 仍会在输出目录自动落盘 `provider-comparison.fast/full/perf.json/.md`，并把路径写回 self-check JSON。`--fixture-root` 或 `PARSECORE_REGRESSION_FIXTURE_ROOT` 用于跨机器恢复真实样本路径。对 PDF 还支持 `--page-start / --page-end` 或 suite 内 `page_range` 局部评估：工具会先切出 part 文件，再把 IR / coverage / provider_report 页码平移回原始页号，便于大文件异常页和采样页灰度对比。
+
 大 PDF part 调度压测：
 
 ```powershell
@@ -561,6 +721,20 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/runtime
 Invoke-RestMethod http://127.0.0.1:8090/v1/parse/metrics
 Invoke-RestMethod http://127.0.0.1:8090/v1/parse/prometheus
 ```
+
+最小运维面板建议至少展示以下字段：
+
+| 面板区域 | 数据来源 | 关键字段 |
+| --- | --- | --- |
+| API 健康 | `/health`、`/v1/runtime` | 当前配置、execution_mode、api_auth_enabled、payload_schemas、provider_registry.summary |
+| 队列与任务 | `/v1/parse/metrics`、`/v1/parse/events`、`/v1/parse/jobs/{job_id}` | active/pending/failed/done、duration p95/p99、retry/dead_letter、claim_token、lease_expires_at |
+| 文档质量 | `/v1/parse/documents/{doc_id}/quality` | quality_gate.gate、recommended_action、attention_summary、quality_signal_counts |
+| RAG 覆盖 | `/coverage`、`projection=coverage` | text_page_coverage_ratio、table_unit_coverage_ratio、unit_chunk_coverage_ratio、gap_unit_ids |
+| Provider 灰度 | `/providers`、`/v1/parse/providers/route-plan` | primary_provider_id、best_provider_id、route_status、excluded reasons、admission drift |
+| Part 运维 | `/parts`、rerun response contracts | warning/failed parts、rerun_status、provider_changed_parts、monitor_requests、verify_requests |
+| 导出与工件 | export job manifest、retention 配置 | export status、file count、record count、artifact age、retention_seconds |
+
+事件日志 `runtime.log_path` 默认写入 `var/logs/job_events.jsonl`。事件字段应按 `job_id / doc_id / part_id / tenant_id / stage / error_category` 建索引；`api_key / token / authorization / secret / password` 等敏感字段会在事件日志写入前脱敏。
 
 文档结果 projection：
 
@@ -620,6 +794,8 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=lines&format=csv" -OutFile lines.csv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=tables&format=csv" -OutFile tables.csv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=quality_signals&format=jsonl" -OutFile quality_signals.jsonl
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=coverage&format=jsonl" -OutFile coverage_report.jsonl
+Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=reader&format=jsonl" -OutFile reader_blocks.jsonl
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=parse_units&format=tsv" -OutFile parse_units.tsv
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=jsonl" -OutFile records.jsonl
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=sqlite" -OutFile records.sqlite
@@ -628,7 +804,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 
 支持参数：
 
-- `dataset=pages|lines|tables|quality_signals|parse_units|records`
+- `dataset=pages|lines|tables|quality_signals|coverage|reader|parse_units|records`
 - `format=jsonl|csv|tsv|sqlite|xlsx`
 - `tenant_id=...` 可选，默认 `default`
 
@@ -641,9 +817,28 @@ GET /v1/parse/documents/{doc_id}/records?page_start=2000&page_end=2300
 GET /v1/parse/documents/{doc_id}/records?quality_signal=column_shift_suspected
 GET /v1/parse/documents/{doc_id}/records?field.certificate_or_project_no=PMA0013-01-XN
 GET /v1/parse/documents/{doc_id}/records?field=holder_or_name_start&value=重庆
+GET /v1/parse/documents/{doc_id}/coverage
+GET /v1/parse/documents/{doc_id}/providers
+GET /v1/parse/documents/{doc_id}/reader
+GET /v1/parse/documents/{doc_id}?projection=reader
+GET /v1/parse/schemas
+GET /v1/parse/schemas/document-coverage
+GET /v1/parse/schemas/document-ir
+GET /v1/parse/schemas/document-parts
+GET /v1/parse/schemas/document-providers
+GET /v1/parse/schemas/document-quality
+GET /v1/parse/schemas/document-reader
 ```
 
-同步导出已把 `pages / lines / tables / quality_signals / parse_units / records` 都纳入正式 dataset。同步 records 导出也可带相同的 `query / page_start / page_end / quality_signal / field.*` 参数，用于直接下载筛选后的 records。CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
+`/quality` 返回文档级质量总览，除 `quality / quality_signals / quality_gate / rag_coverage_quality / parse_units` 外，当前还会补 `provider_diagnostics`、`parts_diagnostics` 与 `attention_summary`，让宿主在单次请求里同时看到 Provider 对比摘要、comparison actions、part 汇总、attention parts，以及一组已按优先级合并好的 `recommended_actions`。`attention_summary` 还会直接给出 `recommended_focus / recommended_action / recommended_entrypoint`，用来回答“下一步先看 quality、providers 还是 parts”；`attention_summary.entrypoints` 则会给出 `quality / providers / parts / coverage` 四个诊断视图的 endpoint、attention 状态、badge 数和推荐落点，适合驱动宿主的导航和红点。对于宿主联调更直接的筛选需求，`providers.context` 会带 `primary_provider_id / best_provider_id / attention_provider_ids`，`parts.context` 会带 `attention_part_ids / rerun_part_ids / provider_changed_part_ids / coverage_gap_part_ids / coverage_gap_unit_part_ids / rerun_gap_unit_part_ids / unembedded_part_ids / gap_unit_ids`，`coverage.context` 会带 `gap_page_numbers / pages_missing_rag_units / pages_missing_chunks / pages_chunks_not_embedded`。同时，`parts_diagnostics.attention_parts[]` 也已补齐 `coverage_gap_unit_count / gap_unit_ids / unembedded_unit_count / gap_unit_count_delta / gap_unit_ids_added / gap_unit_ids_removed`，方便宿主在不展开 `/parts` 明细页的前提下直接判断哪个 part 还有哪些 KnowledgeUnit 缺口、rerun 后是新增还是减少。另外，`attention_summary.contracts.default_request / preferred_execute_request / recommended_requests / inspect_requests / execute_requests / entrypoint_requests / parts_batch_rerun_requests / workflow` 会把这些建议进一步规范成统一 request 结构，适合宿主直接提交下钻或批量 rerun，并把查看类与执行类请求分开消费；其中 `workflow` 会显式描述 `inspect -> compare -> execute -> verify` 四阶段，帮助宿主把诊断页、Provider 复核和 part/document 复跑串成固定流程。`/coverage` 返回页级 RAG 覆盖报告和 `rag_coverage_quality`，包括 `rag_empty_text_page / rag_units_without_chunks / rag_chunks_not_embedded / rag_table_without_unit / rag_figure_caption_missing` 等信号；`/providers` 返回该文档实际使用的 Provider footprint，包括 provider 汇总、页级 `provider_ids`、覆盖缺口和 RAG 类质量信号，适合灰度对比、排版问题定位和 Provider 路由审计。`/providers.comparison_report` 会按 Provider 输出 `rankings / score / recommendation / axes`，当前覆盖文本覆盖、表格 unit、图示 caption、RAG chunk/embedding 风险，并会在 Provider provenance 提供时汇总 `reading_order_confidence / provider_elapsed_s / provider_memory_mb`；未观测到的字段会进入 `pending_axes`。为方便接入方直接消费，`comparison_report.summary` 现还会输出 `primary_provider_rank / primary_provider_score / primary_provider_recommendation / best_provider_score / best_provider_recommendation / best_provider_differs_from_primary / providers_with_quality_warnings / providers_with_reading_order_warning / providers_with_coverage_gaps / quality_warning_provider_ids / reading_order_warning_provider_ids / coverage_gap_provider_ids / attention_provider_ids / needs_attention / recommended_action`，前端无需再逐条扫描 `rankings` 才能做质量面板或 Provider 复核提示。`/providers` 顶层同时新增 `comparison_actions`，会按当前文档的 Provider 对比态势直接给出 `inspect_provider_comparison`、`inspect_provider_route_plan` 一类只读动作建议；同一份 payload 的 `quality_gate.provider_comparison` 也会带上同样的摘要和动作，并把这些动作合并进 `quality_gate.action_suggestions`，适合作为宿主产品的单一诊断入口。`/parts` 会在每个 part 上返回 `action_suggestions`，用于把 warning/failed 页段映射到 part 级复跑、重建 chunks、重建 embeddings 或质量报告查看入口。
+
+运行期 `index_manifest` 以及 `structured / ir / coverage` 的 `index_manifest` 会追加 `rag_coverage` 摘要。该摘要记录 KnowledgeUnit 到 chunk 的覆盖关系，包括 `unit_count / indexable_unit_count / skipped_unit_count / chunked_unit_count / coverage_score / chunk_ids`，并在 `units[]` 中保留每个 unit 的 `page_span / source_block_ids / source_table_ids / should_index_for_rag / skip_reason / chunk_ids / embedded`，用于宿主产品展示“哪些页进了 RAG，哪些没进，为什么”。
+
+`/reader` 与 `projection=reader` 返回阅读页专用结构：顶层包含 `pages / blocks / reader_summary / quality_signals / quality_gate / index_manifest`。每个 reader block 带 `type / display_kind / reader_policy / text / source_block_ids / source_table_ids / source_figure_ids / bbox / provenance`；表格块额外带结构化 `table`，图示块额外带 `figure`。`reader_policy = hidden` 的页眉页脚、解析工件默认不进入 `blocks`，只在页级 `hidden_block_count` 中计数。
+
+`/v1/parse/schemas` 会列出当前已经冻结的 payload contract；当前已提供 `document-coverage / document-ir / document-parts / document-providers / document-quality / document-reader` 六份 JSON Schema，对应覆盖审计、统一 IR、part 诊断、Provider 诊断、质量诊断和阅读页主链。宿主可以直接用这些 schema 做联调、自测或版本门禁；`/v1/runtime` 的 `payload_schemas` 字段也会返回同一份摘要列表，便于启动后自动发现。
+
+同步导出已把 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records` 都纳入正式 dataset。`coverage` 对应页级 RAG 覆盖报告，默认 JSONL 文件名可作为 `coverage_report.jsonl` 保存；`reader` 对应 `projection=reader` 的 reader blocks，可直接用于阅读页联调、排版质量抽检和结构化表格/图示回归。同步 records 导出也可带相同的 `query / page_start / page_end / quality_signal / field.*` 参数，用于直接下载筛选后的 records。CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields/table/figure/knowledge_units` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
 
 ```text
 POST /v1/parse/documents/{doc_id}/export-jobs
@@ -651,7 +846,7 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / parse_units / records`。异步包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
+异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / coverage.jsonl / reader.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records`，`quality_signal` 也可筛选 coverage/reader 的 `quality_signal_codes`。异步包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 
@@ -662,7 +857,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts?state
 Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts/demo-doc-part-3/rerun"
 ```
 
-`/parts/plan` 会基于最新 PDF job 轻量探测页数，生成物理 part PDF 和子 job。每个子 job 使用独立 `part_doc_id`，避免覆盖父文档；子 part 完成后会刷新父文档的 blocks/chunks、structured projection、`parse_units`、document views 和 part 状态。当前 store 已支持按 part 前缀替换 `pages / lines / records`，因此单 part 复跑会优先局部替换对应视图；无法局部替换时再回退到父文档视图重建。`/parts` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`。
+`/parts/plan` 会基于最新 PDF job 轻量探测页数，生成物理 part PDF 和子 job。每个子 job 使用独立 `part_doc_id`，避免覆盖父文档；子 part 完成后会刷新父文档的 blocks/chunks、structured projection、`parse_units`、document views 和 part 状态。当前 store 已支持按 part 前缀替换 `pages / lines / records`，因此单 part 复跑会优先局部替换对应视图；无法局部替换时再回退到父文档视图重建。`/parts` 返回 `part_id / page_range / state / quality_signal_codes / severity_counts / job_id / rerun_supported`，并会在可用时补充 `provider_route_plan / local_provider_routing / provider_ids / selected_provider_id / route_status / coverage_summary / coverage_gap_pages / rag_coverage_quality / previous_part_observation / rerun_comparison / diagnostics`，便于观察局部复跑究竟按什么能力要求选中了哪个本地 Provider、这个页段当前还有哪些 RAG 覆盖缺口，以及这次 rerun 相比上一轮到底是改善、退化还是仅更换了 Provider。当前 `coverage_summary / coverage_gap_pages / diagnostics / rerun_comparison` 已继续向 unit 级口径收敛：会补 `gap_unit_ids / coverage_gap_unit_count / unembedded_unit_count / gap_unit_count_delta / gap_unit_ids_added / gap_unit_ids_removed`，让 part 运维可以从页段直接定位到具体 KnowledgeUnit。`diagnostics` 会收口 `rerun_status / provider_changed / previous_selected_provider_id / current_selected_provider_id / quality_signal_count_delta / coverage_gap_delta / recommended_focus` 等宿主更适合直接渲染的字段；顶层 `part_summary` 也会汇总 `rerun_compared_parts / rerun_statuses / provider_changed_parts / selected_provider_ids`。若 `rerun_comparison.status` 已显示 `unchanged / regressed / mixed`，part 级 `action_suggestions` 会优先建议查看 `projection=ir` 或检查 Provider route-plan，而不是默认继续重复 rerun；文档级 `quality_gate` 的 `rerun_warning_parts` 也会读取同一份 `rerun_comparison`，把已有 rerun 对比记录的 warning part 自动移出批量复跑候选。
 
 文档级重跑仍保留：
 
@@ -686,9 +881,16 @@ POST /v1/parse/documents/{doc_id}/parts/{part_id}/cancel
   "part_ids": ["demo-doc-part-3", "demo-doc-part-5"],
   "failed_only": true,
   "state": ["failed", "cancelled"],
-  "profile": "auto"
+  "profile": "auto",
+  "provider_route_plan": {
+    "required_capabilities": ["tables", "layout"]
+  }
 }
 ```
+
+无论是 `POST /parts/rerun` 还是 `POST /parts/{part_id}/rerun`，响应体现在都会补 `previous_part_observation` 与 `contracts`。其中 `contracts.monitor_requests` 会给出每个 rerun job 的 `GET /v1/parse/jobs/{job_id}` 监控入口，`contracts.verify_requests` 会固定挂出 `/parts?state=warning|failed`、`/quality`、`/coverage` 三个验收入口，`preferred_verify_request` 默认指向 `/parts`，`workflow` 则把执行后的推荐顺序收敛成 `monitor -> verify`。这样宿主产品在触发局部复跑后，不需要再自己拼“看 job、看 part、看 coverage”的后续跳转。
+
+当请求里带 `provider_route_plan.required_capabilities` 时，part 复跑会把这组能力要求写入子 job options，供开启了 `providers.local_parser_routing.enabled` 的 runtime 在真正执行前重新计算一次本地 Provider 路由。part job 不再盲继承源 job 的旧 `local_provider_routing` 决策；如果只是切 profile 或切 capability，也会按当前 part 文件重新选 primary/fallback。
 
 取消接口只保证尚未运行的 part：持久化状态为 `pending`，inline runner 内部队列中的 part 也会先移出队列再转为 `cancelled`；如果 part 已在运行中，不强杀 worker 进程，会返回当前状态。运行态 job 的软 timeout 会使当前 `claim_token` 失效，旧 worker 后续写回会被拒绝，再由复跑或下一次 attempt 接管。
 

@@ -67,6 +67,141 @@ class PdfPartsPlanTests(unittest.TestCase):
         self.assertNotIn(" ", first)
         self.assertNotEqual(first, child_doc_id("客户 文档/Alpha#1", 3))
 
+    def test_plan_returns_suggestions_without_creating_jobs(self) -> None:
+        """P5-T02: plan_pdf_parts is a pure function — returns suggestions only, no side effects."""
+        parts = plan_pdf_parts("doc-dry-run", 20, target_pages_per_part=5)
+
+        # Must return exactly 4 parts for 20 pages with 5 pages per part
+        self.assertEqual(len(parts), 4)
+
+        # Every part must be in "pending" state (not created/running/done)
+        for part in parts:
+            self.assertEqual(part["state"], "pending")
+            self.assertIsNotNone(part["part_id"])
+            self.assertIsNotNone(part["page_start"])
+            self.assertIsNotNone(part["page_end"])
+            self.assertEqual(part["source_doc_id"], "doc-dry-run")
+
+        # Verify page ranges are contiguous and cover all pages
+        self.assertEqual(parts[0]["page_start"], 1)
+        self.assertEqual(parts[-1]["page_end"], 20)
+        for i in range(1, len(parts)):
+            self.assertEqual(parts[i]["page_start"], parts[i - 1]["page_end"] + 1)
+
+    def test_plan_is_pure_no_state_mutation(self) -> None:
+        """P5-T02: calling plan_pdf_parts twice yields identical results (idempotent)."""
+        first = plan_pdf_parts("doc-idempotent", 15, target_pages_per_part=5)
+        second = plan_pdf_parts("doc-idempotent", 15, target_pages_per_part=5)
+
+        self.assertEqual(first, second)
+
+    def test_plan_does_not_require_store_or_runtime(self) -> None:
+        """P5-T02: plan_pdf_parts works standalone without any store/runtime dependency."""
+        # Direct call without any runtime or store — proves dry-run nature
+        parts = plan_pdf_parts("doc-standalone", 8, target_pages_per_part=3)
+
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0]["page_start"], 1)
+        self.assertEqual(parts[0]["page_end"], 3)
+        self.assertEqual(parts[1]["page_start"], 4)
+        self.assertEqual(parts[1]["page_end"], 6)
+        self.assertEqual(parts[2]["page_start"], 7)
+        self.assertEqual(parts[2]["page_end"], 8)
+        self.assertEqual(parts[2]["page_count"], 2)  # last part is short
+
+    # ── P5-T01: 完善 part 策略决策因子 ──
+
+    def test_plan_shrinks_part_size_for_large_file(self) -> None:
+        """P5-T01: file_size_bytes > 100MB 时 part 大小减半。"""
+        parts = plan_pdf_parts(
+            "doc-large-file",
+            100,
+            target_pages_per_part=50,
+            file_size_bytes=200 * 1024 * 1024,  # 200MB
+        )
+        # 默认 50 页/part, 大文件减半 = 25 页/part, 100 页 → 4 个 part
+        self.assertEqual(len(parts), 4)
+        self.assertEqual(parts[0]["page_count"], 25)
+        self.assertEqual(parts[-1]["page_count"], 25)
+
+    def test_plan_switches_to_ocr_heavy_when_ratio_high(self) -> None:
+        """P5-T01: ocr_page_ratio > 0.3 时切换到 ocr_heavy 目标。"""
+        parts = plan_pdf_parts(
+            "doc-ocr-dense",
+            20,
+            target_pages_per_part=50,
+            ocr_heavy_pages_per_part=6,
+            ocr_page_ratio=0.5,
+        )
+        # ocr_page_ratio=0.5 > 0.3 → 使用 ocr_heavy 目标 = 6 页/part
+        self.assertEqual(parts[0]["page_count"], 6)
+        self.assertGreaterEqual(len(parts), 3)
+
+    def test_plan_shrinks_part_size_when_failure_rate_high(self) -> None:
+        """P5-T01: historical_failure_rate > 0.2 时 part 大小减半。"""
+        parts = plan_pdf_parts(
+            "doc-flaky",
+            100,
+            target_pages_per_part=50,
+            historical_failure_rate=0.3,
+        )
+        # 默认 50 页/part, 高失败率减半 = 25 页/part, 100 页 → 4 个 part
+        self.assertEqual(len(parts), 4)
+        self.assertEqual(parts[0]["page_count"], 25)
+
+    def test_plan_ignores_new_factors_when_none(self) -> None:
+        """P5-T01: 新参数全为 None 时行为与之前一致（向后兼容）。"""
+        # 无新参数
+        old_parts = plan_pdf_parts("doc-compat", 50, target_pages_per_part=10)
+        # 新参数全部 None
+        new_parts = plan_pdf_parts(
+            "doc-compat",
+            50,
+            target_pages_per_part=10,
+            file_size_bytes=None,
+            ocr_page_ratio=None,
+            historical_failure_rate=None,
+        )
+        self.assertEqual(len(old_parts), len(new_parts))
+        for old, new in zip(old_parts, new_parts):
+            self.assertEqual(old["page_start"], new["page_start"])
+            self.assertEqual(old["page_end"], new["page_end"])
+            self.assertEqual(old["page_count"], new["page_count"])
+
+    def test_plan_file_below_100mb_does_not_shrink(self) -> None:
+        """P5-T01: file_size_bytes <= 100MB 不触发缩减。"""
+        parts = plan_pdf_parts(
+            "doc-small",
+            50,
+            target_pages_per_part=20,
+            file_size_bytes=50 * 1024 * 1024,  # 50MB
+        )
+        # 50 页, 20 页/part → 3 parts, 这里不触发大文件缩减
+        self.assertEqual(parts[0]["page_count"], 20)
+
+    def test_plan_failure_rate_at_boundary_does_not_shrink(self) -> None:
+        """P5-T01: historical_failure_rate == 0.2 不触发缩减。"""
+        parts = plan_pdf_parts(
+            "doc-boundary",
+            50,
+            target_pages_per_part=20,
+            historical_failure_rate=0.2,
+        )
+        # failure_rate = 0.2, 不 > 0.2 → 不缩减
+        self.assertEqual(parts[0]["page_count"], 20)
+
+    def test_plan_ocr_ratio_at_boundary_does_not_switch(self) -> None:
+        """P5-T01: ocr_page_ratio == 0.3 不触发 ocr_heavy 切换。"""
+        parts = plan_pdf_parts(
+            "doc-ocr-boundary",
+            20,
+            target_pages_per_part=20,
+            ocr_heavy_pages_per_part=6,
+            ocr_page_ratio=0.3,
+        )
+        # ocr_page_ratio = 0.3, 不 > 0.3 → 不切换到 ocr_heavy
+        self.assertEqual(parts[0]["page_count"], 20)
+
 
 class PdfPartsIoTests(unittest.TestCase):
     def setUp(self) -> None:

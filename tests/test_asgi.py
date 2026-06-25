@@ -686,6 +686,138 @@ class ParseApiTests(unittest.TestCase):
             self.assertEqual(runtime.status_code, 200)
             self.assertIn("table-heavy", runtime.json()["profiles"]["supported_profiles"])
 
+    def test_parse_providers_endpoint_describes_local_provider_registry(self) -> None:
+        config = TEXT_API_CONFIG.replace(
+            "[[parsers]]",
+            """
+[[providers.local_parsers]]
+id = "text-native"
+enabled = true
+priority = 100
+media_types = ["text/plain"]
+extensions = [".txt", ".md"]
+profiles = ["default"]
+capabilities = ["native-text"]
+
+[[providers.local_parsers]]
+id = "pymupdf4llm-local"
+enabled = false
+priority = 80
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["default"]
+capabilities = ["markdown", "rag-baseline"]
+route_mode = "evaluate"
+gate_status = "pending"
+
+[[parsers]]""",
+            1,
+        )
+        with TemporaryWorkspace(config) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                providers = client.get("/v1/parse/providers")
+                route_plan = client.get(
+                    "/v1/parse/providers/route-plan",
+                    params={
+                        "file_name": "notes.txt",
+                        "profile": "default",
+                        "capability": "native-text",
+                    },
+                )
+                disabled_plan = client.get(
+                    "/v1/parse/providers/route-plan",
+                    params={
+                        "file_name": "manual.pdf",
+                        "profile": "default",
+                        "capability": "rag-baseline",
+                    },
+                )
+                runtime = client.get("/v1/runtime")
+
+        self.assertEqual(providers.status_code, 200)
+        payload = providers.json()
+        self.assertEqual(payload["schema_version"], "2026-06-local-provider-registry")
+        self.assertEqual(
+            payload["summary"],
+            {
+                "total": 2,
+                "enabled": 1,
+                "disabled": 1,
+                "route_ready": 1,
+                "evaluation_only": 1,
+                "gate_pending": 1,
+                "gate_failed": 0,
+            },
+        )
+        self.assertEqual([provider["id"] for provider in payload["local_parsers"]], ["text-native", "pymupdf4llm-local"])
+        self.assertEqual(payload["local_parsers"][0]["capabilities"], ["native-text"])
+        self.assertEqual(payload["local_parsers"][1]["admission"]["route_mode"], "evaluate")
+        self.assertEqual(payload["local_parsers"][1]["admission"]["gate_status"], "pending")
+        self.assertEqual(route_plan.status_code, 200)
+        route_payload = route_plan.json()
+        self.assertEqual(route_payload["schema_version"], "2026-06-local-provider-route-plan")
+        self.assertEqual(route_payload["routing_policy"], "priority_desc_then_id")
+        self.assertEqual(route_payload["requested"]["media_type"], "text/plain")
+        self.assertEqual(route_payload["requested"]["extension"], ".txt")
+        self.assertEqual(route_payload["selection"]["primary_provider_id"], "text-native")
+        self.assertEqual(route_payload["candidates"][0]["route_role"], "primary")
+        self.assertEqual(disabled_plan.status_code, 200)
+        disabled_payload = disabled_plan.json()
+        self.assertIsNone(disabled_payload["selection"]["primary_provider_id"])
+        disabled_candidates = {candidate["id"]: candidate for candidate in disabled_payload["candidates"]}
+        self.assertIn("disabled", disabled_candidates["pymupdf4llm-local"]["exclusion_reasons"])
+        self.assertIn("evaluation_only", disabled_candidates["pymupdf4llm-local"]["exclusion_reasons"])
+        self.assertIn("gate_pending", disabled_candidates["pymupdf4llm-local"]["exclusion_reasons"])
+        self.assertEqual(disabled_candidates["pymupdf4llm-local"]["matches"]["capabilities"], True)
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["provider_registry"], payload)
+
+    def test_parse_schema_endpoints_expose_frozen_document_contracts(self) -> None:
+        with TemporaryWorkspace(TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                registry = client.get("/v1/parse/schemas")
+                ir_schema = client.get("/v1/parse/schemas/document-ir")
+                reader_schema = client.get("/v1/parse/schemas/document-reader")
+                missing = client.get("/v1/parse/schemas/not-real")
+                runtime = client.get("/v1/runtime")
+
+        self.assertEqual(registry.status_code, 200)
+        registry_payload = registry.json()
+        self.assertEqual(registry_payload["schema_version"], "2026-06-payload-schema-registry")
+        self.assertEqual(
+            [descriptor["name"] for descriptor in registry_payload["schemas"]],
+            [
+                "document-coverage",
+                "document-ir",
+                "document-parts",
+                "document-providers",
+                "document-quality",
+                "document-reader",
+            ],
+        )
+        self.assertEqual(ir_schema.status_code, 200)
+        self.assertEqual(ir_schema.json()["x-parsecore"]["schema_version"], "2026-06-ir")
+        self.assertEqual(ir_schema.json()["properties"]["projection"], {"const": "ir"})
+        self.assertEqual(reader_schema.status_code, 200)
+        self.assertEqual(reader_schema.json()["x-parsecore"]["schema_version"], "2026-06-reader")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["code"], "schema_not_found")
+        self.assertEqual(
+            missing.json()["detail"]["allowed"],
+            [
+                "document-coverage",
+                "document-ir",
+                "document-parts",
+                "document-providers",
+                "document-quality",
+                "document-reader",
+            ],
+        )
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["payload_schemas"], registry_payload)
+
     def test_upload_bridge_rejects_non_local_object_store(self) -> None:
         with TemporaryWorkspace(REMOTE_OBJECT_STORE_UPLOAD_CONFIG) as workspace:
             app = create_app(workspace.config_path)
@@ -903,6 +1035,7 @@ class ParseApiTests(unittest.TestCase):
                     final_job = current.json()
                     if final_job["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
 
         self.assertIsNotNone(final_job)
         assert final_job is not None
@@ -1021,6 +1154,7 @@ class ParseApiTests(unittest.TestCase):
                     final_job = current.json()
                     if final_job["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
 
                 self.assertIsNotNone(final_job)
                 assert final_job is not None
@@ -1300,6 +1434,84 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(payload["records_summary"]["total"], 1)
                 self.assertTrue(any(signal["code"] == "table_ragged_rows" for signal in payload["quality_signals"]))
                 self.assertEqual(payload["parse_units"][0]["table_count"], 1)
+                self.assertIn("rag_coverage", payload["index_manifest"])
+                self.assertGreaterEqual(payload["index_manifest"]["rag_coverage"]["unit_count"], 1)
+
+                ir = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "ir"},
+                )
+                self.assertEqual(ir.status_code, 200)
+                ir_payload = ir.json()
+                self.assertEqual(ir_payload["schema_version"], "2026-06-ir")
+                self.assertEqual(ir_payload["projection"], "ir")
+                self.assertEqual(ir_payload["doc_id"], "doc-table-v2")
+                self.assertGreaterEqual(len(ir_payload["blocks"]), 1)
+                self.assertGreaterEqual(len(ir_payload["knowledge_units"]), 1)
+                self.assertIn("coverage", ir_payload)
+                self.assertIn("rag_coverage", ir_payload["index_manifest"])
+
+                reader = client.get("/v1/parse/documents/doc-table-v2/reader")
+                self.assertEqual(reader.status_code, 200)
+                reader_payload = reader.json()
+                self.assertEqual(reader_payload["schema_version"], "2026-06-reader")
+                self.assertEqual(reader_payload["projection"], "reader")
+                self.assertEqual(reader_payload["doc_id"], "doc-table-v2")
+                self.assertGreaterEqual(reader_payload["reader_summary"]["block_count"], 1)
+                self.assertEqual(reader_payload["reader_summary"]["table_blocks"], 1)
+                self.assertTrue(any(block["type"] == "table" for block in reader_payload["blocks"]))
+                self.assertIn("rag_coverage", reader_payload["index_manifest"])
+
+                reader_query = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "reader"},
+                )
+                self.assertEqual(reader_query.status_code, 200)
+                self.assertEqual(reader_query.json()["reader_summary"], reader_payload["reader_summary"])
+
+                coverage = client.get("/v1/parse/documents/doc-table-v2/coverage")
+                self.assertEqual(coverage.status_code, 200)
+                coverage_payload = coverage.json()
+                self.assertEqual(coverage_payload["schema_version"], "2026-06-coverage")
+                self.assertEqual(coverage_payload["projection"], "coverage")
+                self.assertEqual(coverage_payload["doc_id"], "doc-table-v2")
+                self.assertGreaterEqual(coverage_payload["coverage"]["summary"]["total_pages"], 1)
+                self.assertIn("rag_coverage_quality", coverage_payload)
+                self.assertIn(coverage_payload["rag_coverage_quality"]["gate"], {"accept", "accept_with_warning"})
+                self.assertEqual(coverage_payload["quality_gate"]["schema_version"], "2026-06-quality-gate")
+                self.assertEqual(coverage_payload["quality_gate"]["enforcement"], "report_only")
+                self.assertIsInstance(coverage_payload["quality_gate"]["action_suggestions"], list)
+
+                providers = client.get("/v1/parse/documents/doc-table-v2/providers")
+                self.assertEqual(providers.status_code, 200)
+                providers_payload = providers.json()
+                self.assertEqual(providers_payload["schema_version"], "2026-06-provider-usage")
+                self.assertEqual(providers_payload["projection"], "providers")
+                self.assertEqual(providers_payload["doc_id"], "doc-table-v2")
+                self.assertGreaterEqual(providers_payload["summary"]["provider_count"], 1)
+                self.assertGreaterEqual(providers_payload["summary"]["total_blocks"], 1)
+                self.assertEqual(providers_payload["summary"]["total_tables"], 1)
+                self.assertTrue(providers_payload["providers"][0]["provider_id"])
+                self.assertEqual(providers_payload["pages"][0]["page_number"], 1)
+                self.assertTrue(providers_payload["pages"][0]["provider_ids"])
+                self.assertEqual(
+                    providers_payload["comparison_report"]["schema_version"],
+                    "2026-06-provider-comparison",
+                )
+                self.assertTrue(providers_payload["comparison_report"]["rankings"])
+                self.assertIn(
+                    "memory_mb",
+                    providers_payload["comparison_report"]["summary"]["pending_axes"],
+                )
+                self.assertIn(providers_payload["quality_gate"]["gate"], {"accept", "accept_with_warning"})
+                self.assertIsInstance(providers_payload["quality_gate"]["action_suggestions"], list)
+
+                coverage_query = client.get(
+                    "/v1/parse/documents/doc-table-v2",
+                    params={"projection": "coverage"},
+                )
+                self.assertEqual(coverage_query.status_code, 200)
+                self.assertEqual(coverage_query.json()["coverage"], coverage_payload["coverage"])
 
                 records = client.get(
                     "/v1/parse/documents/doc-table-v2/records",
@@ -1317,6 +1529,29 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(quality_payload["projection"], "quality")
                 self.assertEqual(quality_payload["profile_resolution"]["resolved_profile"], "table-heavy")
                 self.assertGreaterEqual(quality_payload["quality_summary"]["total"], 1)
+                self.assertIn("quality_gate", quality_payload)
+                self.assertEqual(quality_payload["quality_gate"]["enforcement"], "report_only")
+                self.assertIsInstance(quality_payload["quality_gate"]["action_suggestions"], list)
+                self.assertIn("attention_summary", quality_payload)
+                self.assertTrue(quality_payload["attention_summary"]["needs_attention"])
+                self.assertIsInstance(quality_payload["attention_summary"]["recommended_actions"], list)
+                self.assertIsInstance(quality_payload["attention_summary"]["entrypoints"], dict)
+                self.assertIsInstance(quality_payload["attention_summary"]["contracts"], dict)
+                self.assertIsInstance(quality_payload["attention_summary"]["contracts"]["inspect_requests"], list)
+                self.assertIsInstance(quality_payload["attention_summary"]["contracts"]["execute_requests"], list)
+                self.assertIsInstance(quality_payload["attention_summary"]["contracts"]["workflow"]["phases"], list)
+                self.assertIn("context", quality_payload["attention_summary"]["entrypoints"]["providers"])
+                self.assertIn("context", quality_payload["attention_summary"]["entrypoints"]["parts"])
+                self.assertEqual(
+                    quality_payload["provider_diagnostics"]["comparison_report"]["summary"]["provider_count"],
+                    providers_payload["comparison_report"]["summary"]["provider_count"],
+                )
+                self.assertIsInstance(quality_payload["provider_diagnostics"]["comparison_actions"], list)
+                self.assertEqual(quality_payload["parts_diagnostics"]["part_summary"]["warning_parts"], 1)
+                self.assertEqual(
+                    quality_payload["parts_diagnostics"]["attention_parts"][0]["recommended_focus"],
+                    "quality_review",
+                )
 
                 parts = client.get("/v1/parse/documents/doc-table-v2/parts")
                 self.assertEqual(parts.status_code, 200)
@@ -1324,8 +1559,11 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(parts_payload["projection"], "parts")
                 self.assertEqual(parts_payload["part_summary"]["total"], 1)
                 self.assertEqual(parts_payload["part_summary"]["warning_parts"], 1)
+                self.assertEqual(parts_payload["part_summary"]["rerun_compared_parts"], 0)
                 self.assertEqual(parts_payload["parts"][0]["state"], "warning")
                 self.assertIn("table_ragged_rows", parts_payload["parts"][0]["quality_signal_codes"])
+                self.assertEqual(parts_payload["parts"][0]["diagnostics"]["recommended_focus"], "quality_review")
+                self.assertTrue(parts_payload["parts"][0]["action_suggestions"])
                 self.assertFalse(parts_payload["parts"][0]["rerun_supported"])
 
                 filtered_parts = client.get(
@@ -1375,6 +1613,26 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(exported_pages.status_code, 200)
                 self.assertIn('"page_number":1', exported_pages.text)
 
+                exported_coverage = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "coverage", "format": "jsonl"},
+                )
+                self.assertEqual(exported_coverage.status_code, 200)
+                self.assertEqual(exported_coverage.headers["content-type"], "application/x-ndjson; charset=utf-8")
+                self.assertIn("doc-table-v2-coverage.jsonl", exported_coverage.headers["content-disposition"])
+                self.assertIn('"page_number":1', exported_coverage.text)
+                self.assertIn('"indexable_unit_count"', exported_coverage.text)
+
+                exported_reader = client.get(
+                    "/v1/parse/documents/doc-table-v2/exports",
+                    params={"dataset": "reader", "format": "jsonl"},
+                )
+                self.assertEqual(exported_reader.status_code, 200)
+                self.assertEqual(exported_reader.headers["content-type"], "application/x-ndjson; charset=utf-8")
+                self.assertIn("doc-table-v2-reader.jsonl", exported_reader.headers["content-disposition"])
+                self.assertIn('"reader_block_id":"reader:', exported_reader.text)
+                self.assertIn('"type":"table"', exported_reader.text)
+
                 invalid_export = client.get(
                     "/v1/parse/documents/doc-table-v2/exports",
                     params={"dataset": "images", "format": "jsonl"},
@@ -1385,13 +1643,15 @@ class ParseApiTests(unittest.TestCase):
                 export_job = client.post(
                     "/v1/parse/documents/doc-table-v2/export-jobs",
                     json={
-                        "include": ["pages", "lines", "tables", "quality_signals", "records"],
+                        "include": ["pages", "lines", "tables", "quality_signals", "coverage", "records", "reader"],
                         "formats": {
                             "pages": "jsonl",
                             "lines": "csv",
                             "tables": "csv",
                             "quality_signals": "jsonl",
+                            "coverage": "jsonl",
                             "records": "jsonl",
+                            "reader": "jsonl",
                         },
                         "filters": {"severity": ["warning"]},
                     },
@@ -1407,7 +1667,9 @@ class ParseApiTests(unittest.TestCase):
                         ("lines", "csv"),
                         ("tables", "csv"),
                         ("quality_signals", "jsonl"),
+                        ("coverage", "jsonl"),
                         ("records", "jsonl"),
+                        ("reader", "jsonl"),
                     ],
                 )
 
@@ -1418,7 +1680,7 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(export_manifest.json()["tenant_id"], "default")
                 self.assertEqual(
                     export_manifest.json()["request"]["include"],
-                    ["pages", "lines", "tables", "quality_signals", "records"],
+                    ["pages", "lines", "tables", "quality_signals", "coverage", "records", "reader"],
                 )
                 self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
                 self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
@@ -1429,6 +1691,20 @@ class ParseApiTests(unittest.TestCase):
                 )
                 self.assertEqual(export_download.status_code, 200)
                 self.assertIn("table_ragged_rows", export_download.text)
+
+                coverage_download = client.get(
+                    f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
+                    params={"file": "coverage.jsonl"},
+                )
+                self.assertEqual(coverage_download.status_code, 200)
+                self.assertIn('"page_number":1', coverage_download.text)
+
+                reader_download = client.get(
+                    f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
+                    params={"file": "reader.jsonl"},
+                )
+                self.assertEqual(reader_download.status_code, 200)
+                self.assertIn('"reader_block_id":"reader:', reader_download.text)
 
                 compat = client.get(
                     "/v1/parse/documents/doc-table-v2",
@@ -1603,7 +1879,14 @@ class ParseApiTests(unittest.TestCase):
                 self.assertEqual(parts.status_code, 200)
                 parts_payload = parts.json()
                 self.assertEqual(parts_payload["part_summary"]["total"], 2)
-                self.assertEqual(parts_payload["part_summary"]["states"], {"done": 2})
+                self.assertEqual(parts_payload["part_summary"]["states"], {"warning": 2})
+                self.assertTrue(all(part["raw_state"] == "done" for part in parts_payload["parts"]))
+                self.assertTrue(
+                    all("rag_chunks_not_embedded" in part["quality_signal_codes"] for part in parts_payload["parts"])
+                )
+                self.assertTrue(
+                    all(part["action_suggestions"][0]["action_id"] == "reembed_document" for part in parts_payload["parts"])
+                )
                 self.assertTrue(all(part["rerun_supported"] for part in parts_payload["parts"]))
 
                 structured = client.get(
@@ -1619,7 +1902,25 @@ class ParseApiTests(unittest.TestCase):
                     "/v1/parse/documents/doc-pdf-api-parts/parts/doc-pdf-api-parts-part-2/rerun"
                 )
                 self.assertEqual(rerun.status_code, 202)
-                rerun_job_id = rerun.json()["job"]["job_id"]
+                rerun_payload = rerun.json()
+                rerun_job_id = rerun_payload["job"]["job_id"]
+                self.assertEqual(rerun_payload["part_id"], "doc-pdf-api-parts-part-2")
+                self.assertEqual(
+                    rerun_payload["previous_part_observation"]["part_id"],
+                    "doc-pdf-api-parts-part-2",
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["monitor_requests"][0]["request"]["endpoint"],
+                    f"/v1/parse/jobs/{rerun_job_id}",
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["preferred_verify_request"]["request"]["endpoint"],
+                    "/v1/parse/documents/doc-pdf-api-parts/parts",
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["preferred_verify_request"]["context"]["submitted_part_ids"],
+                    ["doc-pdf-api-parts-part-2"],
+                )
                 for _ in range(30):
                     current = client.get(f"/v1/parse/jobs/{rerun_job_id}")
                     self.assertEqual(current.status_code, 200)
@@ -1628,11 +1929,26 @@ class ParseApiTests(unittest.TestCase):
                     time.sleep(0.05)
                 rerun_parts = client.get("/v1/parse/documents/doc-pdf-api-parts/parts")
                 self.assertEqual(rerun_parts.status_code, 200)
+                rerun_parts_payload = rerun_parts.json()
+                self.assertGreaterEqual(rerun_parts_payload["part_summary"]["rerun_compared_parts"], 1)
                 part_two = next(
-                    part for part in rerun_parts.json()["parts"] if part["part_id"] == "doc-pdf-api-parts-part-2"
+                    part for part in rerun_parts_payload["parts"] if part["part_id"] == "doc-pdf-api-parts-part-2"
                 )
-                self.assertEqual(part_two["state"], "done")
+                self.assertEqual(part_two["raw_state"], "done")
+                self.assertEqual(part_two["state"], "warning")
+                self.assertIn("rag_chunks_not_embedded", part_two["quality_signal_codes"])
                 self.assertEqual(part_two["job_id"], rerun_job_id)
+                self.assertEqual(
+                    part_two["previous_part_observation"]["job_id"],
+                    plan_payload["part_jobs"][1]["job_id"],
+                )
+                self.assertEqual(
+                    part_two["rerun_comparison"]["previous_job_id"],
+                    plan_payload["part_jobs"][1]["job_id"],
+                )
+                self.assertEqual(part_two["rerun_comparison"]["current_job_id"], rerun_job_id)
+                self.assertTrue(part_two["diagnostics"]["rerun_compared"])
+                self.assertEqual(part_two["diagnostics"]["rerun_status"], part_two["rerun_comparison"]["status"])
 
                 invalid = client.get(
                     "/v1/parse/documents/doc-pdf-api-parts",
@@ -1699,9 +2015,69 @@ class ParseApiTests(unittest.TestCase):
                     json={"failed_only": True},
                 )
                 self.assertEqual(rerun.status_code, 202)
+                rerun_payload = rerun.json()
                 self.assertEqual(
-                    [item["part_id"] for item in rerun.json()["submitted"]],
+                    [item["part_id"] for item in rerun_payload["submitted"]],
                     ["doc-pdf-api-control-part-2"],
+                )
+                self.assertEqual(
+                    rerun_payload["submitted"][0]["previous_part_observation"]["part_id"],
+                    "doc-pdf-api-control-part-2",
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["preferred_verify_request"]["request"]["endpoint"],
+                    "/v1/parse/documents/doc-pdf-api-control/parts",
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["preferred_verify_request"]["context"]["submitted_part_ids"],
+                    ["doc-pdf-api-control-part-2"],
+                )
+                self.assertEqual(
+                    rerun_payload["contracts"]["workflow"]["phases"][0]["phase"],
+                    "monitor",
+                )
+
+    def test_pdf_parts_batch_rerun_accepts_provider_route_plan_payload(self) -> None:
+        queue_config = PDF_API_CONFIG.replace('execution_mode = "inline"', 'execution_mode = "queue-worker"')
+        with TemporaryWorkspace(queue_config) as workspace:
+            document_path = workspace.create_pdf("partitioned-api-route-plan.pdf", [["one"], ["two"]])
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-pdf-api-route-plan",
+                        "file_path": str(document_path),
+                        "media_type": "application/pdf",
+                        "profile": "large-pdf",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+
+                planned = client.post(
+                    "/v1/parse/documents/doc-pdf-api-route-plan/parts/plan",
+                    json={"target_pages_per_part": 1, "max_active_parts_per_doc": 1},
+                )
+                self.assertEqual(planned.status_code, 202)
+
+                rerun = client.post(
+                    "/v1/parse/documents/doc-pdf-api-route-plan/parts/rerun",
+                    json={
+                        "failed_only": False,
+                        "part_ids": ["doc-pdf-api-route-plan-part-1"],
+                        "provider_route_plan": {"required_capabilities": ["layout", "tables"]},
+                    },
+                )
+                self.assertEqual(rerun.status_code, 202)
+                submitted = rerun.json()["submitted"]
+                self.assertEqual([item["part_id"] for item in submitted], ["doc-pdf-api-route-plan-part-1"])
+                self.assertEqual(
+                    submitted[0]["job"]["options"]["local_provider_route_request"]["required_capabilities"],
+                    ["layout", "tables"],
+                )
+                self.assertEqual(
+                    rerun.json()["contracts"]["preferred_verify_request"]["context"]["submitted_part_ids"],
+                    ["doc-pdf-api-route-plan-part-1"],
                 )
 
     def test_parse_batch_endpoint_returns_enterprise_compatible_payload(self) -> None:
@@ -1896,7 +2272,7 @@ class ParseApiTests(unittest.TestCase):
 
     def test_parse_batch_alias_matches_parser_service_path(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
-            document_path = workspace.create_docx("compat-alias.docx", ["Alias route", "Batch parser"]) 
+            document_path = workspace.create_docx("compat-alias.docx", ["Alias route", "Batch parser"])
             payload = {
                 "file_base64": base64.b64encode(document_path.read_bytes()).decode("ascii"),
                 "file_name": document_path.name,
@@ -2440,12 +2816,12 @@ class ParseQueueApiTests(unittest.TestCase):
                 }
                 response = client.post("/v1/parse/jobs", json=payload)
                 self.assertEqual(response.status_code, 202)
-                
+
                 # Get metrics
                 metrics_response = client.get("/v1/parse/prometheus")
                 self.assertEqual(metrics_response.status_code, 200)
                 self.assertEqual(metrics_response.headers["content-type"], "text/plain; charset=utf-8")
-                
+
                 metrics_text = metrics_response.text
                 # Should contain HELP and TYPE headers
                 self.assertIn("# HELP parse_quota_exceeded_total", metrics_text)
@@ -2463,7 +2839,7 @@ class ParseQueueApiTests(unittest.TestCase):
                 # Try to exceed quota to generate quota_exceeded events
                 doc1 = workspace.create_docx("doc1.docx", ["content1"])
                 doc2 = workspace.create_docx("doc2.docx", ["content2"])
-                
+
                 # First request with 1 unit should succeed (limit is 3 per window)
                 payload1 = {
                     "doc_id": "doc-event-1",
@@ -2475,7 +2851,7 @@ class ParseQueueApiTests(unittest.TestCase):
                 }
                 response1 = client.post("/v1/parse/jobs", json=payload1)
                 self.assertEqual(response1.status_code, 202)
-                
+
                 # Second request with 3 units should exceed quota and return 429 (1+3=4 > 3)
                 payload2 = {
                     "doc_id": "doc-event-2",
@@ -2488,26 +2864,26 @@ class ParseQueueApiTests(unittest.TestCase):
                 response2 = client.post("/v1/parse/jobs", json=payload2)
                 self.assertEqual(response2.status_code, 429)
                 self.assertEqual(response2.json()["error"], "quota_exceeded")
-                
+
                 # Query events endpoint
                 events_response = client.get("/v1/parse/events")
                 self.assertEqual(events_response.status_code, 200)
                 events_data = events_response.json()
-                
+
                 self.assertIn("events", events_data)
                 self.assertIn("counters", events_data)
-                
+
                 # Should have at least one quota_exceeded event
                 quota_events = [e for e in events_data["events"] if e["event_type"] == "quota_exceeded"]
                 self.assertGreaterEqual(len(quota_events), 1)
                 self.assertIn("trace_id", quota_events[0])
-                
+
                 # Filter by event_type
                 filtered_response = client.get("/v1/parse/events?event_type=quota_exceeded")
                 filtered_data = filtered_response.json()
                 all_are_quota = all(e["event_type"] == "quota_exceeded" for e in filtered_data["events"])
                 self.assertTrue(all_are_quota)
-                
+
                 # Filter by tenant_id
                 tenant_response = client.get("/v1/parse/events?tenant_id=event-tenant")
                 tenant_data = tenant_response.json()
@@ -2835,12 +3211,12 @@ class ParseQueueApiTests(unittest.TestCase):
                 }
                 response = client.post("/v1/parse/jobs", json=payload)
                 self.assertEqual(response.status_code, 202)
-                
+
                 # Get dashboard
                 dashboard_response = client.get("/v1/parse/dashboard?tenant_id=dashboard-tenant")
                 self.assertEqual(dashboard_response.status_code, 200)
                 dashboard = dashboard_response.json()
-                
+
                 # Verify observability data is included
                 self.assertIn("observability", dashboard)
                 self.assertIn("recent_events", dashboard["observability"])

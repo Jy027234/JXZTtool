@@ -113,6 +113,21 @@ class DocumentArtifactItem:
 
 
 @dataclass(slots=True, frozen=True)
+class DocumentKnowledgeUnit:
+    unit_id: str
+    source_item_ids: tuple[str, ...]
+    source_block_ids: tuple[str, ...]
+    source_table_ids: tuple[str, ...]
+    unit_type: str
+    semantic_role: str
+    text: str
+    page_span: tuple[int, int]
+    should_index_for_rag: bool
+    skip_reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
 class ParsedDocumentArtifact:
     doc_id: str
     pipeline_name: str
@@ -123,6 +138,7 @@ class ParsedDocumentArtifact:
     options_hash: str
     blocks: tuple[Block, ...]
     items: tuple[DocumentArtifactItem, ...]
+    knowledge_units: tuple[DocumentKnowledgeUnit, ...] = field(default_factory=tuple)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -336,10 +352,14 @@ class ArtifactBackedChunker:
         self._base_builder = base_builder
 
     def build(self, *, document: ParsedDocumentArtifact) -> Sequence[Chunk]:
+        knowledge_units = _document_knowledge_units(document)
         if str(document.format_name).strip().lower() == "docx":
-            structured_chunks = _build_docx_section_chunks(document=document)
+            structured_chunks = _build_docx_section_chunks(document=document, knowledge_units=knowledge_units)
             if structured_chunks:
                 return structured_chunks
+        unit_chunks = _build_unit_chunks(document=document, knowledge_units=knowledge_units)
+        if unit_chunks:
+            return unit_chunks
         base_chunks = tuple(
             self._base_builder.build(doc_id=document.doc_id, blocks=document.blocks)
         )
@@ -364,7 +384,35 @@ class ArtifactBackedChunker:
         return tuple(enriched)
 
 
-def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chunk, ...]:
+def _build_unit_chunks(
+    *,
+    document: ParsedDocumentArtifact,
+    knowledge_units: Sequence[DocumentKnowledgeUnit],
+) -> tuple[Chunk, ...]:
+    chunks: list[Chunk] = []
+    for unit in knowledge_units:
+        if not unit.should_index_for_rag:
+            continue
+        text = str(unit.text or "").strip()
+        if not text:
+            continue
+        chunks.append(
+            Chunk(
+                chunk_id=f"chk-{uuid4().hex[:12]}",
+                doc_id=document.doc_id,
+                block_ids=unit.source_block_ids,
+                text=text,
+                semantic_role=unit.semantic_role,
+            )
+        )
+    return tuple(chunks)
+
+
+def _build_docx_section_chunks(
+    *,
+    document: ParsedDocumentArtifact,
+    knowledge_units: Sequence[DocumentKnowledgeUnit],
+) -> tuple[Chunk, ...]:
     chunks: list[Chunk] = []
     current_section: _ChunkAccumulator | None = None
     current_group: _ChunkAccumulator | None = None
@@ -405,15 +453,15 @@ def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chu
             )
         current_section = None
 
-    for item in document.items:
-        metadata = item.metadata or {}
-        role = str(item.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
-        if role in _ARTIFACT_SEMANTIC_ROLES:
+    for unit in knowledge_units:
+        metadata = unit.metadata or {}
+        role = str(unit.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
+        if not unit.should_index_for_rag:
             continue
-        text = str(metadata.get("rendered_text") or item.text or "").strip()
+        text = str(unit.text or "").strip()
         if not text:
             continue
-        block_type = str(item.provenance.get("block_type") or metadata.get("kind") or "").strip().lower()
+        block_type = str(metadata.get("block_type") or metadata.get("kind") or "").strip().lower()
         is_section_heading = bool(metadata.get("is_section_heading"))
 
         if role == "title" and block_type == "title" and not is_section_heading:
@@ -423,7 +471,7 @@ def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chu
                 Chunk(
                     chunk_id=f"chk-{uuid4().hex[:12]}",
                     doc_id=document.doc_id,
-                    block_ids=item.block_ids,
+                    block_ids=unit.source_block_ids,
                     text=text,
                     semantic_role=role,
                 )
@@ -433,23 +481,23 @@ def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chu
         if is_section_heading and role in _DOCX_SECTION_ANCHOR_ROLES:
             flush_group()
             flush_section()
-            current_section = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(item.block_ids))
+            current_section = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(unit.source_block_ids))
             continue
 
         if current_section is not None:
             if current_section.role == "front_matter" and role in _DOCX_GROUPABLE_ROLES - {"front_matter"}:
                 current_section.role = role
             current_section.text_parts.append(text)
-            current_section.block_ids.extend(item.block_ids)
+            current_section.block_ids.extend(unit.source_block_ids)
             continue
 
         if role in _DOCX_GROUPABLE_ROLES:
             if current_group is not None and current_group.role == role:
                 current_group.text_parts.append(text)
-                current_group.block_ids.extend(item.block_ids)
+                current_group.block_ids.extend(unit.source_block_ids)
             else:
                 flush_group()
-                current_group = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(item.block_ids))
+                current_group = _ChunkAccumulator(role=role, text_parts=[text], block_ids=list(unit.source_block_ids))
             continue
 
         flush_group()
@@ -457,7 +505,7 @@ def _build_docx_section_chunks(*, document: ParsedDocumentArtifact) -> tuple[Chu
             Chunk(
                 chunk_id=f"chk-{uuid4().hex[:12]}",
                 doc_id=document.doc_id,
-                block_ids=item.block_ids,
+                block_ids=unit.source_block_ids,
                 text=text,
                 semantic_role=role,
             )
@@ -502,6 +550,197 @@ def _entry_projection(
     if table_type:
         entry["table_type"] = table_type
     return entry
+
+
+def _document_knowledge_units(document: ParsedDocumentArtifact) -> tuple[DocumentKnowledgeUnit, ...]:
+    units = tuple(document.knowledge_units or ())
+    if units:
+        return units
+    return _build_document_knowledge_units(document)
+
+
+def _build_document_knowledge_units(document: ParsedDocumentArtifact) -> tuple[DocumentKnowledgeUnit, ...]:
+    return tuple(
+        _knowledge_unit_from_item(document.doc_id, item, index=index)
+        for index, item in enumerate(document.items, start=1)
+    )
+
+
+def _knowledge_unit_from_item(doc_id: str, item: DocumentArtifactItem, *, index: int) -> DocumentKnowledgeUnit:
+    metadata = dict(item.metadata or {})
+    provenance = dict(item.provenance or {})
+    role = str(item.semantic_role or metadata.get("semantic_role") or item.kind or "paragraph").strip().lower()
+    unit_type = _knowledge_unit_type(item=item, semantic_role=role)
+    text = _knowledge_unit_text(item=item, unit_type=unit_type)
+    should_index = bool(text) and role not in _ARTIFACT_SEMANTIC_ROLES
+    unit_metadata = dict(metadata)
+    unit_metadata.update(
+        {
+            "item_id": item.item_id,
+            "kind": item.kind,
+            "block_type": str(provenance.get("block_type") or metadata.get("kind") or "").strip().lower(),
+        }
+    )
+    if unit_type == "table":
+        unit_metadata["table_summary"] = _knowledge_unit_table_summary(item)
+    if unit_type == "figure_caption":
+        unit_metadata["figure_summary"] = _knowledge_unit_figure_summary(item)
+    return DocumentKnowledgeUnit(
+        unit_id=f"{doc_id}:ku:{index:06d}",
+        source_item_ids=(item.item_id,),
+        source_block_ids=tuple(item.block_ids),
+        source_table_ids=tuple(_knowledge_unit_table_ids(item=item, semantic_role=role, unit_type=unit_type)),
+        unit_type=unit_type,
+        semantic_role=role,
+        text=text,
+        page_span=_knowledge_unit_page_span(item),
+        should_index_for_rag=should_index,
+        skip_reason=None if should_index else _knowledge_unit_skip_reason(semantic_role=role, text=text),
+        metadata=unit_metadata,
+    )
+
+
+def _knowledge_unit_text(*, item: DocumentArtifactItem, unit_type: str) -> str:
+    if unit_type == "table":
+        return _knowledge_unit_table_text(item)
+    if unit_type == "figure_caption":
+        return _knowledge_unit_figure_text(item)
+    metadata = item.metadata or {}
+    return str(metadata.get("rendered_text") or item.text or "").strip()
+
+
+def _knowledge_unit_table_text(item: DocumentArtifactItem) -> str:
+    metadata = item.metadata or {}
+    caption = str(metadata.get("normalized_title") or metadata.get("table_title") or metadata.get("caption") or "").strip()
+    rendered = str(metadata.get("rendered_text") or metadata.get("table_markdown") or "").strip()
+    cells = _normalize_table_cells(metadata.get("cells"))
+    if not rendered and cells:
+        rendered = _render_table_text(
+            cells,
+            header_rows=max(1, _as_int(metadata.get("header_rows"), default=1)),
+            output_format="markdown",
+        )
+    if not rendered:
+        rendered = str(item.text or "").strip()
+    parts: list[str] = []
+    if caption and caption not in rendered:
+        parts.append(caption)
+    if rendered:
+        parts.append(rendered)
+    return "\n\n".join(parts).strip()
+
+
+def _knowledge_unit_figure_text(item: DocumentArtifactItem) -> str:
+    metadata = item.metadata or {}
+    caption = str(item.text or "").strip()
+    alt_text = str(metadata.get("alt_text") or "").strip()
+    parts: list[str] = []
+    if caption:
+        parts.append(caption)
+    if alt_text and alt_text not in parts:
+        parts.append(alt_text)
+    return "\n\n".join(parts).strip()
+
+
+def _knowledge_unit_table_summary(item: DocumentArtifactItem) -> dict[str, Any]:
+    metadata = item.metadata or {}
+    cells = _normalize_table_cells(metadata.get("cells"))
+    row_count = _as_int(metadata.get("rows", metadata.get("row_count")), default=len(cells))
+    col_count = _as_int(
+        metadata.get("cols", metadata.get("col_count")),
+        default=max((len(row) for row in cells), default=0),
+    )
+    return {
+        "caption": str(metadata.get("normalized_title") or metadata.get("table_title") or metadata.get("caption") or ""),
+        "row_count": row_count,
+        "col_count": col_count,
+        "has_cells": bool(cells),
+    }
+
+
+def _knowledge_unit_figure_summary(item: DocumentArtifactItem) -> dict[str, Any]:
+    metadata = item.metadata or {}
+    return {
+        "figure_kind": str(metadata.get("figure_kind") or metadata.get("figure_type") or "image"),
+        "caption_confidence": metadata.get("caption_confidence"),
+        "has_caption": bool(str(item.text or "").strip()),
+        "has_alt_text": bool(str(metadata.get("alt_text") or "").strip()),
+    }
+
+
+def _knowledge_unit_type(*, item: DocumentArtifactItem, semantic_role: str) -> str:
+    block_type = str((item.provenance or {}).get("block_type") or "").strip().lower()
+    kind = str(item.kind or "").strip().lower()
+    if block_type == "table" or kind == "table" or semantic_role == "table":
+        return "table"
+    if block_type == "image" or kind == "image" or semantic_role == "image":
+        return "figure_caption"
+    if block_type == "title" or semantic_role == "title":
+        return "title"
+    return "paragraph"
+
+
+def _knowledge_unit_table_ids(
+    *,
+    item: DocumentArtifactItem,
+    semantic_role: str,
+    unit_type: str,
+) -> tuple[str, ...]:
+    metadata = item.metadata or {}
+    table_ids = _string_list(metadata.get("source_table_ids"))
+    table_id = str(metadata.get("table_id") or "").strip()
+    if table_id:
+        table_ids.append(table_id)
+    if table_ids:
+        return tuple(dict.fromkeys(table_ids))
+    if unit_type == "table" or semantic_role == "table":
+        return (item.item_id,)
+    return ()
+
+
+def _knowledge_unit_page_span(item: DocumentArtifactItem) -> tuple[int, int]:
+    metadata = item.metadata or {}
+    if metadata.get("page_span") is not None:
+        return _page_span_tuple(metadata.get("page_span"))
+    page_start = metadata.get("page_start", metadata.get("page"))
+    page_end = metadata.get("page_end", page_start)
+    if page_start is not None:
+        start = _as_int(page_start, default=1)
+        end = _as_int(page_end, default=start)
+        return min(start, end), max(start, end)
+    page = item.page_number or 1
+    return int(page), int(page)
+
+
+def _page_span_tuple(value: Any) -> tuple[int, int]:
+    if isinstance(value, Mapping):
+        start = _as_int(value.get("start", value.get("page_start")), default=1)
+        end = _as_int(value.get("end", value.get("page_end")), default=start)
+        return min(start, end), max(start, end)
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        start = _as_int(value[0], default=1)
+        end = _as_int(value[1], default=start)
+        return min(start, end), max(start, end)
+    page = _as_int(value, default=1)
+    return page, page
+
+
+def _knowledge_unit_skip_reason(*, semantic_role: str, text: str) -> str:
+    if not str(text or "").strip():
+        return "empty_text"
+    if semantic_role in _ARTIFACT_SEMANTIC_ROLES:
+        return f"semantic_role:{semantic_role}"
+    return "index_policy_skip"
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return []
 
 
 def _item_block_type(item: DocumentArtifactItem) -> str:
@@ -818,6 +1057,7 @@ class DocumentPipeline:
         observability["parser_backed_stages"] = list(self.registration.capabilities.parser_backed_stage_names)
         metadata["pipeline_observability"] = observability
         document = replace(document, metadata=metadata)
+        document = replace(document, knowledge_units=_build_document_knowledge_units(document))
         return document
 
     def build_chunks(
@@ -861,9 +1101,18 @@ class PipelineRegistry:
         for registration in self.registrations:
             self._get_or_create_pipeline(registration=registration, request_options={})
 
-    def resolve(self, request: ParseRequest, *, purpose: str = "parse") -> DocumentPipeline:
+    def resolve(
+        self,
+        request: ParseRequest,
+        *,
+        purpose: str = "parse",
+        parser_name: str | None = None,
+    ) -> DocumentPipeline:
         suffix = Path(request.file_path).suffix.lower()
+        preferred_parser = str(parser_name or "").strip().lower()
         for registration in self.registrations:
+            if preferred_parser and registration.parser_name.strip().lower() != preferred_parser:
+                continue
             if registration.parser.supports(media_type=request.media_type, suffix=suffix):
                 pipeline = self._get_or_create_pipeline(
                     registration=registration,
@@ -871,6 +1120,11 @@ class PipelineRegistry:
                 )
                 pipeline.validate(request=request, purpose=purpose)
                 return pipeline
+        if preferred_parser:
+            raise LookupError(
+                f"No pipeline registered for parser={preferred_parser!r}, "
+                f"media_type={request.media_type!r}, suffix={suffix!r}"
+            )
         raise LookupError(
             f"No pipeline registered for media_type={request.media_type!r}, suffix={suffix!r}"
         )

@@ -92,6 +92,25 @@
 4. 默认回归样本出现结构性退化，而非单次长尾抖动。
 5. 接入侧观测到 OCR 失败页持续增加，且影响已进入灰度的真实产品样本。
 
+### 回滚条件量化阈值
+
+| # | 条件 | 量化指标 | 触发阈值 | 采集方法 |
+|---|------|----------|----------|----------|
+| 1 | **Schema 破坏** | `schema_version` 一致性 | 任一 projection 的 `schema_version` 与上一稳定版本不一致 | `tools/self_check.py` 对比 `baseline.schema_version` |
+| 2 | **质量退化** | coverage 类指标下降率 | `coverage.unit_coverage_avg` 或 `coverage.chunk_coverage_avg` 下降 > 0.02 | `tools/parse_perf_baseline.py` 对比基线 |
+| 3 | **Provider Drift** | provider 输出差异率 | `provider_comparison_report` 显示任一 provider 的 `blocks_diff_rate` > 0.1 | `tools/provider_comparison_report.py` |
+| 4 | **性能超预算** | 解析耗时增长率 | `elapsed_s_p50` 增长 > 20% 或 `elapsed_s_p95` 增长 > 50% | `tools/parse_perf_baseline.py` 对比基线 |
+| 5 | **关键样本失败** | regression baseline 失败率 | `tools/regression_baseline.py` 失败样本数 > 0 | `tools/regression_baseline.py` |
+| 6 | **读序低置信** | `reading_order_confidence_avg` 下降率 | 下降 > 0.05 | coverage projection 聚合 |
+| 7 | **门禁硬失败** | `gate_failed` 计数 | `runtime_describe` 中 `gate_failed` > 0 | `parsecore health` 或 `/health` API |
+
+### 回滚判定流程
+
+1. **采集基线**：发版前执行 `tools/self_check.py`、`tools/parse_perf_baseline.py`、`tools/regression_baseline.py`，记录基线数据。
+2. **灰度监控**：灰度期间每 4 小时执行一次上述采集脚本，与基线对比。
+3. **触发判定**：任一指标超过阈值时，暂停灰度并排查根因。
+4. **回滚执行**：若根因无法在 2 小时内修复，回滚到上一稳定版本并通知接入方。
+
 ## 推荐执行顺序
 
 1. 先执行一次默认自检门禁并记录结果。
@@ -99,6 +118,7 @@
 3. 把当前遗留问题和回滚口径同步到产品接入方。
 4. 进入小流量灰度。
 5. 把 OCR 长尾专项转为上线后任务，不再阻塞主线。
+6. 若 `--large-pdf-benchmark` 配置可用，执行大样本 benchmark 门禁：`.venv/Scripts/python.exe -m tools.self_check --large-pdf-benchmark var/regression/large-pdf-benchmark.config.json`。
 
 ## 关联文档
 

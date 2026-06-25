@@ -93,9 +93,85 @@ class PerfTrendReportTests(unittest.TestCase):
 
         self.assertIn("# ParseCore Perf Gate", markdown)
         self.assertIn("| sample-a.pdf | 44.2 | 40.000 | 38.500 | 37.000 | 31.000 | 5.000 |", markdown)
-        self.assertIn("| sample-a.pdf | 3.2 | 5.000 | 1.000 |  |  |  |", markdown)
+        self.assertIn("| sample-a.pdf | 3.2 | 5.000 | 1.000 |", markdown)
         self.assertIn("| unit_tests | passed | 10.2 | 202 tests passed, skipped=5 |", markdown)
         self.assertIn("| toc_recog | 1.0000 |", markdown)
+
+    def test_perf_columns_extended_with_three_new_metrics(self) -> None:
+        self.assertEqual(len(perf_trend_report.PERF_COLUMNS), 9)
+        self.assertIn("peak_memory_mb", perf_trend_report.PERF_COLUMNS)
+        self.assertIn("throughput_mb_s", perf_trend_report.PERF_COLUMNS)
+        self.assertIn("part_throughput_s", perf_trend_report.PERF_COLUMNS)
+
+    def test_build_trend_summary_with_3_versions(self) -> None:
+        reports = [
+            {"status": "ok", "generated_at": "v1", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 10.0}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v2", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 8.5}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v3", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 7.0}], "comparison": {},
+            }, "checks": []},
+        ]
+        trend = perf_trend_report.build_trend_summary(reports)
+        self.assertTrue(trend["available"])
+        self.assertEqual(trend["version_count"], 3)
+        self.assertEqual(trend["trend_direction"], "improving")
+
+    def test_build_trend_summary_with_1_report_returns_unavailable(self) -> None:
+        trend = perf_trend_report.build_trend_summary([{"status": "ok"}])
+        self.assertFalse(trend["available"])
+        self.assertEqual(trend["reason"], "need_at_least_2_reports")
+
+    def test_build_trend_summary_detects_regression(self) -> None:
+        reports = [
+            {"status": "ok", "generated_at": "v1", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 10.0}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v2", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 12.0}], "comparison": {},
+            }, "checks": []},
+        ]
+        trend = perf_trend_report.build_trend_summary(reports)
+        self.assertTrue(trend["available"])
+        self.assertEqual(trend["trend_direction"], "regressing")
+        self.assertIsNotNone(trend["elapsed_s_p50_change_pct"])
+        self.assertGreater(trend["elapsed_s_p50_change_pct"], 0)
+
+    def test_build_trend_summary_detects_improvement(self) -> None:
+        reports = [
+            {"status": "ok", "generated_at": "v1", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 10.0}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v2", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 8.0}], "comparison": {},
+            }, "checks": []},
+        ]
+        trend = perf_trend_report.build_trend_summary(reports)
+        self.assertTrue(trend["available"])
+        self.assertEqual(trend["trend_direction"], "improving")
+        self.assertLess(trend["elapsed_s_p50_change_pct"], 0)
+
+    def test_render_markdown_includes_trend_section_when_3plus_reports(self) -> None:
+        reports = [
+            {"status": "ok", "generated_at": "v1", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 10.0}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v2", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 8.5}], "comparison": {},
+            }, "checks": []},
+            {"status": "ok", "generated_at": "v3", "perf_tracking": {
+                "overview": {}, "samples": [{"name": "a", "elapsed_s": 7.0}], "comparison": {},
+            }, "checks": []},
+        ]
+        markdown = perf_trend_report.render_markdown(reports[0], trend_reports=reports)
+        self.assertIn("## Multi-Version Trend", markdown)
+        self.assertIn("v1", markdown)
+        self.assertIn("v2", markdown)
+        self.assertIn("v3", markdown)
+        self.assertIn("improving", markdown)
 
     def test_cli_writes_markdown_and_json_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

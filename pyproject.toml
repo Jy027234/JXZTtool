@@ -32,7 +32,14 @@ parsers = [
     "rapidocr_onnxruntime>=1.2,<2",
     "xlrd>=2,<3",
 ]
+pymupdf4llm = [
+    "pymupdf4llm>=0.0.17,<1",
+]
+docling = [
+    "docling>=2.18,<3",
+]
 test = [
+    "jsonschema>=4.23,<5",
     "pytest>=8,<9",
     "httpx>=0.28,<1",
     "numpy>=2.1,<3",

@@ -42,6 +42,12 @@ def _build_parser() -> argparse.ArgumentParser:
     self_check = sub.add_parser("self-check", help="Run the default ParseCore self-check gate")
     self_check.add_argument("self_check_args", nargs=argparse.REMAINDER)
 
+    payload_contract_check = sub.add_parser(
+        "payload-contract-check",
+        help="Validate frozen ParseCore payload contracts",
+    )
+    payload_contract_check.add_argument("payload_contract_check_args", nargs=argparse.REMAINDER)
+
     large_pdf_stress = sub.add_parser("large-pdf-stress", help="Run the large PDF part scheduling stress tool")
     large_pdf_stress.add_argument("stress_args", nargs=argparse.REMAINDER)
 
@@ -61,6 +67,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from tools import self_check as self_check_tool
 
         return int(self_check_tool.main(raw_args[1:]))
+    if raw_args and raw_args[0] == "payload-contract-check":
+        from tools import payload_contract_check
+
+        return int(payload_contract_check.main(raw_args[1:]))
     if raw_args and raw_args[0] == "large-pdf-stress":
         from tools import large_pdf_stress
 

@@ -20,6 +20,10 @@ def plan_pdf_parts(
     ocr_heavy_pages_per_part: int | None = None,
     profile: str | None = None,
     options: dict[str, Any] | None = None,
+    *,
+    file_size_bytes: int | None = None,
+    ocr_page_ratio: float | None = None,
+    historical_failure_rate: float | None = None,
 ) -> list[dict[str, Any]]:
     """Plan 1-based inclusive PDF page ranges for child parse parts."""
     pages = _positive_int(total_pages, "invalid_total_pages")
@@ -28,6 +32,9 @@ def plan_pdf_parts(
         ocr_heavy_pages_per_part=ocr_heavy_pages_per_part,
         profile=profile,
         options=options,
+        file_size_bytes=file_size_bytes,
+        ocr_page_ratio=ocr_page_ratio,
+        historical_failure_rate=historical_failure_rate,
     )
 
     parts: list[dict[str, Any]] = []
@@ -145,6 +152,9 @@ def _pages_per_part(
     ocr_heavy_pages_per_part: int | None,
     profile: str | None,
     options: dict[str, Any] | None,
+    file_size_bytes: int | None = None,
+    ocr_page_ratio: float | None = None,
+    historical_failure_rate: float | None = None,
 ) -> int:
     target = (
         DEFAULT_TARGET_PAGES_PER_PART
@@ -156,6 +166,15 @@ def _pages_per_part(
         if ocr_heavy_pages_per_part is None
         else ocr_heavy_pages_per_part
     )
+    # P5-T01: OCR 重页密度 > 0.3 时自动切换到 ocr_heavy 目标
+    if ocr_page_ratio is not None and ocr_page_ratio > 0.3:
+        return _positive_int(ocr_heavy_target, "invalid_pages_per_part")
+    # P5-T01: 历史失败率 > 0.2 时缩减 part 大小（减半）
+    if historical_failure_rate is not None and historical_failure_rate > 0.2:
+        target = max(1, target // 2)
+    # P5-T01: 文件大小 > 100MB 时缩减 part 大小（减半）
+    if file_size_bytes is not None and file_size_bytes > 100 * 1024 * 1024:
+        target = max(1, target // 2)
     if _is_ocr_heavy(profile=profile, options=options):
         return _positive_int(ocr_heavy_target, "invalid_pages_per_part")
     return _positive_int(target, "invalid_pages_per_part")

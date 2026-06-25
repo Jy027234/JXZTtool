@@ -14,6 +14,7 @@ from parsecore.parsers import (
     PdfTextParser,
     _extract_pdf_figure_regions,
     _filter_repeated_pdf_figure_regions,
+    _layout_reading_order_confidence,
     _ocr_fallback_reason_for_page,
     build_parser,
 )
@@ -70,6 +71,7 @@ def _fake_page_layout(
     column_count_hint: int = 1,
     layout_reading_order_applied: bool = False,
     layout_reading_order_strategy: str | None = None,
+    layout_reading_order_confidence: float | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         text_without_tables=text_without_tables,
@@ -80,6 +82,7 @@ def _fake_page_layout(
         column_count_hint=column_count_hint,
         layout_reading_order_applied=layout_reading_order_applied,
         layout_reading_order_strategy=layout_reading_order_strategy,
+        layout_reading_order_confidence=layout_reading_order_confidence,
         layout_elapsed_s=0.0,
         ocr_attempt_reason=ocr_fallback_reason,
         ocr_fallback_reason=ocr_fallback_reason,
@@ -331,6 +334,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
                     column_count_hint=2,
                     layout_reading_order_applied=True,
                     layout_reading_order_strategy="column-reflow",
+                    layout_reading_order_confidence=0.9,
                 )
             ]
 
@@ -351,6 +355,42 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertTrue(blocks[1].metadata["layout_reading_order_applied"])
         self.assertEqual(blocks[1].metadata["layout_reading_order_strategy"], "column-reflow")
         self.assertEqual(blocks[1].metadata["column_count_hint"], 2)
+        self.assertEqual(blocks[1].metadata["layout_reading_order_confidence"], 0.9)
+
+    def test_layout_reading_order_confidence_heuristic_tracks_column_reflow(self) -> None:
+        self.assertEqual(
+            _layout_reading_order_confidence(
+                text_without_tables="Single column body text",
+                column_count_hint=1,
+                layout_reading_order_applied=False,
+                layout_reading_order_strategy=None,
+                table_count=0,
+                figure_count=0,
+            ),
+            0.98,
+        )
+        self.assertEqual(
+            _layout_reading_order_confidence(
+                text_without_tables="Column one\n\nColumn two",
+                column_count_hint=2,
+                layout_reading_order_applied=True,
+                layout_reading_order_strategy="column-reflow",
+                table_count=0,
+                figure_count=0,
+            ),
+            0.9,
+        )
+        self.assertEqual(
+            _layout_reading_order_confidence(
+                text_without_tables="Column one\n\nColumn two",
+                column_count_hint=2,
+                layout_reading_order_applied=False,
+                layout_reading_order_strategy=None,
+                table_count=0,
+                figure_count=0,
+            ),
+            0.58,
+        )
 
     def test_tables_are_interleaved_with_paragraphs_by_vertical_anchor(self) -> None:
         parser = PdfTextParser(

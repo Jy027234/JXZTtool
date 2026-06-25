@@ -83,5 +83,65 @@ class LargePdfStressTests(unittest.TestCase):
         self.assertTrue(markdown_exists)
 
 
+class EvaluateGateTests(unittest.TestCase):
+    def _sample_report(self, *, planned_parts: int = 342, plan_elapsed_s: float = 5.0, error_count: int = 0) -> dict:
+        return {
+            "summary": {
+                "total_pages": 17101,
+                "planned_parts": planned_parts,
+                "plan_elapsed_s": plan_elapsed_s,
+                "error_count": error_count,
+                "executed_parts": 0,
+                "total_elapsed_s": 5.0,
+            },
+            "manifest_part_index": {"part_count": 342},
+        }
+
+    def _sample_config(self) -> dict:
+        return {
+            "thresholds": {
+                "plan_elapsed_s_max": 10.0,
+                "part_count_min": 340,
+                "part_count_max": 350,
+                "error_count_max": 0,
+            }
+        }
+
+    def test_evaluate_gate_passes_when_all_thresholds_met(self) -> None:
+        gate = large_pdf_stress.evaluate_gate(self._sample_report(), self._sample_config())
+        self.assertTrue(gate["passed"])
+        self.assertEqual(len(gate["checks"]), 4)
+        self.assertTrue(all(c["passed"] for c in gate["checks"]))
+
+    def test_evaluate_gate_fails_when_part_count_below_min(self) -> None:
+        report = self._sample_report(planned_parts=100)
+        gate = large_pdf_stress.evaluate_gate(report, self._sample_config())
+        self.assertFalse(gate["passed"])
+        failed = [c for c in gate["checks"] if not c["passed"]]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["metric"], "part_count")
+
+    def test_evaluate_gate_fails_when_plan_elapsed_exceeds_max(self) -> None:
+        report = self._sample_report(plan_elapsed_s=20.0)
+        gate = large_pdf_stress.evaluate_gate(report, self._sample_config())
+        self.assertFalse(gate["passed"])
+
+    def test_evaluate_gate_fails_when_errors_exceed_max(self) -> None:
+        report = self._sample_report(error_count=3)
+        gate = large_pdf_stress.evaluate_gate(report, self._sample_config())
+        self.assertFalse(gate["passed"])
+
+    def test_evaluate_gate_returns_false_with_empty_thresholds(self) -> None:
+        gate = large_pdf_stress.evaluate_gate(self._sample_report(), {"thresholds": {}})
+        self.assertFalse(gate["passed"])
+        self.assertEqual(gate["checks"], [])
+
+    def test_evaluate_gate_handles_missing_metrics(self) -> None:
+        report = {"summary": {}, "manifest_part_index": {}}
+        gate = large_pdf_stress.evaluate_gate(report, self._sample_config())
+        self.assertFalse(gate["passed"])
+        self.assertTrue(all(not c["passed"] for c in gate["checks"]))
+
+
 if __name__ == "__main__":
     unittest.main()

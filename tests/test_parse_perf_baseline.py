@@ -76,6 +76,18 @@ class ParsePerfBaselineTests(unittest.TestCase):
         self.assertGreaterEqual(result["elapsed_s"], 0.0)
         self.assertGreater(result["peak_kb"], 0.0)
         self.assertEqual(result["tables"], 1)
+        self.assertEqual(result["primary_provider_id"], "excel-native")
+        self.assertEqual(result["best_provider_id"], "excel-native")
+        self.assertIn("provider_report", result)
+        provider_report = result["provider_report"]
+        self.assertEqual(provider_report["schema_version"], "2026-06-provider-usage")
+        self.assertEqual(provider_report["comparison_report"]["schema_version"], "2026-06-provider-comparison")
+        ranking = provider_report["comparison_report"]["rankings"][0]
+        self.assertEqual(ranking["provider_id"], "excel-native")
+        self.assertEqual(ranking["axes"]["performance"]["status"], "observed")
+        self.assertEqual(ranking["axes"]["memory"]["status"], "observed")
+        self.assertNotIn("elapsed_s", provider_report["comparison_report"]["summary"]["pending_axes"])
+        self.assertNotIn("memory_mb", provider_report["comparison_report"]["summary"]["pending_axes"])
 
     def test_render_markdown_includes_perf_columns(self) -> None:
         payload = {
@@ -94,6 +106,9 @@ class ParsePerfBaselineTests(unittest.TestCase):
                     "elapsed_s": 0.2,
                     "peak_kb": 42,
                     "mb_per_s": 0.1,
+                    "primary_provider_id": "excel-native",
+                    "best_provider_id": "excel-native",
+                    "best_provider_score": 1.0,
                     "blocks": 2,
                     "chunks": 1,
                     "tables": 1,
@@ -106,6 +121,8 @@ class ParsePerfBaselineTests(unittest.TestCase):
         self.assertIn("ParseCore Parse Performance Baseline", markdown)
         self.assertIn("sample.xlsx", markdown)
         self.assertIn("peak_kb", markdown)
+        self.assertIn("primary_provider", markdown)
+        self.assertIn("excel-native", markdown)
 
 
 if __name__ == "__main__":

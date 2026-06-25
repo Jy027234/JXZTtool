@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-ExportDataset = Literal["pages", "lines", "tables", "quality_signals", "parse_units", "records"]
+ExportDataset = Literal["pages", "lines", "tables", "quality_signals", "parse_units", "records", "coverage", "reader"]
 ExportFormat = Literal["jsonl", "csv", "tsv", "xlsx", "sqlite"]
 
-EXPORT_DATASETS = {"pages", "lines", "tables", "quality_signals", "parse_units", "records"}
+EXPORT_DATASETS = {"pages", "lines", "tables", "quality_signals", "parse_units", "records", "coverage", "reader"}
 EXPORT_FORMATS = {"jsonl", "csv", "tsv", "xlsx", "sqlite"}
 
 
@@ -23,11 +23,20 @@ def export_structured_projection(
     dataset: str,
     format: str,
     as_bytes: bool = False,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    quality_signal: str | None = None,
 ) -> dict[str, str | bytes]:
     """Export one structured projection dataset."""
     normalized_dataset = _normalize_dataset(dataset)
     normalized_format = _normalize_format(format)
-    rows = _dataset_rows(payload, normalized_dataset)
+    rows = _dataset_rows(
+        payload,
+        normalized_dataset,
+        page_start=page_start,
+        page_end=page_end,
+        quality_signal=quality_signal,
+    )
 
     content = _serialize_rows(rows, dataset=normalized_dataset, format=normalized_format)
     if isinstance(content, bytes):
@@ -93,12 +102,81 @@ def _normalize_format(format: str) -> ExportFormat:
     return normalized  # type: ignore[return-value]
 
 
-def _dataset_rows(payload: dict[str, Any], dataset: ExportDataset) -> list[dict[str, Any]]:
+def _dataset_rows(
+    payload: dict[str, Any],
+    dataset: ExportDataset,
+    *,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    quality_signal: str | None = None,
+) -> list[dict[str, Any]]:
     rows = payload.get(dataset)
+    if dataset == "coverage" and isinstance(rows, dict):
+        rows = rows.get("pages")
+    if dataset == "reader" and rows is None:
+        rows = payload.get("blocks")
     if rows is None:
         return []
     if not isinstance(rows, list):
         raise ValueError("invalid_export_dataset_payload")
+
+    # P5-T11: page range 筛选（适用于 pages, lines, records, parse_units）
+    if page_start is not None or page_end is not None:
+        rows = _filter_by_page_range(rows, page_start=page_start, page_end=page_end)
+
+    # P5-T11: quality_signal 筛选（适用于 records, parse_units, quality_signals, reader）
+    if quality_signal is not None:
+        rows = _filter_by_quality_signal(rows, quality_signal=quality_signal)
+
+    return rows
+
+
+# ── P5-T11 导出筛选辅助函数 ──
+
+def _filter_by_page_range(
+    rows: list[dict[str, Any]],
+    *,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> list[dict[str, Any]]:
+    """筛选包含页码字段的行。支持 page_number / page_start+page_end 两种模式。"""
+    start = page_start
+    end = page_end
+    if start is not None and end is not None and start > end:
+        raise ValueError("invalid_page_range")
+    result = []
+    for row in rows:
+        row_page_start = row.get("page_start") or row.get("page_number")
+        row_page_end = row.get("page_end") or row_page_start
+        if row_page_start is None:
+            result.append(row)  # 无页码字段的行不受筛选影响
+            continue
+        if start is not None and row_page_end < start:
+            continue
+        if end is not None and row_page_start > end:
+            continue
+        result.append(row)
+    return result
+
+
+def _filter_by_quality_signal(
+    rows: list[dict[str, Any]],
+    *,
+    quality_signal: str | None = None,
+) -> list[dict[str, Any]]:
+    """筛选包含 quality_signal / quality_signal_codes 字段的行。"""
+    if not quality_signal:
+        return rows
+    result = []
+    for row in rows:
+        codes = row.get("quality_signal_codes") or row.get("quality_signal")
+        if isinstance(codes, list) and quality_signal in codes:
+            result.append(row)
+        elif isinstance(codes, str) and codes == quality_signal:
+            result.append(row)
+        elif row.get("code") == quality_signal:
+            result.append(row)
+    return result
 
     normalized_rows: list[dict[str, Any]] = []
     for row in rows:

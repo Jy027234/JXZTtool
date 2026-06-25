@@ -20,7 +20,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from parsecore.bootstrap import build_runtime  # noqa: E402
-from parsecore.models import BlockType, ParseRequest  # noqa: E402
+from parsecore.api_payloads import _document_providers_projection  # noqa: E402
+from parsecore.models import Block, BlockType, ParseOutcome, ParseRequest  # noqa: E402
 
 
 MEDIA_TYPES = {
@@ -88,6 +89,100 @@ def _media_type_for(path: Path) -> str | None:
     return guessed
 
 
+def _provider_id_for_block(block: Block) -> str:
+    metadata = block.metadata or {}
+    for key in ("provider_id", "parser", "layout_source", "ocr_engine"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if block.type == BlockType.IMAGE:
+        return "image-ocr" if metadata.get("ocr_engine") else "pdf-text"
+    return "parsecore-native"
+
+
+def _snapshot_for_provider_report(runtime: Any, outcome: ParseOutcome, blocks: tuple[Block, ...]) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "job": outcome.job,
+        "doc_id": outcome.job.doc_id,
+        "blocks": blocks,
+        "chunks": outcome.chunks,
+    }
+    provider_registry = getattr(runtime, "provider_registry", None)
+    if callable(provider_registry):
+        snapshot["provider_registry"] = provider_registry()
+    quality_gate_config = getattr(runtime, "quality_gate_config", None)
+    if callable(quality_gate_config):
+        snapshot["quality_gate"] = quality_gate_config()
+    return snapshot
+
+
+def _annotate_provider_sample_metrics(
+    blocks: tuple[Block, ...],
+    *,
+    primary_provider_id: str | None,
+    elapsed_s: float,
+    peak_kb: float,
+) -> tuple[Block, ...]:
+    if not blocks:
+        return blocks
+    target_provider_id = str(primary_provider_id or _provider_id_for_block(blocks[0]) or "")
+    annotated = False
+    result: list[Block] = []
+    for block in blocks:
+        provider_id = _provider_id_for_block(block)
+        if not annotated and (not target_provider_id or provider_id == target_provider_id):
+            metadata = dict(block.metadata or {})
+            metadata.setdefault("provider_elapsed_s", elapsed_s)
+            metadata.setdefault("peak_kb", peak_kb)
+            result.append(
+                Block(
+                    block_id=block.block_id,
+                    doc_id=block.doc_id,
+                    type=block.type,
+                    content=block.content,
+                    metadata=metadata,
+                )
+            )
+            annotated = True
+        else:
+            result.append(block)
+    if not annotated:
+        first = result[0]
+        metadata = dict(first.metadata or {})
+        metadata.setdefault("provider_elapsed_s", elapsed_s)
+        metadata.setdefault("peak_kb", peak_kb)
+        result[0] = Block(
+            block_id=first.block_id,
+            doc_id=first.doc_id,
+            type=first.type,
+            content=first.content,
+            metadata=metadata,
+        )
+    return tuple(result)
+
+
+def _provider_report_for_outcome(
+    *,
+    runtime: Any,
+    outcome: ParseOutcome,
+    elapsed_s: float,
+    peak_kb: float,
+) -> dict[str, Any]:
+    raw_report = _document_providers_projection(
+        _snapshot_for_provider_report(runtime, outcome, outcome.blocks)
+    )
+    primary_provider_id = (raw_report.get("summary") or {}).get("primary_provider_id")
+    annotated_blocks = _annotate_provider_sample_metrics(
+        outcome.blocks,
+        primary_provider_id=str(primary_provider_id or "") or None,
+        elapsed_s=elapsed_s,
+        peak_kb=peak_kb,
+    )
+    return _document_providers_projection(
+        _snapshot_for_provider_report(runtime, outcome, annotated_blocks)
+    )
+
+
 def _run_one(*, runtime: Any, path: Path, index: int) -> dict[str, Any]:
     size_bytes = path.stat().st_size
     media_type = _media_type_for(path)
@@ -123,6 +218,15 @@ def _run_one(*, runtime: Any, path: Path, index: int) -> dict[str, Any]:
     elapsed_s = _round(time.perf_counter() - started)
     tracemalloc.stop()
     table_blocks = [block for block in outcome.blocks if block.type == BlockType.TABLE]
+    provider_report = _provider_report_for_outcome(
+        runtime=runtime,
+        outcome=outcome,
+        elapsed_s=elapsed_s,
+        peak_kb=_round(peak_bytes / 1024),
+    )
+    comparison_report = provider_report.get("comparison_report") or {}
+    rankings = comparison_report.get("rankings") or []
+    best_ranking = rankings[0] if rankings else {}
     return {
         "document": str(path),
         "file_name": path.name,
@@ -136,6 +240,10 @@ def _run_one(*, runtime: Any, path: Path, index: int) -> dict[str, Any]:
         "blocks": len(outcome.blocks),
         "chunks": len(outcome.chunks),
         "tables": len(table_blocks),
+        "primary_provider_id": (provider_report.get("summary") or {}).get("primary_provider_id"),
+        "best_provider_id": comparison_report.get("best_provider_id"),
+        "best_provider_score": best_ranking.get("score"),
+        "provider_report": provider_report,
     }
 
 
@@ -218,14 +326,17 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- total_elapsed_s: {summary.get('total_elapsed_s', 0)}",
         f"- max_peak_kb: {summary.get('max_peak_kb', 0)}",
         "",
-        "| document | status | size_bytes | elapsed_s | peak_kb | mb_per_s | blocks | chunks | tables |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| document | status | primary_provider | best_provider | provider_score | size_bytes | elapsed_s | peak_kb | mb_per_s | blocks | chunks | tables |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in payload.get("results") or []:
         lines.append(
-            "| {file_name} | {status} | {size_bytes} | {elapsed_s} | {peak_kb} | {mb_per_s} | {blocks} | {chunks} | {tables} |".format(
+            "| {file_name} | {status} | {primary_provider_id} | {best_provider_id} | {best_provider_score} | {size_bytes} | {elapsed_s} | {peak_kb} | {mb_per_s} | {blocks} | {chunks} | {tables} |".format(
                 file_name=item.get("file_name", ""),
                 status=item.get("status", ""),
+                primary_provider_id=item.get("primary_provider_id", ""),
+                best_provider_id=item.get("best_provider_id", ""),
+                best_provider_score=item.get("best_provider_score", ""),
                 size_bytes=item.get("size_bytes", 0),
                 elapsed_s=item.get("elapsed_s", ""),
                 peak_kb=item.get("peak_kb", ""),

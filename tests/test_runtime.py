@@ -11,7 +11,7 @@ from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
 from parsecore.runtime import QuotaExceededError
-from parsecore.stubs import FakeEmbeddingProvider
+from parsecore.stubs import FakeEmbeddingProvider, ParagraphChunkBuilder
 from tests.support import TemporaryWorkspace
 
 
@@ -95,6 +95,114 @@ adapter = "embedded"
 
 [[parsers]]
 name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+""".strip()
+
+
+LOCAL_PROVIDER_ROUTING_CONFIG = """
+[project]
+name = "test-parsecore"
+mode = "embedded-sdk"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[providers.local_parser_routing]
+enabled = true
+fallback_to_default = true
+include_disabled = false
+
+[[providers.local_parsers]]
+id = "text-alt"
+enabled = true
+priority = 200
+media_types = ["text/plain"]
+extensions = [".txt"]
+profiles = ["default"]
+capabilities = ["native-text"]
+
+[[providers.local_parsers]]
+id = "text-native"
+enabled = true
+priority = 100
+media_types = ["text/plain"]
+extensions = [".txt"]
+profiles = ["default"]
+capabilities = ["native-text"]
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt"]
+
+[[parsers]]
+name = "text-alt"
+media_types = ["text/plain"]
+extensions = [".txt"]
+""".strip()
+
+
+PDF_LOCAL_PROVIDER_RERUN_CONFIG = """
+[project]
+name = "test-parsecore"
+mode = "embedded-sdk"
+
+[storage]
+database_url = "__DB_URL__"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "hybrid"
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[providers.local_parser_routing]
+enabled = true
+fallback_to_default = true
+include_disabled = false
+
+[[providers.local_parsers]]
+id = "pdf-text"
+enabled = true
+priority = 200
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["large-pdf"]
+capabilities = ["native-text"]
+
+[[providers.local_parsers]]
+id = "pdf-layout"
+enabled = true
+priority = 100
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["large-pdf"]
+capabilities = ["layout", "tables"]
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+
+[[parsers]]
+name = "pdf-layout"
 media_types = ["application/pdf"]
 extensions = [".pdf"]
 """.strip()
@@ -199,10 +307,132 @@ class ParseRuntimeTests(unittest.TestCase):
 
         self.assertEqual(description["project"], "test-parsecore")
         self.assertEqual(description["parsers"], ["docx-native"])
+        self.assertEqual(
+            description["provider_registry"]["summary"],
+            {
+                "total": 0,
+                "enabled": 0,
+                "disabled": 0,
+                "route_ready": 0,
+                "evaluation_only": 0,
+                "gate_pending": 0,
+                "gate_failed": 0,
+            },
+        )
+        self.assertEqual(description["payload_schemas"]["schema_version"], "2026-06-payload-schema-registry")
+        self.assertEqual(description["payload_schemas"]["summary"]["total"], 6)
+        self.assertEqual(description["quality_gate"]["schema_version"], "2026-06-quality-gate-config")
+        self.assertTrue(description["quality_gate"]["enabled"])
+        self.assertEqual(description["quality_gate"]["enforcement"], "report_only")
         self.assertEqual(description["index_layers"], ["primary", "structure", "high_precision"])
         self.assertIn("pipelines", description)
         self.assertIn("pipeline_cache", description)
         self.assertEqual(description["pipeline_cache"]["size"], 1)
+
+    def test_describe_returns_local_provider_registry(self) -> None:
+        config = SAMPLE_CONFIG.replace(
+            "[[parsers]]",
+            """
+[[providers.local_parsers]]
+id = "docx-native"
+enabled = true
+priority = 90
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+profiles = ["default"]
+capabilities = ["native-structure"]
+
+[[providers.local_parsers]]
+id = "docling-local"
+enabled = false
+priority = 70
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+profiles = ["table-heavy"]
+capabilities = ["layout", "tables"]
+route_mode = "evaluate"
+gate_status = "pending"
+
+[[parsers]]""",
+            1,
+        )
+        with TemporaryWorkspace(config) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            description = runtime.describe()
+
+        registry = description["provider_registry"]
+        self.assertEqual(
+            registry["summary"],
+            {
+                "total": 2,
+                "enabled": 1,
+                "disabled": 1,
+                "route_ready": 1,
+                "evaluation_only": 1,
+                "gate_pending": 1,
+                "gate_failed": 0,
+            },
+        )
+        self.assertEqual([provider["id"] for provider in registry["local_parsers"]], ["docx-native", "docling-local"])
+        self.assertEqual(registry["local_parsers"][0]["capabilities"], ["native-structure"])
+        self.assertEqual(registry["local_parsers"][1]["admission"]["route_mode"], "evaluate")
+        self.assertEqual(registry["local_parsers"][1]["admission"]["gate_status"], "pending")
+
+    def test_local_provider_routing_selects_route_plan_primary_parser(self) -> None:
+        with TemporaryWorkspace(LOCAL_PROVIDER_ROUTING_CONFIG) as workspace:
+            document_path = workspace.create_text_file("manual.txt", "Heading\n\nInspect pump.")
+            runtime = build_runtime(workspace.config_path)
+
+            outcome = runtime.submit(
+                ParseRequest(
+                    doc_id="doc-local-route",
+                    file_path=str(document_path),
+                    media_type="text/plain",
+                    options={"profile": "default"},
+                )
+            )
+
+            stored_job = runtime.get_job(job_id=outcome.job.job_id)
+
+        parsers = {block.metadata.get("parser") for block in outcome.blocks}
+        self.assertEqual(parsers, {"text-alt"})
+        self.assertIsNotNone(stored_job)
+        route_decision = stored_job.options["local_provider_routing"]  # type: ignore[union-attr]
+        self.assertEqual(route_decision["schema_version"], "2026-06-local-provider-routing-decision")
+        self.assertEqual(route_decision["route_status"], "selected")
+        self.assertEqual(route_decision["selected_provider_id"], "text-alt")
+        self.assertEqual(route_decision["primary_provider_id"], "text-alt")
+        self.assertEqual(route_decision["eligible_provider_ids"], ["text-alt", "text-native"])
+
+    def test_local_provider_routing_skips_evaluation_only_candidate_even_when_priority_is_higher(self) -> None:
+        config = LOCAL_PROVIDER_ROUTING_CONFIG.replace(
+            'capabilities = ["native-text"]\n\n[[providers.local_parsers]]',
+            'capabilities = ["native-text"]\nroute_mode = "evaluate"\ngate_status = "pending"\n\n[[providers.local_parsers]]',
+            1,
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_text_file("manual.txt", "Heading\n\nInspect pump.")
+            runtime = build_runtime(workspace.config_path)
+
+            outcome = runtime.submit(
+                ParseRequest(
+                    doc_id="doc-local-route-evaluate",
+                    file_path=str(document_path),
+                    media_type="text/plain",
+                    options={"profile": "default"},
+                )
+            )
+
+            stored_job = runtime.get_job(job_id=outcome.job.job_id)
+
+        parsers = {block.metadata.get("parser") for block in outcome.blocks}
+        self.assertEqual(parsers, {"text-native"})
+        self.assertIsNotNone(stored_job)
+        route_decision = stored_job.options["local_provider_routing"]  # type: ignore[union-attr]
+        self.assertEqual(route_decision["route_status"], "selected")
+        self.assertEqual(route_decision["selected_provider_id"], "text-native")
+        self.assertEqual(route_decision["primary_provider_id"], "text-native")
+        self.assertEqual(route_decision["eligible_provider_ids"], ["text-native"])
 
     def test_describe_normalizes_legacy_jobcard_adapter_to_embedded(self) -> None:
         legacy_config = SAMPLE_CONFIG.replace('adapter = "embedded"', 'adapter = "jobcard"')
@@ -252,6 +482,9 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(artifact.items[0].kind, SemanticRole.TITLE.value)
         self.assertEqual(artifact.items[0].semantic_role, SemanticRole.TITLE.value)
         self.assertIn("role:title", artifact.items[0].metadata["structure_tags"])
+        self.assertEqual(len(artifact.knowledge_units), len(artifact.items))
+        self.assertEqual(artifact.knowledge_units[0].semantic_role, SemanticRole.TITLE.value)
+        self.assertTrue(artifact.knowledge_units[0].should_index_for_rag)
         self.assertEqual(artifact.metadata["pipeline_name"], "docx-native/default")
         self.assertEqual(artifact.metadata["pipeline_observability"]["pipeline_name"], "docx-native/default")
         self.assertTrue(artifact.metadata["pipeline_observability"]["options_hash"])
@@ -259,6 +492,51 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertIn("active_runtime_stages", artifact.metadata["pipeline_observability"])
         self.assertEqual(chunks[0].semantic_role, SemanticRole.TITLE.value)
         self.assertEqual(chunks[1].semantic_role, SemanticRole.PARAGRAPH.value)
+
+    def test_default_chunk_builder_skips_non_indexable_rag_artifacts(self) -> None:
+        blocks = (
+            Block(
+                block_id="blk-title",
+                doc_id="doc-rag-policy",
+                type=BlockType.TITLE,
+                content="Manual",
+                metadata={"semantic_role": SemanticRole.TITLE.value},
+            ),
+            Block(
+                block_id="blk-header",
+                doc_id="doc-rag-policy",
+                type=BlockType.PARAGRAPH,
+                content="Company Confidential",
+                metadata={"semantic_role": SemanticRole.HEADER_FOOTER.value},
+            ),
+            Block(
+                block_id="blk-empty",
+                doc_id="doc-rag-policy",
+                type=BlockType.PARAGRAPH,
+                content="   ",
+                metadata={"semantic_role": SemanticRole.PARAGRAPH.value},
+            ),
+            Block(
+                block_id="blk-page-ref",
+                doc_id="doc-rag-policy",
+                type=BlockType.PARAGRAPH,
+                content="Page 1",
+                metadata={"semantic_role": SemanticRole.PAGE_REF_CELL.value},
+            ),
+            Block(
+                block_id="blk-body",
+                doc_id="doc-rag-policy",
+                type=BlockType.PARAGRAPH,
+                content="Inspect pump seals.",
+                metadata={"semantic_role": SemanticRole.BODY_SECTION.value},
+            ),
+        )
+
+        chunks = ParagraphChunkBuilder().build(doc_id="doc-rag-policy", blocks=blocks)
+
+        self.assertEqual([chunk.block_ids for chunk in chunks], [("blk-title",), ("blk-body",)])
+        self.assertEqual([chunk.semantic_role for chunk in chunks], ["title", "body_section"])
+        self.assertEqual(chunks[1].text, "Inspect pump seals.")
 
     def test_table_structure_stage_enriches_table_items_and_chunks_when_enabled(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
@@ -310,8 +588,85 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(artifact.items[1].metadata["table_markdown"], "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
         self.assertIn("role:table", artifact.items[1].metadata["structure_tags"])
         self.assertEqual(artifact.items[1].provenance["semantic_role"], SemanticRole.TABLE.value)
+        self.assertEqual(artifact.knowledge_units[1].unit_type, "table")
+        self.assertEqual(artifact.knowledge_units[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+        self.assertEqual(artifact.knowledge_units[1].source_table_ids, ("itm-2",))
         self.assertEqual(chunks[1].semantic_role, SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+
+    def test_knowledge_units_render_table_cells_without_table_stage(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-table-unit",
+                file_path=str(workspace.root / "table.pdf"),
+                media_type="application/pdf",
+            )
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = (
+                Block(
+                    block_id="blk-table",
+                    doc_id="doc-table-unit",
+                    type=BlockType.TABLE,
+                    content="",
+                    metadata={
+                        "page": 2,
+                        "parser": "pdf-text",
+                        "semantic_role": SemanticRole.TABLE.value,
+                        "table_title": "Installed parts",
+                        "cells": [["Part", "Qty"], ["Bolt", "2"]],
+                        "rows": 2,
+                        "cols": 2,
+                    },
+                ),
+            )
+
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+            chunks = pipeline.build_chunks(request=request, blocks=blocks)
+
+        self.assertEqual(artifact.knowledge_units[0].unit_type, "table")
+        self.assertEqual(artifact.knowledge_units[0].metadata["table_summary"]["caption"], "Installed parts")
+        self.assertEqual(artifact.knowledge_units[0].metadata["table_summary"]["row_count"], 2)
+        self.assertEqual(
+            artifact.knowledge_units[0].text,
+            "Installed parts\n\n| Part | Qty |\n| --- | --- |\n| Bolt | 2 |",
+        )
+        self.assertEqual(chunks[0].text, artifact.knowledge_units[0].text)
+
+    def test_knowledge_units_use_figure_alt_text_when_caption_is_missing(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-figure-unit",
+                file_path=str(workspace.root / "figure.pdf"),
+                media_type="application/pdf",
+            )
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = (
+                Block(
+                    block_id="blk-figure",
+                    doc_id="doc-figure-unit",
+                    type=BlockType.IMAGE,
+                    content="",
+                    metadata={
+                        "page": 3,
+                        "parser": "pdf-text",
+                        "semantic_role": SemanticRole.IMAGE.value,
+                        "alt_text": "Hydraulic system flow diagram",
+                        "figure_kind": "diagram",
+                    },
+                ),
+            )
+
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+            chunks = pipeline.build_chunks(request=request, blocks=blocks)
+
+        self.assertEqual(artifact.knowledge_units[0].unit_type, "figure_caption")
+        self.assertTrue(artifact.knowledge_units[0].should_index_for_rag)
+        self.assertEqual(artifact.knowledge_units[0].text, "Hydraulic system flow diagram")
+        self.assertEqual(artifact.knowledge_units[0].metadata["figure_summary"]["figure_kind"], "diagram")
+        self.assertEqual(chunks[0].semantic_role, SemanticRole.IMAGE.value)
+        self.assertEqual(chunks[0].text, "Hydraulic system flow diagram")
 
     def test_execute_persists_document_views_for_pages_lines_and_records(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
@@ -460,7 +815,8 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertIn("table-structure", artifact.metadata["skipped_runtime_stages"])
         self.assertNotIn("table_structure", artifact.metadata)
         self.assertNotIn("table_markdown", artifact.items[1].metadata)
-        self.assertEqual(chunks[1].text, "Part\tQty\nBolt\t2")
+        self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+        self.assertEqual(chunks[1].text, artifact.knowledge_units[1].text)
 
     def test_submit_finishes_with_done_state(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -601,6 +957,13 @@ class ParseRuntimeTests(unittest.TestCase):
         self.assertEqual(upsert["doc_id"], "doc-phase7-index")
         self.assertGreaterEqual(upsert["structure_items"], 2)
         self.assertEqual(upsert["index_manifest"]["layers"][1]["name"], "structure")
+        rag_coverage = upsert["index_manifest"]["rag_coverage"]
+        self.assertEqual(rag_coverage["schema_version"], "2026-06-rag-index-manifest")
+        self.assertEqual(rag_coverage["source"], "runtime_index_manifest")
+        self.assertEqual(rag_coverage["strategy"], "document_knowledge_units")
+        self.assertEqual(rag_coverage["indexable_unit_count"], rag_coverage["chunked_unit_count"])
+        self.assertEqual(rag_coverage["coverage_score"], 1.0)
+        self.assertEqual(len(rag_coverage["units"]), rag_coverage["unit_count"])
 
     def test_retry_latest_reuses_last_request(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1649,6 +2012,8 @@ class ParseRuntimeTests(unittest.TestCase):
             payload = _document_projection(snapshot, projection="structured")
             self.assertEqual(payload["state"], "done")
             self.assertEqual([unit["page_start"] for unit in payload["parse_units"]], [1, 3])
+            self.assertTrue(all("coverage_summary" in unit for unit in payload["parse_units"]))
+            self.assertTrue(all("rag_coverage_quality" in unit for unit in payload["parse_units"]))
             self.assertEqual([page["page_number"] for page in payload["pages"]], [1, 2, 3])
             self.assertEqual([page["text"] for page in payload["pages"]], ["one", "two", "three"])
             views = runtime.job_store.get_document_views(doc_id="doc-partitioned")
@@ -1888,6 +2253,7 @@ class ParseRuntimeTests(unittest.TestCase):
             self.assertEqual(part_two["state"], "done")
             self.assertEqual(part_two["attempts"], 1)
             self.assertNotEqual(part_two["job_id"], planned["part_jobs"][1].job_id)
+            self.assertEqual(part_two["previous_part_observation"]["job_id"], planned["part_jobs"][1].job_id)
             after_manifest = runtime.get_document(doc_id="doc-rerun-part")["index_manifest"]
             after_part_two = next(
                 part
@@ -1901,6 +2267,85 @@ class ParseRuntimeTests(unittest.TestCase):
             views = runtime.job_store.get_document_views(doc_id="doc-rerun-part")
             self.assertEqual([page["text"] for page in views["pages"]], ["one", "two"])
             self.assertEqual(len(views["lines"]), 2)
+            structured = _document_projection(runtime.get_document(doc_id="doc-rerun-part"), projection="structured")
+            rerun_unit = next(unit for unit in structured["parse_units"] if unit["part_id"] == "doc-rerun-part-part-2")
+            self.assertEqual(rerun_unit["previous_part_observation"]["job_id"], planned["part_jobs"][1].job_id)
+            self.assertEqual(rerun_unit["rerun_comparison"]["previous_job_id"], planned["part_jobs"][1].job_id)
+            self.assertEqual(rerun_unit["rerun_comparison"]["current_job_id"], rerun["job"].job_id)
+
+    def test_rerun_pdf_part_uses_provider_route_plan_capabilities(self) -> None:
+        with TemporaryWorkspace(PDF_LOCAL_PROVIDER_RERUN_CONFIG) as workspace:
+            document_path = workspace.create_pdf("rerun-provider-route.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-rerun-provider-route",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-rerun-provider-route", target_pages_per_part=1)
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+
+            rerun = runtime.rerun_pdf_part(
+                doc_id="doc-rerun-provider-route",
+                part_id="doc-rerun-provider-route-part-2",
+                provider_route_plan={"required_capabilities": ["layout", "tables"]},
+            )
+            self.assertEqual(
+                rerun["job"].options["local_provider_route_request"]["required_capabilities"],
+                ["layout", "tables"],
+            )
+
+            outcome = runtime.execute(job_id=rerun["job"].job_id)
+            parsers = {block.metadata.get("parser") for block in outcome.blocks}
+            self.assertEqual(parsers, {"pdf-layout"})
+            stored_job = runtime.get_job(job_id=rerun["job"].job_id)
+            self.assertIsNotNone(stored_job)
+            route_decision = stored_job.options["local_provider_routing"]  # type: ignore[union-attr]
+            self.assertEqual(route_decision["requested"]["required_capabilities"], ["layout", "tables"])
+            self.assertEqual(route_decision["selected_provider_id"], "pdf-layout")
+            snapshot = runtime.get_document(doc_id="doc-rerun-provider-route")
+            routed_part = next(
+                part
+                for part in snapshot["partition_parts"]
+                if part["part_id"] == "doc-rerun-provider-route-part-2"
+            )
+            self.assertEqual(routed_part["provider_ids"], ["pdf-layout"])
+            self.assertEqual(
+                routed_part["provider_route_plan"]["required_capabilities"],
+                ["layout", "tables"],
+            )
+            self.assertEqual(
+                routed_part["local_provider_routing"]["selected_provider_id"],
+                "pdf-layout",
+            )
+            payload = _document_projection(snapshot, projection="structured")
+            routed_unit = next(
+                unit
+                for unit in payload["parse_units"]
+                if unit["part_id"] == "doc-rerun-provider-route-part-2"
+            )
+            self.assertEqual(routed_unit["provider_ids"], ["pdf-layout"])
+            self.assertEqual(
+                routed_unit["provider_route_plan"]["required_capabilities"],
+                ["layout", "tables"],
+            )
+            self.assertEqual(
+                routed_unit["local_provider_routing"]["selected_provider_id"],
+                "pdf-layout",
+            )
+            self.assertEqual(routed_unit["coverage_summary"]["total_pages"], 1)
+            self.assertIn("pages_with_coverage_gaps", routed_unit["coverage_summary"])
+            self.assertIn("gate", routed_unit["rag_coverage_quality"])
+            self.assertEqual(routed_unit["previous_part_observation"]["job_id"], planned["part_jobs"][1].job_id)
+            self.assertEqual(routed_unit["rerun_comparison"]["previous_job_id"], planned["part_jobs"][1].job_id)
+            self.assertEqual(routed_unit["rerun_comparison"]["current_job_id"], rerun["job"].job_id)
+            self.assertTrue(routed_unit["rerun_comparison"]["provider_changed"])
+            self.assertEqual(routed_unit["rerun_comparison"]["previous_selected_provider_id"], "pdf-text")
+            self.assertEqual(routed_unit["rerun_comparison"]["current_selected_provider_id"], "pdf-layout")
 
     def test_batch_rerun_defaults_to_failed_parts_only(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

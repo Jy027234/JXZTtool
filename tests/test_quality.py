@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from parsecore.garble import detect_page_garble_reason
+from parsecore.ir import rag_coverage_quality_payload
 from parsecore.models import Block, BlockType, Chunk
 from parsecore.quality import (
     evaluate_chunk_embeddings,
@@ -242,6 +243,139 @@ class ParseQualityDualMetricsTests(unittest.TestCase):
         quality = evaluate_parse_quality(blocks)
         self.assertGreater(quality.total_pdf_name_tokens, 0)
         self.assertIn("pdf_name_garble", quality.flags)
+
+
+class RagCoverageQualitySignalTests(unittest.TestCase):
+    """P2-T12: lock down the 5 rag_* quality signal flag names and gate mapping."""
+
+    RAG_FLAGS = frozenset({
+        "rag_empty_text_page",
+        "rag_units_without_chunks",
+        "rag_chunks_not_embedded",
+        "rag_table_without_unit",
+        "rag_figure_caption_missing",
+    })
+
+    def test_clean_document_has_no_rag_flags(self) -> None:
+        summary = {
+            "total_pages": 3,
+            "pages_missing_rag_units": 0,
+            "pages_missing_chunks": 0,
+            "pages_chunks_not_embedded": 0,
+            "pages_with_coverage_gaps": 0,
+            "pages_table_without_units": 0,
+            "pages_figure_caption_missing": 0,
+            "unit_chunk_coverage_ratio": 1.0,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertEqual(result["flags"], [])
+        self.assertEqual(result["gate"], "accept")
+        self.assertIsNone(result.get("recommended_action"))
+
+    def test_rag_empty_text_page_flag(self) -> None:
+        summary = {
+            "total_pages": 2,
+            "pages_missing_rag_units": 1,
+            "pages_missing_chunks": 0,
+            "pages_chunks_not_embedded": 0,
+            "pages_with_coverage_gaps": 1,
+            "pages_table_without_units": 0,
+            "pages_figure_caption_missing": 0,
+            "unit_chunk_coverage_ratio": 1.0,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertIn("rag_empty_text_page", result["flags"])
+        self.assertEqual(result["gate"], "manual_review")
+        self.assertEqual(result["recommended_action"], "review_parse_ir")
+
+    def test_rag_units_without_chunks_flag(self) -> None:
+        summary = {
+            "total_pages": 2,
+            "pages_missing_rag_units": 0,
+            "pages_missing_chunks": 1,
+            "pages_chunks_not_embedded": 0,
+            "pages_with_coverage_gaps": 1,
+            "pages_table_without_units": 0,
+            "pages_figure_caption_missing": 0,
+            "unit_chunk_coverage_ratio": 0.5,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertIn("rag_units_without_chunks", result["flags"])
+        self.assertEqual(result["gate"], "accept_with_warning")
+        self.assertEqual(result["recommended_action"], "rechunk_document")
+
+    def test_rag_chunks_not_embedded_flag(self) -> None:
+        summary = {
+            "total_pages": 2,
+            "pages_missing_rag_units": 0,
+            "pages_missing_chunks": 0,
+            "pages_chunks_not_embedded": 1,
+            "pages_with_coverage_gaps": 1,
+            "pages_table_without_units": 0,
+            "pages_figure_caption_missing": 0,
+            "unit_chunk_coverage_ratio": 1.0,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertIn("rag_chunks_not_embedded", result["flags"])
+        self.assertEqual(result["gate"], "accept_with_warning")
+        self.assertEqual(result["recommended_action"], "reembed_document")
+
+    def test_rag_table_without_unit_flag(self) -> None:
+        summary = {
+            "total_pages": 2,
+            "pages_missing_rag_units": 0,
+            "pages_missing_chunks": 0,
+            "pages_chunks_not_embedded": 0,
+            "pages_with_coverage_gaps": 1,
+            "pages_table_without_units": 1,
+            "pages_figure_caption_missing": 0,
+            "unit_chunk_coverage_ratio": 1.0,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertIn("rag_table_without_unit", result["flags"])
+        self.assertEqual(result["gate"], "accept_with_warning")
+        self.assertEqual(result["recommended_action"], "local_provider_rerun")
+
+    def test_rag_figure_caption_missing_flag(self) -> None:
+        summary = {
+            "total_pages": 2,
+            "pages_missing_rag_units": 0,
+            "pages_missing_chunks": 0,
+            "pages_chunks_not_embedded": 0,
+            "pages_with_coverage_gaps": 1,
+            "pages_table_without_units": 0,
+            "pages_figure_caption_missing": 1,
+            "unit_chunk_coverage_ratio": 1.0,
+        }
+        result = rag_coverage_quality_payload(summary)
+        self.assertIn("rag_figure_caption_missing", result["flags"])
+        self.assertEqual(result["gate"], "accept_with_warning")
+        self.assertEqual(result["recommended_action"], "review_parse_ir")
+
+    def test_all_five_rag_flag_names_are_stable(self) -> None:
+        """Ensure the 5 rag_* flag names are exactly as documented."""
+        produced_flags = set()
+        for key, flag in [
+            ("pages_missing_rag_units", "rag_empty_text_page"),
+            ("pages_missing_chunks", "rag_units_without_chunks"),
+            ("pages_chunks_not_embedded", "rag_chunks_not_embedded"),
+            ("pages_table_without_units", "rag_table_without_unit"),
+            ("pages_figure_caption_missing", "rag_figure_caption_missing"),
+        ]:
+            summary = {
+                "total_pages": 1,
+                "pages_missing_rag_units": 0,
+                "pages_missing_chunks": 0,
+                "pages_chunks_not_embedded": 0,
+                "pages_with_coverage_gaps": 1,
+                "pages_table_without_units": 0,
+                "pages_figure_caption_missing": 0,
+                "unit_chunk_coverage_ratio": 1.0,
+                key: 1,
+            }
+            result = rag_coverage_quality_payload(summary)
+            produced_flags.update(result["flags"])
+        self.assertEqual(produced_flags, self.RAG_FLAGS)
 
 
 if __name__ == "__main__":

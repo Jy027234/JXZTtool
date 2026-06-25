@@ -8,11 +8,17 @@ from math import sqrt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .config import ParseCoreSettings
+from .config import (
+    ParseCoreSettings,
+    local_provider_registry_payload,
+    local_provider_route_plan_payload,
+    quality_gate_payload,
+)
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
 from .events import JobEventLogger
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
 from .ocr_trace import build_ocr_decision_trace
+from .payload_schemas import payload_schema_registry
 from .pdf_parts import child_doc_id, create_pdf_part_file, create_pdf_part_files, detect_pdf_page_count, plan_pdf_parts
 from .pipelines import ParsedDocumentArtifact, PipelineRegistry
 from .profiles import describe_parse_profiles
@@ -55,6 +61,15 @@ _TASK_LIKE_PATTERN = re.compile(
     r"^(?:\d+(?:\.\d+)*[.)]|\([a-z]\)|step\s+\d+|task\s+\d+)",
     re.IGNORECASE,
 )
+_NON_INDEXABLE_RAG_ROLES = {
+    "header_footer",
+    "parse_artifact",
+    "version_cell",
+    "page_ref_cell",
+}
+_LOCAL_PROVIDER_ROUTING_OPTION = "local_provider_routing"
+_LOCAL_PROVIDER_ROUTE_REQUEST_OPTION = "local_provider_route_request"
+_PART_RERUN_PREVIOUS_OBSERVATION_OPTION = "rerun_previous_part_observation"
 
 
 class QuotaExceededError(RuntimeError):
@@ -326,6 +341,9 @@ class ParseRuntime:
             },
             "product_adapter": self.settings.product_adapter,
             "parsers": [parser.name for parser in self.parsers],
+            "provider_registry": self.provider_registry(),
+            "payload_schemas": payload_schema_registry(),
+            "quality_gate": self.quality_gate_config(),
             "profiles": describe_parse_profiles(),
             "index_layers": ["primary", "structure", "high_precision"],
             "embedding_tiers": ["small", "large"],
@@ -335,6 +353,32 @@ class ParseRuntime:
             description["pipelines"] = registry_description["pipelines"]
             description["pipeline_cache"] = registry_description["cache"]
         return description
+
+    def provider_registry(self) -> dict[str, Any]:
+        return local_provider_registry_payload(self.settings.providers)
+
+    def provider_route_plan(
+        self,
+        *,
+        media_type: str | None = None,
+        extension: str | None = None,
+        file_name: str | None = None,
+        profile: str | None = None,
+        required_capabilities: Sequence[str] = (),
+        include_disabled: bool = True,
+    ) -> dict[str, Any]:
+        return local_provider_route_plan_payload(
+            self.settings.providers,
+            media_type=media_type,
+            extension=extension,
+            file_name=file_name,
+            profile=profile,
+            required_capabilities=required_capabilities,
+            include_disabled=include_disabled,
+        )
+
+    def quality_gate_config(self) -> dict[str, Any]:
+        return quality_gate_payload(self.settings.quality_gate)
 
     def submit(self, request: ParseRequest) -> ParseOutcome:
         job = self.start(request)
@@ -379,6 +423,7 @@ class ParseRuntime:
             quota_key=job.quota_key,
             quota_units=job.quota_units,
         )
+        request, job = self._prepare_request_for_execution(request=request, job=job)
         started_at = time.monotonic()
         self.event_logger.log(
             "started",
@@ -812,6 +857,8 @@ class ParseRuntime:
             "document_views": document_views,
             "index_manifest": index_manifest,
             "partition_parts": partition_parts,
+            "provider_registry": self.provider_registry(),
+            "quality_gate": self.quality_gate_config(),
         }
 
     def get_document_records_projection(
@@ -897,6 +944,8 @@ class ParseRuntime:
             "document_views": {},
             "index_manifest": None,
             "partition_parts": [],
+            "provider_registry": self.provider_registry(),
+            "quality_gate": self.quality_gate_config(),
         }
 
     def start_pdf_part_jobs(
@@ -918,6 +967,12 @@ class ParseRuntime:
         total_pages = detect_pdf_page_count(source_job.file_path)
         parent_options = dict(source_job.options)
         effective_profile = str(profile or parent_options.get("profile") or "large-pdf")
+        # P5-T01: extract file size for part strategy decision
+        _file_size_bytes: int | None = None
+        try:
+            _file_size_bytes = Path(source_job.file_path).stat().st_size
+        except Exception:
+            pass
         part_specs = plan_pdf_parts(
             doc_id,
             total_pages,
@@ -925,6 +980,9 @@ class ParseRuntime:
             ocr_heavy_pages_per_part=ocr_heavy_pages_per_part,
             profile=effective_profile,
             options=parent_options,
+            file_size_bytes=_file_size_bytes,
+            ocr_page_ratio=parent_options.get("ocr_page_ratio"),
+            historical_failure_rate=parent_options.get("historical_failure_rate"),
         )
         parent_options.update(
             {
@@ -1012,6 +1070,7 @@ class ParseRuntime:
         part_id: str,
         tenant_id: str | None = None,
         profile: str | None = None,
+        provider_route_plan: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
         if parent_job is None:
@@ -1024,6 +1083,12 @@ class ParseRuntime:
         source_job = self.job_store.get_job(job_id=source_job_id) if source_job_id else None
         if source_job is None:
             source_job = parent_job
+        route_request = _normalize_local_provider_route_request(provider_route_plan)
+        previous_part_observation = self._current_part_observation(
+            doc_id=doc_id,
+            part_id=part_id,
+            tenant_id=parent_job.tenant_id,
+        )
         part_job = self._start_pdf_part_job(
             source_job=source_job,
             parent_job=parent_job,
@@ -1031,6 +1096,8 @@ class ParseRuntime:
             profile=str(profile or parent_job.options.get("profile") or source_job.options.get("profile") or "large-pdf"),
             max_active_parts_per_doc=_safe_optional_int(parent_job.options.get("max_active_parts_per_doc")),
             rerun=True,
+            provider_route_request=route_request,
+            previous_part_observation=previous_part_observation,
         )
         self.refresh_partitioned_parent(
             doc_id=doc_id,
@@ -1042,6 +1109,7 @@ class ParseRuntime:
             "tenant_id": parent_job.tenant_id,
             "part_id": part_id,
             "job": part_job,
+            "previous_part_observation": previous_part_observation,
         }
 
     def rerun_pdf_parts(
@@ -1053,10 +1121,12 @@ class ParseRuntime:
         failed_only: bool = False,
         state_filter: Sequence[str] | None = None,
         profile: str | None = None,
+        provider_route_plan: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent_job = self._latest_partition_parent_job(doc_id=doc_id, tenant_id=tenant_id)
         if parent_job is None:
             raise LookupError(f"No partitioned parse job found for doc_id={doc_id!r}")
+        route_request = _normalize_local_provider_route_request(provider_route_plan)
         requested_part_ids = {str(part_id) for part_id in tuple(part_ids or ()) if str(part_id).strip()}
         requested_states = {
             str(state).strip().lower()
@@ -1086,9 +1156,16 @@ class ParseRuntime:
                 part_id=part_id,
                 tenant_id=parent_job.tenant_id,
                 profile=profile,
+                provider_route_plan=route_request,
             )
             job = rerun["job"]
-            submitted.append({"part_id": part_id, "job": job})
+            submitted.append(
+                {
+                    "part_id": part_id,
+                    "job": job,
+                    "previous_part_observation": rerun.get("previous_part_observation"),
+                }
+            )
         return {
             "doc_id": doc_id,
             "tenant_id": parent_job.tenant_id,
@@ -1195,37 +1272,65 @@ class ParseRuntime:
             page_start = _safe_int_runtime(spec.get("page_start"), default=1)
             page_end = _safe_int_runtime(spec.get("page_end"), default=page_start)
             table_count = 0
+            provider_ids: list[str] = []
+            local_provider_routing: dict[str, Any] | None = None
+            provider_route_plan: dict[str, Any] | None = None
+            previous_part_observation: dict[str, Any] | None = None
+            if child is not None:
+                child_options = getattr(child, "options", {}) or {}
+                if isinstance(child_options, Mapping):
+                    raw_route = child_options.get(_LOCAL_PROVIDER_ROUTING_OPTION)
+                    if isinstance(raw_route, Mapping):
+                        local_provider_routing = dict(raw_route)
+                    route_request = _local_provider_route_request(child_options)
+                    if route_request is not None:
+                        provider_route_plan = dict(route_request)
+                    raw_previous_observation = child_options.get(_PART_RERUN_PREVIOUS_OBSERVATION_OPTION)
+                    if isinstance(raw_previous_observation, Mapping):
+                        previous_part_observation = _runtime_json_safe_mapping(raw_previous_observation)
             if child is not None and child.state == ParseJobState.DONE:
+                child_blocks = tuple(self.job_store.get_blocks(doc_id=child.doc_id, tenant_id=child.tenant_id))
                 table_count = sum(
                     1
-                    for block in self.job_store.get_blocks(doc_id=child.doc_id, tenant_id=child.tenant_id)
+                    for block in child_blocks
                     if str(getattr(getattr(block, "type", None), "value", getattr(block, "type", ""))) == "table"
                 )
+                provider_ids = _runtime_provider_ids(child_blocks)
+            if not provider_ids and local_provider_routing:
+                selected_provider_id = str(local_provider_routing.get("selected_provider_id") or "").strip()
+                if selected_provider_id:
+                    provider_ids = [selected_provider_id]
             state = str((child.state.value if child is not None else spec.get("state")) or "pending")
             failure_reason = getattr(child, "failure_reason", None) if child is not None else None
             if state == ParseJobState.FAILED.value and str(failure_reason or "").strip().lower() == "cancelled":
                 state = "cancelled"
-            parts.append(
-                {
-                    "parse_unit_id": part_id,
-                    "part_id": part_id,
-                    "source_doc_id": doc_id,
-                    "part_doc_id": child.doc_id if child is not None else part_doc_id,
-                    "part_index": _safe_int_runtime(spec.get("part_index"), default=index),
-                    "source_type": str(parent_job.media_type or ""),
-                    "page_start": page_start,
-                    "page_end": page_end,
-                    "page_count": _safe_int_runtime(spec.get("page_count"), default=max(1, page_end - page_start + 1)),
-                    "state": state,
-                    "raw_state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
-                    "job_id": child.job_id if child is not None else None,
-                    "attempts": int(getattr(child, "attempt_count", 0) or 0) if child is not None else 0,
-                    "table_count": table_count,
-                    "quality_signal_count": 0,
-                    "rerun_supported": True,
-                    "last_error": failure_reason,
-                }
-            )
+            part_payload = {
+                "parse_unit_id": part_id,
+                "part_id": part_id,
+                "source_doc_id": doc_id,
+                "part_doc_id": child.doc_id if child is not None else part_doc_id,
+                "part_index": _safe_int_runtime(spec.get("part_index"), default=index),
+                "source_type": str(parent_job.media_type or ""),
+                "page_start": page_start,
+                "page_end": page_end,
+                "page_count": _safe_int_runtime(spec.get("page_count"), default=max(1, page_end - page_start + 1)),
+                "state": state,
+                "raw_state": str((child.state.value if child is not None else spec.get("state")) or "pending"),
+                "job_id": child.job_id if child is not None else None,
+                "attempts": int(getattr(child, "attempt_count", 0) or 0) if child is not None else 0,
+                "table_count": table_count,
+                "quality_signal_count": 0,
+                "rerun_supported": True,
+                "last_error": failure_reason,
+                "provider_ids": provider_ids,
+            }
+            if provider_route_plan:
+                part_payload["provider_route_plan"] = provider_route_plan
+            if local_provider_routing:
+                part_payload["local_provider_routing"] = local_provider_routing
+            if previous_part_observation:
+                part_payload["previous_part_observation"] = previous_part_observation
+            parts.append(part_payload)
         return parts
 
     def refresh_partitioned_parent(
@@ -1413,6 +1518,8 @@ class ParseRuntime:
         max_active_parts_per_doc: int | None = None,
         rerun: bool = False,
         create_part_file: bool = True,
+        provider_route_request: Mapping[str, Any] | None = None,
+        previous_part_observation: Mapping[str, Any] | None = None,
     ):
         part_id = str(spec.get("part_id") or child_doc_id(parent_job.doc_id, spec.get("part_index") or 1))
         part_doc_id = str(spec.get("part_doc_id") or part_id)
@@ -1428,6 +1535,8 @@ class ParseRuntime:
             part_file.parent.mkdir(parents=True, exist_ok=True)
             create_pdf_part_file(source_job.file_path, str(part_file), page_start, page_end)
         options = dict(source_job.options)
+        options.pop(_LOCAL_PROVIDER_ROUTING_OPTION, None)
+        options.pop(_LOCAL_PROVIDER_ROUTE_REQUEST_OPTION, None)
         options.update(
             {
                 "job_kind": _PDF_PART_JOB_KIND,
@@ -1448,6 +1557,10 @@ class ParseRuntime:
                 "rerun": bool(rerun),
             }
         )
+        if provider_route_request:
+            options[_LOCAL_PROVIDER_ROUTE_REQUEST_OPTION] = dict(provider_route_request)
+        if previous_part_observation:
+            options[_PART_RERUN_PREVIOUS_OBSERVATION_OPTION] = _runtime_json_safe_mapping(previous_part_observation)
         return self.start(
             ParseRequest(
                 doc_id=part_doc_id,
@@ -1508,6 +1621,34 @@ class ParseRuntime:
                 key=lambda item: _safe_int_runtime((getattr(item, "options", {}) or {}).get("part_index"), default=0),
             )
         )
+
+    def _current_part_observation(
+        self,
+        *,
+        doc_id: str,
+        part_id: str,
+        tenant_id: str | None,
+    ) -> dict[str, Any] | None:
+        try:
+            from .api_payloads import _document_projection
+            from .parts import document_parts_projection
+        except Exception:
+            return None
+        snapshot = self.get_document(doc_id=doc_id, tenant_id=tenant_id)
+        if snapshot.get("job") is None:
+            return None
+        try:
+            structured = _document_projection(snapshot, projection="structured")
+            parts_payload = document_parts_projection(structured)
+        except Exception:
+            return None
+        for part in parts_payload.get("parts", []):
+            if not isinstance(part, Mapping):
+                continue
+            if str(part.get("part_id") or "") != str(part_id):
+                continue
+            return _runtime_part_observation_payload(part)
+        return None
 
     def _merged_partition_artifacts(
         self,
@@ -2669,6 +2810,11 @@ class ParseRuntime:
             "layers": layers,
             "manual_anatomy": dict((getattr(document, "metadata", {}) or {}).get("manual_anatomy") or {}),
             "structure_quality": dict((getattr(document, "metadata", {}) or {}).get("structure_quality") or {}),
+            "rag_coverage": _runtime_rag_coverage_manifest(
+                doc_id=request.doc_id,
+                document=document,
+                chunks=chunks,
+            ),
         }
         if _is_pdf_part_request(request):
             manifest["part"] = _pdf_part_index_manifest(
@@ -2715,20 +2861,148 @@ class ParseRuntime:
 
     def _resolve_parser(self, request: ParseRequest) -> ParserAdapter:
         suffix = Path(request.file_path).suffix.lower()
+        preferred_parser = _preferred_local_provider_parser(request.options)
+        if preferred_parser:
+            for parser in self.parsers:
+                if parser.name.strip().lower() != preferred_parser:
+                    continue
+                if parser.supports(media_type=request.media_type, suffix=suffix):
+                    return parser
+            raise LookupError(
+                f"No parser registered for provider={preferred_parser!r}, "
+                f"media_type={request.media_type!r}, suffix={suffix!r}"
+            )
         for parser in self.parsers:
             if parser.supports(media_type=request.media_type, suffix=suffix):
                 return parser
         raise LookupError(f"No parser registered for media_type={request.media_type!r}, suffix={suffix!r}")
 
     def _resolve_pipeline(self, request: ParseRequest, *, purpose: str = "parse"):
+        preferred_parser = _preferred_local_provider_parser(request.options)
         if self.pipeline_registry is not None:
-            return self.pipeline_registry.resolve(request, purpose=purpose)
+            return self.pipeline_registry.resolve(
+                request,
+                purpose=purpose,
+                parser_name=preferred_parser,
+            )
         parser = self._resolve_parser(request)
         if purpose not in {"parse", "rechunk", "reembed"}:
             raise LookupError(f"Unsupported pipeline purpose={purpose!r}")
         raise LookupError(
             f"No pipeline registry available for parser={parser.name!r}; rebuild runtime with pipeline registry support"
         )
+
+    def _prepare_request_for_execution(self, *, request: ParseRequest, job: Any) -> tuple[ParseRequest, Any]:
+        routed_request = self._request_with_local_provider_route(request)
+        if routed_request.options == request.options:
+            return request, job
+        update_options = getattr(self.job_store, "update_options", None)
+        if callable(update_options):
+            try:
+                job = update_options(job_id=job.job_id, options=routed_request.options)
+            except Exception as exc:  # pragma: no cover - defensive observability path
+                self.event_logger.log(
+                    "local_provider_route_option_update_failed",
+                    job_id=getattr(job, "job_id", ""),
+                    doc_id=request.doc_id,
+                    error=str(exc),
+                )
+        return routed_request, job
+
+    def _request_with_local_provider_route(self, request: ParseRequest) -> ParseRequest:
+        if self._is_rerun_chunks_only(request) or self._is_rerun_embeddings_only(request):
+            return request
+        routing_settings = self.settings.providers.local_parser_routing
+        if not routing_settings.enabled:
+            return request
+        route_request = _local_provider_route_request(request.options)
+        existing_route = request.options.get(_LOCAL_PROVIDER_ROUTING_OPTION)
+        if (
+            route_request is None
+            and isinstance(existing_route, Mapping)
+            and str(existing_route.get("selected_provider_id") or "").strip()
+        ):
+            return request
+
+        plan = self.provider_route_plan(
+            media_type=request.media_type,
+            file_name=request.file_path,
+            profile=str(request.options.get("profile") or ""),
+            required_capabilities=_route_request_required_capabilities(route_request),
+            include_disabled=routing_settings.include_disabled,
+        )
+        selected_provider_id, selected_role = self._select_registered_local_provider(
+            plan=plan,
+            request=request,
+        )
+        eligible_ids = [
+            str(item)
+            for item in (plan.get("selection") or {}).get("eligible_provider_ids", [])
+            if str(item).strip()
+        ]
+        primary_provider_id = str((plan.get("selection") or {}).get("primary_provider_id") or "").strip()
+        if selected_provider_id:
+            route_status = "selected" if selected_role == "primary" else "fallback_selected"
+        elif eligible_ids:
+            route_status = (
+                "no_registered_provider_fallback_default"
+                if routing_settings.fallback_to_default
+                else "no_registered_provider"
+            )
+        else:
+            route_status = "no_eligible_provider"
+        decision = {
+            "schema_version": "2026-06-local-provider-routing-decision",
+            "enabled": True,
+            "routing_policy": plan.get("routing_policy"),
+            "route_status": route_status,
+            "selected_provider_id": selected_provider_id,
+            "selected_route_role": selected_role,
+            "primary_provider_id": primary_provider_id or None,
+            "fallback_provider_ids": list((plan.get("selection") or {}).get("fallback_provider_ids", [])),
+            "eligible_provider_ids": eligible_ids,
+            "excluded_provider_ids": list((plan.get("selection") or {}).get("excluded_provider_ids", [])),
+            "fallback_to_default": routing_settings.fallback_to_default,
+            "requested": plan.get("requested") or {},
+        }
+        if not selected_provider_id and not routing_settings.fallback_to_default and eligible_ids:
+            decision["selected_provider_id"] = primary_provider_id or eligible_ids[0]
+            decision["selected_route_role"] = "primary"
+        options = dict(request.options)
+        options[_LOCAL_PROVIDER_ROUTING_OPTION] = decision
+        self.event_logger.log(
+            "local_provider_route",
+            doc_id=request.doc_id,
+            route_status=route_status,
+            selected_provider_id=decision.get("selected_provider_id"),
+            primary_provider_id=primary_provider_id or None,
+            eligible_provider_ids=eligible_ids,
+        )
+        return replace(request, options=options)
+
+    def _select_registered_local_provider(
+        self,
+        *,
+        plan: Mapping[str, Any],
+        request: ParseRequest,
+    ) -> tuple[str | None, str | None]:
+        suffix = Path(request.file_path).suffix.lower()
+        parser_by_name = {parser.name.strip().lower(): parser for parser in self.parsers}
+        candidate_roles = {
+            str(candidate.get("id") or "").strip().lower(): str(candidate.get("route_role") or "")
+            for candidate in plan.get("candidates", [])
+            if isinstance(candidate, Mapping)
+        }
+        for provider_id in (plan.get("selection") or {}).get("eligible_provider_ids", []) or []:
+            normalized = str(provider_id or "").strip().lower()
+            if not normalized:
+                continue
+            parser = parser_by_name.get(normalized)
+            if parser is None:
+                continue
+            if parser.supports(media_type=request.media_type, suffix=suffix):
+                return normalized, candidate_roles.get(normalized) or "candidate"
+        return None, None
 
     def _record_ocr_observability(
         self,
@@ -3134,6 +3408,48 @@ def _is_pdf_part_request(request: ParseRequest) -> bool:
     return str((request.options or {}).get("job_kind") or "") == _PDF_PART_JOB_KIND
 
 
+def _preferred_local_provider_parser(options: Mapping[str, Any]) -> str | None:
+    route = options.get(_LOCAL_PROVIDER_ROUTING_OPTION)
+    if not isinstance(route, Mapping):
+        return None
+    provider_id = str(route.get("selected_provider_id") or "").strip().lower()
+    return provider_id or None
+
+
+def _local_provider_route_request(options: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(options, Mapping):
+        return None
+    raw = options.get(_LOCAL_PROVIDER_ROUTE_REQUEST_OPTION)
+    if not isinstance(raw, Mapping):
+        return None
+    required_capabilities = _route_request_required_capabilities(raw)
+    if not required_capabilities:
+        return None
+    return {"required_capabilities": required_capabilities}
+
+
+def _normalize_local_provider_route_request(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_provider_route_plan")
+    required_capabilities = _route_request_required_capabilities(value)
+    if not required_capabilities:
+        return None
+    return {"required_capabilities": required_capabilities}
+
+
+def _route_request_required_capabilities(value: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(value, Mapping):
+        return []
+    required_capabilities = _runtime_string_list(value.get("required_capabilities"))
+    required_capabilities.extend(_runtime_string_list(value.get("capabilities")))
+    capability = str(value.get("capability") or "").strip()
+    if capability:
+        required_capabilities.append(capability)
+    return list(dict.fromkeys(required_capabilities))
+
+
 def _part_specs_from_job(job: Any) -> list[dict[str, Any]]:
     options = getattr(job, "options", {}) or {}
     raw_specs = options.get("part_specs") if isinstance(options, dict) else None
@@ -3144,6 +3460,274 @@ def _part_specs_from_job(job: Any) -> list[dict[str, Any]]:
         if isinstance(spec, dict):
             specs.append(dict(spec))
     return specs
+
+
+def _runtime_rag_coverage_manifest(
+    *,
+    doc_id: str,
+    document: ParsedDocumentArtifact | None,
+    chunks: Sequence[Chunk],
+) -> dict[str, Any]:
+    items = tuple(getattr(document, "items", ()) or ()) if document is not None else ()
+    artifact_units = tuple(getattr(document, "knowledge_units", ()) or ()) if document is not None else ()
+    embedded_chunk_ids = {str(chunk.chunk_id) for chunk in chunks if chunk.embedding is not None}
+    all_chunk_ids = sorted({str(chunk.chunk_id) for chunk in chunks})
+    chunks_by_block_id: dict[str, list[Chunk]] = {}
+    for chunk in chunks:
+        for block_id in tuple(chunk.block_ids or ()):
+            normalized = str(block_id or "").strip()
+            if normalized:
+                chunks_by_block_id.setdefault(normalized, []).append(chunk)
+
+    units: list[dict[str, Any]] = []
+    if artifact_units:
+        for unit in artifact_units:
+            block_ids = tuple(
+                str(block_id)
+                for block_id in tuple(getattr(unit, "source_block_ids", ()) or ())
+                if str(block_id)
+            )
+            chunk_ids = sorted(
+                {
+                    str(chunk.chunk_id)
+                    for block_id in block_ids
+                    for chunk in chunks_by_block_id.get(block_id, ())
+                }
+            )
+            units.append(
+                {
+                    "unit_id": str(getattr(unit, "unit_id", "") or ""),
+                    "source_item_id": next(iter(tuple(getattr(unit, "source_item_ids", ()) or ())), ""),
+                    "unit_type": str(getattr(unit, "unit_type", "") or "paragraph"),
+                    "semantic_role": str(getattr(unit, "semantic_role", "") or "paragraph"),
+                    "page_span": list(_runtime_page_span_tuple(getattr(unit, "page_span", None))),
+                    "source_block_ids": list(block_ids),
+                    "source_table_ids": _runtime_string_list(getattr(unit, "source_table_ids", ())),
+                    "should_index_for_rag": bool(getattr(unit, "should_index_for_rag", False)),
+                    "skip_reason": getattr(unit, "skip_reason", None),
+                    "chunk_ids": chunk_ids,
+                    "embedded": bool(chunk_ids) and all(chunk_id in embedded_chunk_ids for chunk_id in chunk_ids),
+                }
+            )
+    else:
+        for index, item in enumerate(items, start=1):
+            metadata = getattr(item, "metadata", {}) or {}
+            role = str(
+                getattr(item, "semantic_role", "")
+                or metadata.get("semantic_role")
+                or getattr(item, "kind", "")
+                or "paragraph"
+            ).strip().lower()
+            text = _runtime_unit_text(item)
+            block_ids = tuple(str(block_id) for block_id in tuple(getattr(item, "block_ids", ()) or ()) if str(block_id))
+            chunk_ids = sorted(
+                {
+                    str(chunk.chunk_id)
+                    for block_id in block_ids
+                    for chunk in chunks_by_block_id.get(block_id, ())
+                }
+            )
+            should_index = bool(text.strip()) and role not in _NON_INDEXABLE_RAG_ROLES
+            units.append(
+                {
+                    "unit_id": f"{doc_id}:ku:{index:06d}",
+                    "source_item_id": str(getattr(item, "item_id", "") or f"itm-{index}"),
+                    "unit_type": _runtime_unit_type(item=item, semantic_role=role),
+                    "semantic_role": role,
+                    "page_span": list(_runtime_item_page_span(item)),
+                    "source_block_ids": list(block_ids),
+                    "source_table_ids": _runtime_source_table_ids(item=item, semantic_role=role),
+                    "should_index_for_rag": should_index,
+                    "skip_reason": None if should_index else _runtime_unit_skip_reason(semantic_role=role, text=text),
+                    "chunk_ids": chunk_ids,
+                    "embedded": bool(chunk_ids) and all(chunk_id in embedded_chunk_ids for chunk_id in chunk_ids),
+                }
+            )
+
+    indexable_units = [unit for unit in units if bool(unit.get("should_index_for_rag"))]
+    skipped_units = [unit for unit in units if not bool(unit.get("should_index_for_rag"))]
+    chunked_units = [unit for unit in indexable_units if unit.get("chunk_ids")]
+    text_pages = {
+        _runtime_page_span_tuple(unit.get("page_span"))[0]
+        for unit in units
+        if unit.get("skip_reason") != "empty_text"
+    }
+    pages_with_indexable_units = {
+        _runtime_page_span_tuple(unit.get("page_span"))[0]
+        for unit in indexable_units
+    }
+    table_pages = {
+        _runtime_page_span_tuple(unit.get("page_span"))[0]
+        for unit in units
+        if str(unit.get("unit_type") or "") == "table"
+    }
+    table_pages_with_units = {
+        _runtime_page_span_tuple(unit.get("page_span"))[0]
+        for unit in indexable_units
+        if str(unit.get("unit_type") or "") == "table"
+    }
+    return {
+        "schema_version": "2026-06-rag-index-manifest",
+        "source": "runtime_index_manifest",
+        "strategy": "document_knowledge_units" if artifact_units else "document_artifact_units",
+        "unit_count": len(units),
+        "indexable_unit_count": len(indexable_units),
+        "skipped_unit_count": len(skipped_units),
+        "chunked_unit_count": len(chunked_units),
+        "unchunked_unit_count": len(indexable_units) - len(chunked_units),
+        "chunk_count": len(all_chunk_ids),
+        "embedded_chunk_count": len(embedded_chunk_ids),
+        "coverage_score": _runtime_ratio(len(chunked_units), len(indexable_units)),
+        "unit_chunk_coverage_ratio": _runtime_ratio(len(chunked_units), len(indexable_units)),
+        "text_page_coverage_ratio": _runtime_ratio(len(pages_with_indexable_units), len(text_pages)),
+        "table_unit_coverage_ratio": _runtime_ratio(len(table_pages_with_units), len(table_pages)),
+        "chunk_ids": all_chunk_ids,
+        "units": units,
+    }
+
+
+def _runtime_unit_text(item: Any) -> str:
+    metadata = getattr(item, "metadata", {}) or {}
+    return str(metadata.get("rendered_text") or getattr(item, "text", "") or "").strip()
+
+
+def _runtime_unit_type(*, item: Any, semantic_role: str) -> str:
+    block_type = str((getattr(item, "provenance", {}) or {}).get("block_type") or "").strip().lower()
+    kind = str(getattr(item, "kind", "") or "").strip().lower()
+    if block_type == "table" or kind == "table" or semantic_role == "table":
+        return "table"
+    if block_type == "image" or kind == "image" or semantic_role == "image":
+        return "figure_caption"
+    if block_type == "title" or semantic_role == "title":
+        return "title"
+    return "paragraph"
+
+
+def _runtime_source_table_ids(*, item: Any, semantic_role: str) -> list[str]:
+    metadata = getattr(item, "metadata", {}) or {}
+    table_ids = _runtime_string_list(metadata.get("source_table_ids"))
+    table_id = str(metadata.get("table_id") or "").strip()
+    if table_id:
+        table_ids.append(table_id)
+    if table_ids:
+        return sorted(dict.fromkeys(table_ids))
+    if _runtime_unit_type(item=item, semantic_role=semantic_role) == "table":
+        return [str(getattr(item, "item_id", "") or "table")]
+    return []
+
+
+def _runtime_unit_skip_reason(*, semantic_role: str, text: str) -> str:
+    if not str(text or "").strip():
+        return "empty_text"
+    if semantic_role in _NON_INDEXABLE_RAG_ROLES:
+        return f"semantic_role:{semantic_role}"
+    return "index_policy_skip"
+
+
+def _runtime_item_page_span(item: Any) -> tuple[int, int]:
+    metadata = getattr(item, "metadata", {}) or {}
+    if metadata.get("page_span") is not None:
+        return _runtime_page_span_tuple(metadata.get("page_span"))
+    page_start = metadata.get("page_start", metadata.get("page"))
+    page_end = metadata.get("page_end", page_start)
+    if page_start is not None:
+        start = _safe_int_runtime(page_start, default=1)
+        end = _safe_int_runtime(page_end, default=start)
+        return min(start, end), max(start, end)
+    page_number = getattr(item, "page_number", None)
+    page = _safe_int_runtime(page_number, default=1)
+    return page, page
+
+
+def _runtime_page_span_tuple(value: Any) -> tuple[int, int]:
+    if isinstance(value, Mapping):
+        start = _safe_int_runtime(value.get("start", value.get("page_start")), default=1)
+        end = _safe_int_runtime(value.get("end", value.get("page_end")), default=start)
+        return min(start, end), max(start, end)
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        start = _safe_int_runtime(value[0], default=1)
+        end = _safe_int_runtime(value[1], default=start)
+        return min(start, end), max(start, end)
+    page = _safe_int_runtime(value, default=1)
+    return page, page
+
+
+def _runtime_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _runtime_provider_ids(blocks: Sequence[Any]) -> list[str]:
+    provider_ids: list[str] = []
+    for block in blocks:
+        metadata = getattr(block, "metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            continue
+        for key in ("provider_id", "parser", "layout_source", "ocr_engine"):
+            value = str(metadata.get(key) or "").strip()
+            if value and value not in provider_ids:
+                provider_ids.append(value)
+                break
+    return provider_ids
+
+
+def _runtime_part_observation_payload(part: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": "2026-06-part-observation",
+        "part_id": str(part.get("part_id") or part.get("parse_unit_id") or ""),
+        "job_id": str(part.get("job_id") or "") or None,
+        "state": str(part.get("state") or ""),
+        "raw_state": str(part.get("raw_state") or ""),
+        "quality_signal_count": _safe_int_runtime(part.get("quality_signal_count"), default=0),
+        "quality_signal_codes": _runtime_string_list(part.get("quality_signal_codes")),
+        "quality_signal_page_numbers": [
+            _safe_int_runtime(page_number, default=0)
+            for page_number in (part.get("quality_signal_page_numbers") or [])
+            if _safe_int_runtime(page_number, default=0) > 0
+        ],
+        "provider_ids": _runtime_string_list(part.get("provider_ids")),
+    }
+    for optional_key in (
+        "coverage_summary",
+        "coverage_gap_pages",
+        "coverage_gap_count",
+        "rag_coverage_quality",
+        "provider_route_plan",
+        "local_provider_routing",
+        "selected_provider_id",
+        "route_status",
+    ):
+        if optional_key in part and part.get(optional_key) is not None:
+            payload[optional_key] = _runtime_json_safe_value(part.get(optional_key))
+    return payload
+
+
+def _runtime_json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        str(key): _runtime_json_safe_value(item)
+        for key, item in value.items()
+    }
+
+
+def _runtime_json_safe_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _runtime_json_safe_mapping(value)
+    if isinstance(value, tuple):
+        return [_runtime_json_safe_value(item) for item in value]
+    if isinstance(value, list):
+        return [_runtime_json_safe_value(item) for item in value]
+    return value
+
+
+def _runtime_ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 1.0
+    return round(float(numerator) / float(denominator), 4)
 
 
 def _safe_int_runtime(value: Any, *, default: int = 0) -> int:

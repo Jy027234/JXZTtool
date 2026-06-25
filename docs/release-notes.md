@@ -102,3 +102,40 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/runtime
 - 宿主侧观测到权限、租户隔离、容量或审计风险。
 
 保守回滚方式见 [gray-deployment.md](gray-deployment.md)。
+
+## 质量指标变化记录
+
+每次发版须记录以下质量指标的变化，以建立跨版本可追溯的质量基线。
+
+### 记录格式
+
+每个版本在发版说明中追加如下表格：
+
+```markdown
+### 质量指标快照（vX.Y.Z）
+
+| 指标 | 上版值 | 本版值 | 变化 | 备注 |
+| --- | ---: | ---: | --- | --- |
+| text_page_coverage_ratio | 0.98 | 0.99 | +0.01 | 修复了表格页文本遗漏 |
+| table_unit_coverage_ratio | 0.92 | 0.95 | +0.03 | 新增 table merge 逻辑 |
+| unit_chunk_coverage_ratio | 0.97 | 0.98 | +0.01 | chunk 策略微调 |
+| reading_order_confidence_avg | 0.82 | 0.85 | +0.03 | 引入 layout provider |
+| visible_block_count (avg) | 42 | 44 | +2 | 新增图示 block 识别 |
+| hidden_block_count (avg) | 3 | 2 | -1 | header/footer 过滤优化 |
+| quality_gate accept_rate | 85% | 90% | +5% | — |
+| quality_gate manual_review_rate | 10% | 6% | -4% | — |
+```
+
+### 指标采集方法
+
+- **coverage 指标**：从 `projection=coverage` 的 `coverage.summary` 字段提取。
+- **reader 指标**：从 `projection=reader` 的 `reader_summary` 字段提取。
+- **quality_gate 指标**：从 `quality_gate.gate` 字段统计 accept / accept_with_warning / manual_review 分布。
+- **provider comparison 指标**：从 `tools/provider_comparison_report.py` 输出的 `gate_summary` 提取。
+
+### 变化判定规则
+
+- coverage 类指标下降 > 0.02 须标注原因并评估是否阻塞发版。
+- reading_order_confidence_avg 下降 > 0.05 须排查 layout provider 变更。
+- manual_review_rate 上升 > 5% 须排查新增 quality_signal 是否引入误报。
+- 所有变化均须关联到具体的 PR 或 commit。

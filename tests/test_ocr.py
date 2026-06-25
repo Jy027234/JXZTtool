@@ -44,7 +44,7 @@ class OcrProviderTests(unittest.TestCase):
             options={"rec_batch_num": 12},
         )
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
 
         self.assertIsInstance(engine._engine, _FakeRapidOCR)
@@ -64,7 +64,7 @@ class OcrProviderTests(unittest.TestCase):
             options={"det_limit_side_len": 960, "cls_batch_num": 8},
         )
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
 
         self.assertIsInstance(engine._engine, _FakeRapidOCR)
@@ -90,7 +90,7 @@ class OcrProviderTests(unittest.TestCase):
             },
         )
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
 
         self.assertEqual(captured["rec_batch_num"], 12)
@@ -139,7 +139,7 @@ class OcrProviderTests(unittest.TestCase):
 
         settings = OcrProviderSettings(enabled=True, provider="rapidocr")
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
             result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
 
@@ -202,7 +202,7 @@ class OcrProviderTests(unittest.TestCase):
             },
         )
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
             _result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
 
@@ -268,7 +268,7 @@ class OcrProviderTests(unittest.TestCase):
             },
         )
 
-        with patch("rapidocr_onnxruntime.RapidOCR", _FakeRapidOCR):
+        with patch("parsecore.ocr._rapidocr_constructor", return_value=_FakeRapidOCR):
             engine = build_ocr_engine(settings)
             _result, provider_metrics = engine(np.zeros((32, 32, 3), dtype=np.uint8))
 

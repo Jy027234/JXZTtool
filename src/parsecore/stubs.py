@@ -12,6 +12,14 @@ from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutco
 from .record_filters import collect_record_query
 
 
+_NON_INDEXABLE_RAG_ROLES = {
+    SemanticRole.HEADER_FOOTER.value,
+    SemanticRole.PARSE_ARTIFACT.value,
+    SemanticRole.VERSION_CELL.value,
+    SemanticRole.PAGE_REF_CELL.value,
+}
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -142,23 +150,32 @@ class StubParser(ParserAdapter):
 
 
 class ParagraphChunkBuilder(ChunkBuilder):
+    """Build RAG chunks from blocks that are indexable in the Parse IR policy."""
+
     def build(self, *, doc_id: str, blocks: Sequence[Block]) -> Sequence[Chunk]:
         chunks: list[Chunk] = []
         for block in blocks:
-            semantic_role = str(
-                block.metadata.get("semantic_role")
-                or _default_semantic_role_for_block(block)
-            )
+            semantic_role = _semantic_role_for_block(block)
+            text = str(block.content or "").strip()
+            if not text or semantic_role in _NON_INDEXABLE_RAG_ROLES:
+                continue
             chunks.append(
                 Chunk(
                     chunk_id=f"chk-{uuid4().hex[:12]}",
                     doc_id=doc_id,
                     block_ids=(block.block_id,),
-                    text=block.content,
+                    text=text,
                     semantic_role=semantic_role,
                 )
             )
         return tuple(chunks)
+
+
+def _semantic_role_for_block(block: Block) -> str:
+    return str(
+        block.metadata.get("semantic_role")
+        or _default_semantic_role_for_block(block)
+    )
 
 
 def _default_semantic_role_for_block(block: Block) -> str:

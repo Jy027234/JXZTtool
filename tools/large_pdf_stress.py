@@ -370,6 +370,50 @@ def build_report(
     }
 
 
+def evaluate_gate(report: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate a large PDF benchmark report against threshold config.
+
+    Threshold keys follow the convention ``{metric}_{max|min}``:
+    - ``plan_elapsed_s_max``: plan_elapsed_s must be <= threshold
+    - ``part_count_min``: planned_parts must be >= threshold
+    - ``part_count_max``: planned_parts must be <= threshold
+    - ``error_count_max``: error_count must be <= threshold
+    - ``snapshot_blocks_min``: total snapshot blocks must be >= threshold
+    """
+    thresholds = config.get("thresholds", {})
+    summary = report.get("summary") or {}
+    manifest = report.get("manifest_part_index") or {}
+    metric_sources: dict[str, Any] = {
+        "plan_elapsed_s": summary.get("plan_elapsed_s"),
+        "part_count": summary.get("planned_parts"),
+        "error_count": summary.get("error_count"),
+        "snapshot_blocks": manifest.get("part_count", 0),
+        "total_elapsed_s": summary.get("total_elapsed_s"),
+        "executed_parts": summary.get("executed_parts"),
+    }
+    checks: list[dict[str, Any]] = []
+    for key, threshold in thresholds.items():
+        if key.endswith("_max"):
+            metric = key[:-4]
+            actual = metric_sources.get(metric)
+            passed = actual is not None and actual <= threshold
+        elif key.endswith("_min"):
+            metric = key[:-4]
+            actual = metric_sources.get(metric)
+            passed = actual is not None and actual >= threshold
+        else:
+            continue
+        checks.append({
+            "metric": metric,
+            "actual": actual,
+            "threshold": threshold,
+            "operator": "max" if key.endswith("_max") else "min",
+            "passed": passed,
+        })
+    all_passed = all(c["passed"] for c in checks) if checks else False
+    return {"passed": all_passed, "checks": checks}
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload.get("summary") or {}
     lines = [

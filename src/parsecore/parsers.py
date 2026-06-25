@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 import re
 import time
 from pathlib import Path
@@ -21,6 +22,35 @@ _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
     enabled=True,
     provider="rapidocr",
 )
+
+_BUILTIN_PROVIDER_VERSION = "parsecore-builtin"
+_BUILTIN_ADAPTER_VERSION = "2026-06-local-provider-adapter"
+
+
+def _provider_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    parser_name: str,
+    provider_id: str | None = None,
+    provider_version: Any = None,
+    adapter_version: str = _BUILTIN_ADAPTER_VERSION,
+) -> dict[str, Any]:
+    payload = dict(metadata)
+    payload["parser"] = str(payload.get("parser") or parser_name)
+    resolved_provider_id = str(payload.get("provider_id") or provider_id or parser_name).strip()
+    if resolved_provider_id:
+        payload["provider_id"] = resolved_provider_id
+    resolved_provider_version = (
+        payload.get("provider_version")
+        or payload.get("parser_version")
+        or provider_version
+        or _BUILTIN_PROVIDER_VERSION
+    )
+    if resolved_provider_version:
+        payload["provider_version"] = str(resolved_provider_version)
+    if adapter_version and not payload.get("adapter_version"):
+        payload["adapter_version"] = adapter_version
+    return payload
 
 _DOCX_NOISE_ROLES = {
     SemanticRole.HEADER_FOOTER.value,
@@ -682,13 +712,12 @@ class DocxParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=document_path.stem,
-                metadata={
+                metadata=_provider_metadata({
                     "page": 1,
                     "page_type": "body",
-                    "parser": self.name,
                     "kind": BlockType.TITLE.value,
                     "semantic_role": SemanticRole.TITLE.value,
-                },
+                }, parser_name=self.name),
             )
         ]
         if body is None:
@@ -716,15 +745,14 @@ class DocxParser(ParserAdapter):
                 classified = _classify_docx_paragraph(info, state=state)
                 if not classified.content:
                     continue
-                metadata = {
+                metadata = _provider_metadata({
                     "page": 1,
                     "logical_page": logical_page_index,
                     "page_type": classified.page_type,
-                    "parser": self.name,
                     "position": position,
                     "semantic_role": classified.semantic_role,
                     "kind": classified.kind or classified.block_type.value,
-                }
+                }, parser_name=self.name)
                 if classified.normalized_title:
                     metadata["normalized_title"] = classified.normalized_title
                 if classified.logical_page_label:
@@ -765,11 +793,10 @@ class DocxParser(ParserAdapter):
             content = _render_docx_table_markdown(cells)
             if not content:
                 continue
-            metadata = {
+            metadata = _provider_metadata({
                 "page": 1,
                 "logical_page": logical_page_index,
                 "page_type": page_type,
-                "parser": self.name,
                 "position": position,
                 "semantic_role": semantic_role,
                 "kind": BlockType.TABLE.value,
@@ -779,7 +806,7 @@ class DocxParser(ParserAdapter):
                 "rows": len(cells),
                 "cols": max((len(row) for row in cells), default=0),
                 "header_rows": 1,
-            }
+            }, parser_name=self.name)
             if state.heading_context_open and state.last_heading_text:
                 metadata["table_title"] = state.last_heading_text
             if logical_page_label:
@@ -840,13 +867,12 @@ class ExcelParser(ParserAdapter):
             doc_id=request.doc_id,
             type=BlockType.TITLE,
             content=document_path.stem,
-            metadata={
+            metadata=_provider_metadata({
                 "page": 1,
                 "page_type": "body",
-                "parser": self.name,
                 "kind": BlockType.TITLE.value,
                 "semantic_role": SemanticRole.TITLE.value,
-            },
+            }, parser_name=self.name),
         )
 
     def _parse_xlsx(self, *, request: ParseRequest, document_path: Path) -> list[Block]:
@@ -1037,11 +1063,10 @@ class ExcelParser(ParserAdapter):
                 for label, merged_range in merged_ranges
                 if _excel_range_intersects(merged_range, source_range)
             ]
-            metadata: dict[str, Any] = {
+            metadata: dict[str, Any] = _provider_metadata({
                 "page": sheet_index,
                 "logical_page": sheet_index,
                 "page_type": "body",
-                "parser": self.name,
                 "position": position + appended,
                 "semantic_role": SemanticRole.TABLE.value,
                 "kind": BlockType.TABLE.value,
@@ -1066,7 +1091,7 @@ class ExcelParser(ParserAdapter):
                     original_max_row > self._max_rows_per_sheet
                     or original_max_col > self._max_cols_per_sheet
                 ),
-            }
+            }, parser_name=self.name)
             if table_title:
                 metadata["table_title"] = table_title
                 metadata["title_row"] = title_row
@@ -1107,12 +1132,11 @@ class TextParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=Path(request.file_path).stem,
-                metadata={
+                metadata=_provider_metadata({
                     "page": 1,
                     "page_type": "body",
-                    "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
-                },
+                }, parser_name=self.name),
             )
         ]
         for position, paragraph in enumerate(paragraphs, start=1):
@@ -1122,16 +1146,173 @@ class TextParser(ParserAdapter):
                     doc_id=request.doc_id,
                     type=BlockType.PARAGRAPH,
                     content=paragraph,
-                    metadata={
+                    metadata=_provider_metadata({
                         "page": 1,
                         "page_type": "body",
-                        "parser": self.name,
                         "position": position,
                         "semantic_role": SemanticRole.PARAGRAPH.value,
-                    },
+                    }, parser_name=self.name),
                 )
             )
         return tuple(blocks)
+
+
+def _build_markdown_provider_blocks(
+    *,
+    request: ParseRequest,
+    provider_name: str,
+    provider_version: Any,
+    page_chunks: Sequence[tuple[int, str]],
+    detect_tables: bool,
+    source_kind: str,
+) -> tuple[Block, ...]:
+    blocks: list[Block] = [
+        Block(
+            block_id=f"{request.doc_id}-title",
+            doc_id=request.doc_id,
+            type=BlockType.TITLE,
+            content=Path(request.file_path).stem,
+            metadata=_provider_metadata({
+                "page": 1,
+                "page_type": "body",
+                "semantic_role": SemanticRole.TITLE.value,
+                "source_kind": "file_name",
+            }, parser_name=provider_name, provider_id=provider_name, provider_version=provider_version),
+        )
+    ]
+    position = 1
+    table_index_by_page: dict[int, int] = {}
+    for page_number, markdown in page_chunks:
+        for segment in _markdown_segments(markdown, detect_tables=detect_tables):
+            block_type = segment["type"]
+            metadata: dict[str, Any] = _provider_metadata({
+                "page": page_number,
+                "page_type": "body",
+                "source_kind": source_kind,
+                "position": position,
+                "page_position": position,
+                "confidence": 1.0,
+            }, parser_name=provider_name, provider_id=provider_name, provider_version=provider_version)
+            content = str(segment.get("text") or "").strip()
+            if block_type == BlockType.TABLE:
+                table_index = table_index_by_page.get(page_number, 0) + 1
+                table_index_by_page[page_number] = table_index
+                cells = _markdown_table_cells(content)
+                metadata.update(
+                    {
+                        "semantic_role": SemanticRole.TABLE.value,
+                        "table_index": table_index,
+                        "rows": len(cells),
+                        "cols": max((len(row) for row in cells), default=0),
+                        "cells": cells,
+                    }
+                )
+            elif block_type == BlockType.TITLE:
+                metadata.update(
+                    {
+                        "semantic_role": SemanticRole.BODY_SECTION.value,
+                        "heading_level": segment.get("heading_level"),
+                    }
+                )
+            else:
+                metadata["semantic_role"] = SemanticRole.PARAGRAPH.value
+            blocks.append(
+                Block(
+                    block_id=f"{request.doc_id}-{provider_name}-{position}",
+                    doc_id=request.doc_id,
+                    type=block_type,
+                    content=content,
+                    metadata=metadata,
+                )
+            )
+            position += 1
+    return tuple(blocks)
+
+
+class DoclingParser(ParserAdapter):
+    name = "docling-local"
+
+    def __init__(
+        self,
+        *,
+        media_types: Sequence[str],
+        extensions: Sequence[str],
+        options: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._media_types = {item.lower() for item in media_types}
+        self._extensions = {item.lower() for item in extensions}
+        opts = dict(options or {})
+        self._detect_tables = bool(opts.get("detect_tables", True))
+        self._page_range = _normalize_docling_page_range(opts.get("page_range"))
+        self._max_num_pages = _positive_int_or_none(opts.get("max_num_pages"))
+        self._max_file_size = _positive_int_or_none(opts.get("max_file_size"))
+        self._raises_on_error = bool(opts.get("raises_on_error", True))
+
+    def supports(self, *, media_type: str | None, suffix: str) -> bool:
+        normalized_type = (media_type or "").lower()
+        normalized_suffix = suffix.lower()
+        return normalized_type in self._media_types or normalized_suffix in self._extensions
+
+    def parse(self, request: ParseRequest) -> Sequence[Block]:
+        converter_cls, provider_version = _load_docling_document_converter()
+        converter = converter_cls()
+        conversion_result = _docling_convert(
+            converter,
+            request.file_path,
+            page_range=self._page_range,
+            max_num_pages=self._max_num_pages,
+            max_file_size=self._max_file_size,
+            raises_on_error=self._raises_on_error,
+        )
+        page_chunks = _normalize_docling_pages(conversion_result)
+        return _build_markdown_provider_blocks(
+            request=request,
+            provider_name=self.name,
+            provider_version=provider_version,
+            page_chunks=page_chunks,
+            detect_tables=self._detect_tables,
+            source_kind="docling_markdown",
+        )
+
+
+class PyMuPdf4LlmParser(ParserAdapter):
+    name = "pymupdf4llm-local"
+
+    def __init__(
+        self,
+        *,
+        media_types: Sequence[str],
+        extensions: Sequence[str],
+        options: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._media_types = {item.lower() for item in media_types}
+        self._extensions = {item.lower() for item in extensions}
+        opts = dict(options or {})
+        self._page_chunks = bool(opts.get("page_chunks", True))
+        self._detect_tables = bool(opts.get("detect_tables", True))
+
+    def supports(self, *, media_type: str | None, suffix: str) -> bool:
+        normalized_type = (media_type or "").lower()
+        normalized_suffix = suffix.lower()
+        return normalized_type in self._media_types or normalized_suffix in self._extensions
+
+    def parse(self, request: ParseRequest) -> Sequence[Block]:
+        module = _load_pymupdf4llm()
+        provider_version = getattr(module, "__version__", None)
+        markdown_result = _pymupdf4llm_to_markdown(
+            module,
+            request.file_path,
+            page_chunks=self._page_chunks,
+        )
+        page_chunks = _normalize_pymupdf4llm_pages(markdown_result)
+        return _build_markdown_provider_blocks(
+            request=request,
+            provider_name=self.name,
+            provider_version=provider_version,
+            page_chunks=page_chunks,
+            detect_tables=self._detect_tables,
+            source_kind="pymupdf4llm_markdown",
+        )
 
 
 class PdfTextParser(ParserAdapter):
@@ -1440,13 +1621,12 @@ class PdfTextParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=Path(request.file_path).stem,
-                metadata={
+                metadata=_provider_metadata({
                     "page": 1,
                     "page_type": "body",
-                    "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
                     "ocr_strategy": ocr_strategy,
-                },
+                }, parser_name=self.name),
             )
         ]
         if fast_text_profile:
@@ -1521,10 +1701,9 @@ class PdfTextParser(ParserAdapter):
                             doc_id=request.doc_id,
                             type=BlockType.TABLE,
                             content=table.render_text(),
-                            metadata={
+                            metadata=_provider_metadata({
                                 "page": page_number,
                                 "page_type": page_type,
-                                "parser": self.name,
                                 "position": position,
                                 "kind": "table",
                                 "semantic_role": SemanticRole.TABLE.value,
@@ -1533,7 +1712,7 @@ class PdfTextParser(ParserAdapter):
                                 "bbox": table.bbox,
                                 "cells": table.cells,
                                 "table_index": item_index + 1,
-                            },
+                            }, parser_name=self.name),
                         )
                     )
                     _attach_page_layout_metadata(blocks[-1].metadata, page_layout)
@@ -1545,17 +1724,16 @@ class PdfTextParser(ParserAdapter):
                     figure = page_layout.figure_regions[item_index]
                     caption_confidence = getattr(figure, "caption_confidence", None)
                     figure_kind = str(getattr(figure, "figure_kind", "") or "").strip()
-                    metadata = {
+                    metadata = _provider_metadata({
                         "page": page_number,
                         "page_type": page_type,
-                        "parser": self.name,
                         "position": position,
                         "kind": "image",
                         "semantic_role": SemanticRole.IMAGE.value,
                         "bbox": figure.bbox,
                         "source_kind": figure.source_kind,
                         "figure_index": item_index + 1,
-                    }
+                    }, parser_name=self.name)
                     if isinstance(caption_confidence, (int, float)):
                         metadata["caption_confidence"] = float(caption_confidence)
                     if figure_kind:
@@ -1577,14 +1755,13 @@ class PdfTextParser(ParserAdapter):
 
                 paragraph = paragraphs[item_index]
                 semantic_role = paragraph_roles[item_index]
-                metadata: dict[str, Any] = {
+                metadata: dict[str, Any] = _provider_metadata({
                     "page": page_number,
                     "page_type": page_type,
-                    "parser": self.name,
                     "position": position,
                     "page_position": item_index + 1,
                     "semantic_role": semantic_role,
-                }
+                }, parser_name=self.name)
                 if page_layout is not None:
                     _attach_page_layout_metadata(metadata, page_layout)
                 if fast_text_profile:
@@ -2874,6 +3051,283 @@ def _load_pdf_reader():
             raise RuntimeError("pypdf or PyPDF2 is required for pdf-text parser") from exc
 
 
+def _load_pymupdf4llm():
+    try:
+        return importlib.import_module("pymupdf4llm")
+    except ImportError as exc:
+        raise RuntimeError("pymupdf4llm is required for pymupdf4llm-local parser") from exc
+
+
+def _pymupdf4llm_to_markdown(module: Any, file_path: str, *, page_chunks: bool) -> Any:
+    to_markdown = getattr(module, "to_markdown", None)
+    if not callable(to_markdown):
+        raise RuntimeError("pymupdf4llm.to_markdown is required for pymupdf4llm-local parser")
+    if page_chunks:
+        try:
+            return to_markdown(file_path, page_chunks=True)
+        except TypeError:
+            return to_markdown(file_path)
+    return to_markdown(file_path)
+
+
+def _load_docling_document_converter() -> tuple[Any, str | None]:
+    try:
+        docling_module = importlib.import_module("docling")
+        converter_module = importlib.import_module("docling.document_converter")
+    except ImportError as exc:
+        raise RuntimeError("docling is required for docling-local parser") from exc
+    converter_cls = getattr(converter_module, "DocumentConverter", None)
+    if converter_cls is None:
+        raise RuntimeError("docling.document_converter.DocumentConverter is required for docling-local parser")
+    return converter_cls, getattr(docling_module, "__version__", None)
+
+
+def _docling_convert(
+    converter: Any,
+    file_path: str,
+    *,
+    page_range: tuple[int, int] | None,
+    max_num_pages: int | None,
+    max_file_size: int | None,
+    raises_on_error: bool,
+) -> Any:
+    kwargs: dict[str, Any] = {}
+    if page_range is not None:
+        kwargs["page_range"] = page_range
+    if max_num_pages is not None:
+        kwargs["max_num_pages"] = max_num_pages
+    if max_file_size is not None:
+        kwargs["max_file_size"] = max_file_size
+    if not raises_on_error:
+        kwargs["raises_on_error"] = False
+    convert = getattr(converter, "convert", None)
+    if not callable(convert):
+        raise RuntimeError("docling DocumentConverter.convert is required for docling-local parser")
+    if not kwargs:
+        return convert(file_path)
+    try:
+        return convert(file_path, **kwargs)
+    except TypeError:
+        return convert(file_path)
+
+
+def _normalize_docling_page_range(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return None
+    raw = list(value)
+    if len(raw) != 2:
+        return None
+    try:
+        start = int(raw[0])
+        end = int(raw[1])
+    except (TypeError, ValueError):
+        return None
+    if start < 1 or end < start:
+        return None
+    return (start, end)
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _normalize_docling_pages(conversion_result: Any) -> list[tuple[int, str]]:
+    for container in (conversion_result, getattr(conversion_result, "document", None)):
+        page_chunks = _normalize_docling_page_container(container)
+        if page_chunks:
+            return page_chunks
+    document = getattr(conversion_result, "document", conversion_result)
+    markdown = _docling_document_markdown(document)
+    return _normalize_pymupdf4llm_pages(markdown)
+
+
+def _normalize_docling_page_container(container: Any) -> list[tuple[int, str]]:
+    page_items = _docling_page_items(container)
+    if not page_items:
+        return []
+    pages: list[tuple[int, str]] = []
+    for fallback_page, item in enumerate(page_items, start=1):
+        markdown = _docling_page_markdown(item)
+        if not markdown:
+            continue
+        page_number = _docling_page_number(item, default=fallback_page)
+        pages.append((page_number, markdown))
+    return pages
+
+
+def _docling_page_items(container: Any) -> list[Any]:
+    if container is None:
+        return []
+    raw_pages = container.get("pages") if isinstance(container, Mapping) else getattr(container, "pages", None)
+    if isinstance(raw_pages, Mapping):
+        return list(raw_pages.values())
+    if isinstance(raw_pages, Sequence) and not isinstance(raw_pages, (str, bytes, bytearray)):
+        return list(raw_pages)
+    return []
+
+
+def _docling_page_number(item: Any, *, default: int) -> int:
+    if isinstance(item, Mapping):
+        page_value = item.get("page_no", item.get("page_number", item.get("page")))
+    else:
+        page_value = (
+            getattr(item, "page_no", None)
+            or getattr(item, "page_number", None)
+            or getattr(item, "page", None)
+        )
+    return _coerce_page_number(page_value, default=default)
+
+
+def _docling_page_markdown(item: Any) -> str:
+    if item is None:
+        return ""
+    if isinstance(item, Mapping):
+        direct = item.get("markdown") or item.get("text") or item.get("content")
+        if direct:
+            return str(direct).strip()
+        exporter = item.get("export_to_markdown")
+        if callable(exporter):
+            return str(exporter()).strip()
+        return ""
+    exporter = getattr(item, "export_to_markdown", None)
+    if callable(exporter):
+        return str(exporter()).strip()
+    for attr in ("markdown", "text", "content"):
+        value = getattr(item, attr, None)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _docling_document_markdown(document: Any) -> str:
+    if document is None:
+        return ""
+    if isinstance(document, Mapping):
+        direct = document.get("markdown") or document.get("text") or document.get("content")
+        if direct:
+            return str(direct).strip()
+        exporter = document.get("export_to_markdown")
+        if callable(exporter):
+            return str(exporter()).strip()
+        return str(document.get("document") or "").strip()
+    exporter = getattr(document, "export_to_markdown", None)
+    if callable(exporter):
+        return str(exporter()).strip()
+    for attr in ("markdown", "text", "content"):
+        value = getattr(document, attr, None)
+        if value:
+            return str(value).strip()
+    return str(document or "").strip()
+
+
+def _normalize_pymupdf4llm_pages(markdown_result: Any) -> list[tuple[int, str]]:
+    if isinstance(markdown_result, str):
+        pages = [
+            (index, text.strip())
+            for index, text in enumerate(markdown_result.split("\f"), start=1)
+            if text.strip()
+        ]
+        return pages or [(1, markdown_result.strip())]
+    if isinstance(markdown_result, Sequence) and not isinstance(markdown_result, (bytes, bytearray)):
+        pages: list[tuple[int, str]] = []
+        for fallback_page, item in enumerate(markdown_result, start=1):
+            if isinstance(item, Mapping):
+                metadata = item.get("metadata")
+                page_value = item.get("page") or item.get("page_number")
+                if page_value is None and isinstance(metadata, Mapping):
+                    page_value = metadata.get("page") or metadata.get("page_number")
+                page_number = _coerce_page_number(page_value, default=fallback_page)
+                text = str(item.get("text") or item.get("markdown") or "").strip()
+            else:
+                page_number = fallback_page
+                text = str(item or "").strip()
+            if text:
+                pages.append((page_number, text))
+        return pages or [(1, "")]
+    return [(1, str(markdown_result or "").strip())]
+
+
+def _coerce_page_number(value: Any, *, default: int) -> int:
+    try:
+        page_number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return page_number if page_number >= 1 else page_number + 1
+
+
+def _markdown_segments(markdown: str, *, detect_tables: bool) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    current: list[str] = []
+    current_table: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal current
+        text = "\n".join(line for line in current if line.strip()).strip()
+        current = []
+        if text:
+            segments.append({"type": BlockType.PARAGRAPH, "text": text})
+
+    def flush_table() -> None:
+        nonlocal current_table
+        text = "\n".join(line for line in current_table if line.strip()).strip()
+        current_table = []
+        if text:
+            segments.append({"type": BlockType.TABLE, "text": text})
+
+    for raw_line in str(markdown or "").splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            flush_table()
+            flush_paragraph()
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+        if heading:
+            flush_table()
+            flush_paragraph()
+            segments.append(
+                {
+                    "type": BlockType.TITLE,
+                    "text": heading.group(2).strip(),
+                    "heading_level": len(heading.group(1)),
+                }
+            )
+            continue
+        if detect_tables and _looks_markdown_table_line(stripped):
+            flush_paragraph()
+            current_table.append(stripped)
+            continue
+        flush_table()
+        current.append(stripped)
+    flush_table()
+    flush_paragraph()
+    return segments
+
+
+def _looks_markdown_table_line(line: str) -> bool:
+    if "|" not in line:
+        return False
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    return len(cells) >= 2 and any(cell for cell in cells)
+
+
+def _markdown_table_cells(markdown: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for raw_line in str(markdown or "").splitlines():
+        line = raw_line.strip()
+        if not _looks_markdown_table_line(line):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if cells and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
 # --- A5: image OCR parser (RapidOCR + onnxruntime) ----------------------------
 
 
@@ -2931,11 +3385,10 @@ class ImageOcrParser(ParserAdapter):
                 doc_id=request.doc_id,
                 type=BlockType.TITLE,
                 content=document_path.stem,
-                metadata={
+                metadata=_provider_metadata({
                     "page": 1,
-                    "parser": self.name,
                     "semantic_role": SemanticRole.TITLE.value,
-                },
+                }, parser_name=self.name),
             )
         ]
 
@@ -2975,15 +3428,14 @@ class ImageOcrParser(ParserAdapter):
                     doc_id=request.doc_id,
                     type=BlockType.PARAGRAPH,
                     content=text,
-                    metadata={
+                    metadata=_provider_metadata({
                         "page": 1,
-                        "parser": self.name,
                         "position": position,
                         "bbox": bbox,
                         "confidence": confidence_value,
                         "ocr_engine": "rapidocr_onnxruntime",
                         "semantic_role": SemanticRole.PARAGRAPH.value,
-                    },
+                    }, parser_name=self.name),
                 )
             )
             position += 1
@@ -3064,6 +3516,7 @@ class _PageLayout:
     column_count_hint: int = 1
     layout_reading_order_applied: bool = False
     layout_reading_order_strategy: str | None = None
+    layout_reading_order_confidence: float | None = None
     layout_elapsed_s: float = 0.0
     ocr_attempt_reason: str | None = None
     ocr_fallback_reason: str | None = None
@@ -3263,6 +3716,14 @@ def _extract_pdfplumber_layout(
                     column_count_hint=column_count_hint,
                     layout_reading_order_applied=layout_reading_order_applied,
                     layout_reading_order_strategy=layout_reading_order_strategy,
+                    layout_reading_order_confidence=_layout_reading_order_confidence(
+                        text_without_tables=text_without_tables,
+                        column_count_hint=column_count_hint,
+                        layout_reading_order_applied=layout_reading_order_applied,
+                        layout_reading_order_strategy=layout_reading_order_strategy,
+                        table_count=len(tables),
+                        figure_count=len(figure_regions),
+                    ),
                     layout_elapsed_s=layout_elapsed_s,
                     ocr_attempt_reason=ocr_attempt_reason,
                     ocr_fallback_reason=ocr_fallback_reason,
@@ -3299,6 +3760,12 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
     metadata["layout_reading_order_applied"] = page_layout.layout_reading_order_applied
     if page_layout.layout_reading_order_strategy is not None:
         metadata["layout_reading_order_strategy"] = page_layout.layout_reading_order_strategy
+    layout_reading_order_confidence = getattr(page_layout, "layout_reading_order_confidence", None)
+    if isinstance(layout_reading_order_confidence, (int, float)):
+        metadata["layout_reading_order_confidence"] = round(
+            max(0.0, min(1.0, float(layout_reading_order_confidence))),
+            4,
+        )
     metadata["layout_elapsed_s"] = page_layout.layout_elapsed_s
     if page_layout.ocr_attempt_reason is not None:
         metadata["ocr_attempted"] = True
@@ -3358,6 +3825,30 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
         metadata["ocr_postprocess_elapsed_s"] = page_layout.ocr_postprocess_elapsed_s
     if page_layout.ocr_total_elapsed_s > 0.0:
         metadata["ocr_total_elapsed_s"] = page_layout.ocr_total_elapsed_s
+
+
+def _layout_reading_order_confidence(
+    *,
+    text_without_tables: str | None,
+    column_count_hint: int,
+    layout_reading_order_applied: bool,
+    layout_reading_order_strategy: str | None,
+    table_count: int,
+    figure_count: int,
+) -> float | None:
+    has_text = bool(str(text_without_tables or "").strip())
+    if not has_text and table_count <= 0 and figure_count <= 0:
+        return None
+
+    if column_count_hint <= 1:
+        return 0.98
+
+    if not layout_reading_order_applied:
+        return 0.58 if has_text else 0.64
+
+    if str(layout_reading_order_strategy or "").strip().lower() == "column-reflow":
+        return 0.9 if column_count_hint == 2 else 0.84
+    return 0.86 if column_count_hint == 2 else 0.8
 
 
 def _ocr_fallback_reason_for_page(
@@ -3920,6 +4411,12 @@ def build_parser(
         return ExcelParser(media_types=media_types, extensions=extensions, options=options)
     if normalized == "text-native":
         return TextParser(media_types=media_types, extensions=extensions)
+    if normalized == "docling-local":
+        return DoclingParser(
+            media_types=media_types,
+            extensions=extensions,
+            options=options,
+        )
     if normalized == "pdf-text":
         return PdfTextParser(
             media_types=media_types,
@@ -3928,6 +4425,12 @@ def build_parser(
             ocr_provider_settings=ocr_provider_settings,
             boundary_refiner=boundary_refiner,
             semantic_refiner=semantic_refiner,
+        )
+    if normalized == "pymupdf4llm-local":
+        return PyMuPdf4LlmParser(
+            media_types=media_types,
+            extensions=extensions,
+            options=options,
         )
     if normalized == "image-ocr":
         return ImageOcrParser(

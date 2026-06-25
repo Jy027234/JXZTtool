@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from parsecore.cli import main as cli_main
@@ -17,6 +20,13 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIsNone(args.out)
         self.assertIsNone(args.compare_report)
         self.assertIsNone(args.regression_timeout_seconds)
+        self.assertIsNone(args.provider_suite)
+        self.assertIsNone(args.provider_fixture_root)
+        self.assertEqual(args.provider_profile, "default")
+        self.assertFalse(args.skip_payload_contracts)
+        self.assertFalse(args.skip_provider_comparison)
+        self.assertIsNone(args.provider_comparison_timeout_seconds)
+        self.assertIsNone(args.large_pdf_benchmark)
 
     def test_default_out_for_profile_uses_separate_full_snapshot(self) -> None:
         self.assertTrue(self_check._default_out_for_profile(self_check.FAST_PROFILE).endswith("var\\self-check\\latest.json"))
@@ -27,6 +37,23 @@ class SelfCheckTests(unittest.TestCase):
         self.assertTrue(self_check._default_suite_for_profile(self_check.FAST_PROFILE).endswith("var\\regression\\suite.fast.json"))
         self.assertTrue(self_check._default_suite_for_profile(self_check.FULL_PROFILE).endswith("var\\regression\\suite.full.json"))
         self.assertTrue(self_check._default_suite_for_profile(self_check.PERF_PROFILE).endswith("var\\regression\\suite.perf.json"))
+
+    def test_default_provider_suite_for_profile_supports_fast_full_and_perf_lanes(self) -> None:
+        self.assertTrue(
+            self_check._default_provider_suite_for_profile(self_check.FAST_PROFILE).endswith(
+                "var\\regression\\provider-suite.fast.json"
+            )
+        )
+        self.assertTrue(
+            self_check._default_provider_suite_for_profile(self_check.FULL_PROFILE).endswith(
+                "var\\regression\\provider-suite.full.json"
+            )
+        )
+        self.assertTrue(
+            self_check._default_provider_suite_for_profile(self_check.PERF_PROFILE).endswith(
+                "var\\regression\\provider-suite.perf.json"
+            )
+        )
 
     def test_resolve_regression_profile_maps_slow_alias_to_full(self) -> None:
         profile, include_tags, timeout_seconds = self_check._resolve_regression_profile("slow", None)
@@ -55,6 +82,31 @@ class SelfCheckTests(unittest.TestCase):
                 "suite.json",
                 "--include-tag",
                 "slow",
+            ],
+        )
+
+    def test_build_provider_comparison_args_passes_suite_fixture_root_and_profile(self) -> None:
+        args = self_check._build_provider_comparison_args(
+            config="parsecore.toml",
+            suite="provider-suite.json",
+            fixture_root="fixtures",
+            profile="fallback",
+        )
+
+        self.assertEqual(
+            args,
+            [
+                sys.executable,
+                "tools/provider_comparison_report.py",
+                "--config",
+                "parsecore.toml",
+                "--suite",
+                "provider-suite.json",
+                "--profile",
+                "fallback",
+                "--progress",
+                "--fixture-root",
+                "fixtures",
             ],
         )
 
@@ -202,12 +254,567 @@ class SelfCheckTests(unittest.TestCase):
         self.assertEqual(result.details["perf_overview"]["slowest_sample"]["name"], "sample-a.pdf")
         self.assertIn("slowest=sample-a.pdf:44.2s", result.summary)
 
+    def test_run_provider_comparison_suite_extracts_gate_summary(self) -> None:
+        provider_payload = {
+            "schema_version": "2026-06-provider-comparison-report",
+            "suite": "resolved-provider-suite.json",
+            "fixture_root": "resolved-fixtures",
+            "summary": {
+                "sample_count": 2,
+                "completed_provider_runs": 3,
+                "failed_provider_runs": 0,
+                "skipped_provider_runs": 1,
+            },
+            "gate_summary": {
+                "gate": "accept_with_warning",
+                "passed": True,
+                "warnings": ["provider_runs_skipped"],
+                "provider_quality_warning_runs": 3,
+                "provider_reading_order_warning_runs": 2,
+                "samples_best_provider_differs_from_route_primary": 1,
+            },
+            "provider_identity_summary": {
+                "provider_count": 2,
+                "providers_with_multiple_provider_versions": 1,
+                "providers_with_multiple_adapter_versions": 0,
+                "providers": {
+                    "pdf-text": {
+                        "provider_versions": ["parsecore-builtin"],
+                        "adapter_versions": ["2026-06-local-provider-adapter"],
+                    }
+                },
+            },
+            "provider_admission_summary": {
+                "schema_version": "2026-06-provider-admission-summary",
+                "summary": {
+                    "provider_count": 2,
+                    "route_ready_count": 1,
+                    "providers_requiring_config_update": 1,
+                },
+                "providers": {
+                    "pdf-text": {
+                        "recommended_action": "keep_route",
+                        "recommended_admission": {
+                            "route_mode": "route",
+                            "gate_status": "passed",
+                            "route_ready": True,
+                        },
+                    }
+                },
+            },
+        }
+        with patch(
+            "tools.self_check._run_subprocess",
+            return_value=(
+                self_check.CheckResult(
+                    name="provider_comparison_suite",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=1.23,
+                    summary="command completed",
+                    details={},
+                    tail=[],
+                ),
+                json.dumps(provider_payload),
+            ),
+        ) as run_subprocess:
+            result = self_check._run_provider_comparison_suite(
+                config="parsecore.toml",
+                suite="provider-suite.json",
+                fixture_root="fixtures",
+                profile="fallback",
+                timeout_seconds=120,
+            )
+
+        self.assertEqual(
+            run_subprocess.call_args.args[1],
+            [
+                sys.executable,
+                "tools/provider_comparison_report.py",
+                "--config",
+                "parsecore.toml",
+                "--suite",
+                "provider-suite.json",
+                "--profile",
+                "fallback",
+                "--progress",
+                "--fixture-root",
+                "fixtures",
+            ],
+        )
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.details["summary"]["sample_count"], 2)
+        self.assertEqual(result.details["gate_summary"]["gate"], "accept_with_warning")
+        self.assertEqual(result.details["provider_identity_summary"]["provider_count"], 2)
+        self.assertEqual(result.details["provider_admission_summary"]["summary"]["route_ready_count"], 1)
+        self.assertEqual(result.details["resolved_suite"], "resolved-provider-suite.json")
+        self.assertIn("gate=accept_with_warning", result.summary)
+        self.assertIn("quality_warn=3", result.summary)
+        self.assertIn("read_order_warn=2", result.summary)
+        self.assertIn("route_mismatch=1", result.summary)
+        self.assertIn("skipped=1", result.summary)
+        self.assertIn("identity_drift=1", result.summary)
+        self.assertIn("admission_ready=1", result.summary)
+        self.assertIn("admission_update=1", result.summary)
+
+    def test_run_payload_contract_check_extracts_summary(self) -> None:
+        contract_payload = {
+            "schema_version": "2026-06-payload-contract-check",
+            "registry_schema_version": "2026-06-payload-schema-registry",
+            "status": "passed",
+            "summary": {
+                "schema_count": 6,
+                "payload_count": 6,
+                "failed_schema_count": 0,
+                "failed_payload_count": 0,
+            },
+            "schemas": [{"name": "document-ir", "status": "passed"}],
+            "payloads": [{"name": "document-ir", "status": "passed"}],
+        }
+        with patch(
+            "tools.self_check._run_subprocess",
+            return_value=(
+                self_check.CheckResult(
+                    name="payload_contracts",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.42,
+                    summary="command completed",
+                    details={},
+                    tail=[],
+                ),
+                json.dumps(contract_payload),
+            ),
+        ) as run_subprocess:
+            result = self_check._run_payload_contract_check()
+
+        self.assertEqual(
+            run_subprocess.call_args.args[1],
+            [sys.executable, "-m", "parsecore.cli", "payload-contract-check"],
+        )
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.details["status"], "passed")
+        self.assertEqual(result.details["registry_schema_version"], "2026-06-payload-schema-registry")
+        self.assertEqual(result.details["summary"]["schema_count"], 6)
+        self.assertIn("schemas=6", result.summary)
+        self.assertIn("payloads=6", result.summary)
+
+    def test_provider_comparison_artifact_paths_follow_profile_name(self) -> None:
+        json_path, markdown_path = self_check._provider_comparison_artifact_paths(
+            profile=self_check.FULL_PROFILE,
+            out_path=r"D:\tmp\latest.full.json",
+        )
+
+        self.assertTrue(str(json_path).endswith(r"provider-comparison.full.json"))
+        self.assertTrue(str(markdown_path).endswith(r"provider-comparison.full.md"))
+
+    def test_main_perf_profile_runs_default_provider_suite_when_fixtures_are_available(self) -> None:
+        with patch(
+            "tools.self_check._run_unit_tests",
+            return_value=self_check.CheckResult(
+                name="unit_tests",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="unit tests passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_runtime_describe",
+            return_value=self_check.CheckResult(
+                name="runtime_describe",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="runtime describe passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_payload_contract_check",
+            return_value=self_check.CheckResult(
+                name="payload_contracts",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="payload contracts passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_regression_suite",
+            return_value=self_check.CheckResult(
+                name="regression_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="regression passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._default_provider_suite_preflight",
+            return_value=(True, {"sample_count": 2}),
+        ), patch(
+            "tools.self_check._run_provider_comparison_suite",
+            return_value=self_check.CheckResult(
+                name="provider_comparison_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="provider comparison passed",
+                details={},
+                tail=[],
+            ),
+        ) as run_provider_suite, patch(
+            "pathlib.Path.write_text",
+            return_value=0,
+        ):
+            exit_code = self_check.main(["--profile", "perf"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            run_provider_suite.call_args.kwargs["suite"],
+            self_check._default_provider_suite_for_profile(self_check.PERF_PROFILE),
+        )
+
+    def test_main_fast_profile_runs_default_provider_suite_when_fixtures_are_available(self) -> None:
+        with patch(
+            "tools.self_check._run_unit_tests",
+            return_value=self_check.CheckResult(
+                name="unit_tests",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="unit tests passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_runtime_describe",
+            return_value=self_check.CheckResult(
+                name="runtime_describe",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="runtime describe passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_payload_contract_check",
+            return_value=self_check.CheckResult(
+                name="payload_contracts",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="payload contracts passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_regression_suite",
+            return_value=self_check.CheckResult(
+                name="regression_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="regression passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._default_provider_suite_preflight",
+            return_value=(True, {"sample_count": 3}),
+        ), patch(
+            "tools.self_check._run_provider_comparison_suite",
+            return_value=self_check.CheckResult(
+                name="provider_comparison_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="provider comparison passed",
+                details={},
+                tail=[],
+            ),
+        ) as run_provider_suite, patch(
+            "pathlib.Path.write_text",
+            return_value=0,
+        ):
+            exit_code = self_check.main(["--profile", "fast"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            run_provider_suite.call_args.kwargs["suite"],
+            self_check._default_provider_suite_for_profile(self_check.FAST_PROFILE),
+        )
+
+    def test_main_full_profile_runs_default_provider_suite_when_fixtures_are_available(self) -> None:
+        with patch(
+            "tools.self_check._run_unit_tests",
+            return_value=self_check.CheckResult(
+                name="unit_tests",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="unit tests passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_runtime_describe",
+            return_value=self_check.CheckResult(
+                name="runtime_describe",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="runtime describe passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_payload_contract_check",
+            return_value=self_check.CheckResult(
+                name="payload_contracts",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="payload contracts passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_regression_suite",
+            return_value=self_check.CheckResult(
+                name="regression_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="regression passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._default_provider_suite_preflight",
+            return_value=(True, {"sample_count": 5}),
+        ), patch(
+            "tools.self_check._run_provider_comparison_suite",
+            return_value=self_check.CheckResult(
+                name="provider_comparison_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="provider comparison passed",
+                details={},
+                tail=[],
+            ),
+        ) as run_provider_suite, patch(
+            "pathlib.Path.write_text",
+            return_value=0,
+        ):
+            exit_code = self_check.main(["--profile", "full"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            run_provider_suite.call_args.kwargs["suite"],
+            self_check._default_provider_suite_for_profile(self_check.FULL_PROFILE),
+        )
+
+    def test_main_writes_provider_comparison_artifacts_when_report_payload_is_available(self) -> None:
+        provider_payload = {
+            "schema_version": "2026-06-provider-comparison-report",
+            "profile": "default",
+            "suite": "resolved-provider-suite.full.json",
+            "gate_policy": {"max_samples_best_provider_differs_from_route_primary": 0},
+            "summary": {
+                "sample_count": 1,
+                "completed_provider_runs": 1,
+                "failed_provider_runs": 0,
+                "skipped_provider_runs": 0,
+            },
+            "gate_summary": {
+                "gate": "accept",
+                "passed": True,
+                "provider_quality_warning_runs": 0,
+                "provider_reading_order_warning_runs": 0,
+                "samples_best_provider_differs_from_route_primary": 0,
+            },
+            "samples": [],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = f"{temp_dir}\\latest.full.json"
+            with patch(
+                "tools.self_check._run_unit_tests",
+                return_value=self_check.CheckResult(
+                    name="unit_tests",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.1,
+                    summary="unit tests passed",
+                    details={},
+                    tail=[],
+                ),
+            ), patch(
+                "tools.self_check._run_runtime_describe",
+                return_value=self_check.CheckResult(
+                    name="runtime_describe",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.1,
+                    summary="runtime describe passed",
+                    details={},
+                    tail=[],
+                ),
+            ), patch(
+                "tools.self_check._run_payload_contract_check",
+                return_value=self_check.CheckResult(
+                    name="payload_contracts",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.1,
+                    summary="payload contracts passed",
+                    details={},
+                    tail=[],
+                ),
+            ), patch(
+                "tools.self_check._run_regression_suite",
+                return_value=self_check.CheckResult(
+                    name="regression_suite",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.1,
+                    summary="regression passed",
+                    details={},
+                    tail=[],
+                ),
+            ), patch(
+                "tools.self_check._default_provider_suite_preflight",
+                return_value=(True, {"sample_count": 5}),
+            ), patch(
+                "tools.self_check._run_provider_comparison_suite",
+                return_value=self_check.CheckResult(
+                    name="provider_comparison_suite",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.1,
+                    summary="provider comparison passed",
+                    details={
+                        "report_payload": provider_payload,
+                        "summary": provider_payload["summary"],
+                        "gate_summary": provider_payload["gate_summary"],
+                    },
+                    tail=[],
+                ),
+            ), patch(
+                "tools.self_check._write_stdout",
+                return_value=None,
+            ):
+                exit_code = self_check.main(["--profile", "full", "--out", out_path])
+
+            self.assertEqual(exit_code, 0)
+            provider_json = f"{temp_dir}\\provider-comparison.full.json"
+            provider_md = f"{temp_dir}\\provider-comparison.full.md"
+            self.assertTrue(Path(provider_json).exists())
+            self.assertTrue(Path(provider_md).exists())
+            report_payload = json.loads(Path(provider_json).read_text(encoding="utf-8"))
+            self.assertEqual(report_payload["schema_version"], "2026-06-provider-comparison-report")
+            self.assertIn("ParseCore Local Provider Comparison", Path(provider_md).read_text(encoding="utf-8"))
+
+            self_check_payload = json.loads(Path(out_path).read_text(encoding="utf-8"))
+            self.assertEqual(
+                self_check_payload["provider_comparison_artifacts"],
+                {
+                    "json": provider_json,
+                    "markdown": provider_md,
+                },
+            )
+            provider_check = next(
+                item for item in self_check_payload["checks"] if item["name"] == "provider_comparison_suite"
+            )
+            self.assertEqual(provider_check["details"]["report_json"], provider_json)
+            self.assertEqual(provider_check["details"]["report_markdown"], provider_md)
+            self.assertNotIn("report_payload", provider_check["details"])
+
+    def test_main_perf_profile_skips_default_provider_suite_when_fixtures_are_missing(self) -> None:
+        with patch(
+            "tools.self_check._run_unit_tests",
+            return_value=self_check.CheckResult(
+                name="unit_tests",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="unit tests passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_runtime_describe",
+            return_value=self_check.CheckResult(
+                name="runtime_describe",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="runtime describe passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_payload_contract_check",
+            return_value=self_check.CheckResult(
+                name="payload_contracts",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="payload contracts passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._run_regression_suite",
+            return_value=self_check.CheckResult(
+                name="regression_suite",
+                status="passed",
+                exit_code=0,
+                elapsed_s=0.1,
+                summary="regression passed",
+                details={},
+                tail=[],
+            ),
+        ), patch(
+            "tools.self_check._default_provider_suite_preflight",
+            return_value=(
+                False,
+                {
+                    "reason": "missing_fixtures",
+                    "message": "provider suite skipped because 2 fixture(s) are unavailable",
+                    "missing_fixtures": ["missing-a.pdf", "missing-b.pdf"],
+                },
+            ),
+        ), patch(
+            "tools.self_check._run_provider_comparison_suite",
+        ) as run_provider_suite, patch(
+            "pathlib.Path.write_text",
+            return_value=0,
+        ):
+            exit_code = self_check.main(["--profile", "perf"])
+
+        self.assertEqual(exit_code, 0)
+        run_provider_suite.assert_not_called()
+
     def test_cli_self_check_delegates_to_default_gate(self) -> None:
         with patch("tools.self_check.main", return_value=0) as run_self_check:
             exit_code = cli_main(["self-check", "--profile", "perf", "--skip-regression"])
 
         self.assertEqual(exit_code, 0)
         run_self_check.assert_called_once_with(["--profile", "perf", "--skip-regression"])
+
+    def test_cli_payload_contract_check_delegates_to_tool(self) -> None:
+        with patch("tools.payload_contract_check.main", return_value=0) as run_contract_check:
+            exit_code = cli_main(["payload-contract-check", "--out", "var/self-check/contracts.json"])
+
+        self.assertEqual(exit_code, 0)
+        run_contract_check.assert_called_once_with(["--out", "var/self-check/contracts.json"])
 
     def test_cli_large_pdf_stress_delegates_to_tool(self) -> None:
         with patch("tools.large_pdf_stress.main", return_value=0) as run_stress:

@@ -91,6 +91,7 @@ class DocxManualStructureTests(unittest.TestCase):
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             )
+            snapshot = runtime.get_document(doc_id="doc-manual-chunk")
 
         chunk_roles = [chunk.semantic_role for chunk in outcome.chunks]
         self.assertEqual(chunk_roles[0], SemanticRole.TITLE.value)
@@ -101,6 +102,18 @@ class DocxManualStructureTests(unittest.TestCase):
         self.assertIn("维修许可证应按规定申请和管理。", body_chunk.text)
         self.assertIn("| 项目 | 要求 |", body_chunk.text)
         self.assertNotIn("2-3", body_chunk.text)
+        rag_coverage = snapshot["index_manifest"]["rag_coverage"]
+        units_by_role = {}
+        for unit in rag_coverage["units"]:
+            units_by_role.setdefault(unit["semantic_role"], []).append(unit)
+        self.assertEqual(units_by_role[SemanticRole.PAGE_REF_CELL.value][0]["skip_reason"], "semantic_role:page_ref_cell")
+        self.assertFalse(units_by_role[SemanticRole.PAGE_REF_CELL.value][0]["chunk_ids"])
+        body_unit_chunk_ids = {
+            chunk_id
+            for unit in units_by_role[SemanticRole.BODY_SECTION.value] + units_by_role[SemanticRole.PARAGRAPH.value]
+            for chunk_id in unit["chunk_ids"]
+        }
+        self.assertIn(body_chunk.chunk_id, body_unit_chunk_ids)
 
     def test_document_snapshot_includes_manual_anatomy_and_structure_quality(self) -> None:
         body_xml = "".join(

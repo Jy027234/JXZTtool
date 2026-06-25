@@ -6,7 +6,9 @@ jobcard dual-run loop as the default quality gate.
 Checks:
 1. Unit tests
 2. Runtime describe smoke
-3. Regression baseline suite (optional, enabled by default)
+3. Payload contract validation
+4. Regression baseline suite (optional, enabled by default)
+5. Local provider comparison suite (optional, explicitly enabled)
 
 The script prints a JSON summary and also writes it to ``var/self-check``.
 
@@ -27,7 +29,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,10 +96,46 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--skip-regression", action="store_true")
     parser.add_argument(
+        "--skip-payload-contracts",
+        action="store_true",
+        help="skip the payload contract validation check",
+    )
+    parser.add_argument(
         "--regression-timeout-seconds",
         type=int,
         default=None,
         help="override the regression-suite timeout; defaults depend on --profile",
+    )
+    parser.add_argument(
+        "--provider-suite",
+        default=None,
+        help="optional provider comparison suite path for the local-provider release gate",
+    )
+    parser.add_argument(
+        "--provider-fixture-root",
+        default=None,
+        help="optional fixture root passed to the provider comparison suite",
+    )
+    parser.add_argument(
+        "--provider-profile",
+        default="default",
+        help="provider routing profile passed to the provider comparison suite",
+    )
+    parser.add_argument(
+        "--skip-provider-comparison",
+        action="store_true",
+        help="skip the provider comparison suite even when --provider-suite is set",
+    )
+    parser.add_argument(
+        "--provider-comparison-timeout-seconds",
+        type=int,
+        default=None,
+        help="override the provider-comparison timeout; defaults depend on --profile",
+    )
+    parser.add_argument(
+        "--large-pdf-benchmark",
+        default=None,
+        help="optional large PDF benchmark config path for the large-sample stress gate",
     )
     return parser
 
@@ -124,6 +162,35 @@ def _default_out_for_profile(profile: str) -> str:
     return str(ROOT / "var" / "self-check" / "latest.json")
 
 
+def _provider_comparison_artifact_paths(
+    *,
+    profile: str,
+    out_path: str | Path,
+) -> tuple[Path, Path]:
+    normalized_profile = _normalize_profile(profile)
+    suffix = f".{normalized_profile}" if normalized_profile else ""
+    parent = Path(out_path).parent
+    return (
+        parent / f"provider-comparison{suffix}.json",
+        parent / f"provider-comparison{suffix}.md",
+    )
+
+
+def _default_provider_suite_for_profile(profile: str) -> str | None:
+    normalized_profile = _normalize_profile(profile)
+    if normalized_profile == FAST_PROFILE:
+        candidate = ROOT / "var" / "regression" / "provider-suite.fast.json"
+    elif normalized_profile == PERF_PROFILE:
+        candidate = ROOT / "var" / "regression" / "provider-suite.perf.json"
+    elif normalized_profile == FULL_PROFILE:
+        candidate = ROOT / "var" / "regression" / "provider-suite.full.json"
+    else:
+        return None
+    if candidate.exists():
+        return str(candidate)
+    return None
+
+
 def _resolve_regression_profile(
     profile: str,
     explicit_timeout_seconds: int | None,
@@ -143,6 +210,70 @@ def _build_regression_suite_args(suite: str, include_tags: tuple[str, ...]) -> l
     for tag in include_tags:
         args.extend(["--include-tag", tag])
     return args
+
+
+def _build_provider_comparison_args(
+    *,
+    config: str,
+    suite: str,
+    fixture_root: str | None = None,
+    profile: str = "default",
+) -> list[str]:
+    args = [
+        sys.executable,
+        "tools/provider_comparison_report.py",
+        "--config",
+        config,
+        "--suite",
+        suite,
+        "--profile",
+        profile,
+        "--progress",
+    ]
+    if fixture_root:
+        args.extend(["--fixture-root", fixture_root])
+    return args
+
+
+def _default_provider_suite_preflight(
+    suite: str,
+    *,
+    fixture_root: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    from tools import provider_comparison_report
+
+    try:
+        resolved_fixture_root = provider_comparison_report._fixture_root_path(fixture_root)
+        sample_specs, _gate_policy = provider_comparison_report._load_suite_samples(
+            suite,
+            fixture_root=resolved_fixture_root,
+        )
+    except Exception as exc:
+        return False, {
+            "reason": "suite_resolution_failed",
+            "message": f"provider suite resolution failed: {exc}",
+        }
+    if not sample_specs:
+        return False, {
+            "reason": "empty_suite",
+            "message": "provider suite resolved to zero samples",
+        }
+    missing = [str(spec.path) for spec in sample_specs if not Path(spec.path).exists()]
+    if missing:
+        return False, {
+            "reason": "missing_fixtures",
+            "message": f"provider suite skipped because {len(missing)} fixture(s) are unavailable",
+            "missing_fixtures": missing,
+            "resolved_fixture_root": (
+                str(resolved_fixture_root) if resolved_fixture_root is not None else None
+            ),
+        }
+    return True, {
+        "sample_count": len(sample_specs),
+        "resolved_fixture_root": (
+            str(resolved_fixture_root) if resolved_fixture_root is not None else None
+        ),
+    }
 
 
 def _command_env() -> dict[str, str]:
@@ -253,6 +384,38 @@ def _run_runtime_describe(config: str) -> CheckResult:
     result.summary = (
         f"project={result.details['project']} index_mode={result.details['index_mode']} "
         f"execution_mode={result.details['execution_mode']}"
+    )
+    return result
+
+
+def _run_payload_contract_check() -> CheckResult:
+    result, output = _run_subprocess(
+        "payload_contracts",
+        [sys.executable, "-m", "parsecore.cli", "payload-contract-check"],
+    )
+    if result.status != "passed":
+        result.summary = result.tail[-1] if result.tail else "payload contract check failed"
+        return result
+    payload = _parse_json_output(output)
+    if payload is None:
+        result.status = "failed"
+        result.exit_code = result.exit_code if result.exit_code is not None else 1
+        result.details["parse_error"] = "payload contract check output was not JSON"
+        result.summary = result.tail[-1] if result.tail else "payload contract check output was not JSON"
+        return result
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    result.details = {
+        "status": payload.get("status"),
+        "registry_schema_version": payload.get("registry_schema_version"),
+        "summary": summary,
+        "schemas": payload.get("schemas"),
+        "payloads": payload.get("payloads"),
+    }
+    result.summary = (
+        f"schemas={summary.get('schema_count', 0)}"
+        f" payloads={summary.get('payload_count', 0)}"
+        f" failed_schemas={summary.get('failed_schema_count', 0)}"
+        f" failed_payloads={summary.get('failed_payload_count', 0)}"
     )
     return result
 
@@ -530,6 +693,226 @@ def _run_regression_suite(
     return result
 
 
+def _parse_json_output(output: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(output)
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        start = output.find("{")
+        end = output.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            payload = json.loads(output[start : end + 1])
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
+def _run_provider_comparison_suite(
+    *,
+    config: str,
+    suite: str,
+    fixture_root: str | None,
+    profile: str,
+    timeout_seconds: int,
+) -> CheckResult:
+    result, output = _run_subprocess(
+        "provider_comparison_suite",
+        _build_provider_comparison_args(
+            config=config,
+            suite=suite,
+            fixture_root=fixture_root,
+            profile=profile,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+    result.details.update(
+        {
+            "name": "provider_comparison_suite",
+            "suite": suite,
+            "fixture_root": fixture_root,
+            "profile": profile,
+        }
+    )
+    payload = _parse_json_output(output)
+    if payload is None:
+        if result.status == "passed":
+            result.status = "failed"
+            result.exit_code = result.exit_code if result.exit_code is not None else 1
+        result.details["parse_error"] = "provider comparison output was not JSON"
+        result.summary = result.tail[-1] if result.tail else "provider comparison output was not JSON"
+        return result
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    gate_summary = payload.get("gate_summary") if isinstance(payload.get("gate_summary"), dict) else {}
+    provider_identity_summary = (
+        payload.get("provider_identity_summary")
+        if isinstance(payload.get("provider_identity_summary"), dict)
+        else {}
+    )
+    provider_admission_summary = (
+        payload.get("provider_admission_summary")
+        if isinstance(payload.get("provider_admission_summary"), dict)
+        else {}
+    )
+    result.details.update(
+        {
+            "summary": summary,
+            "gate_summary": gate_summary,
+            "provider_identity_summary": provider_identity_summary,
+            "provider_admission_summary": provider_admission_summary,
+            "report_schema_version": payload.get("schema_version"),
+            "resolved_suite": payload.get("suite"),
+            "resolved_fixture_root": payload.get("fixture_root"),
+            "report_payload": payload,
+            "sample_count": summary.get("sample_count", 0),
+        }
+    )
+    gate = str(gate_summary.get("gate") or "unknown")
+    identity_drift = int(provider_identity_summary.get("providers_with_multiple_provider_versions") or 0) + int(
+        provider_identity_summary.get("providers_with_multiple_adapter_versions") or 0
+    )
+    admission_overview = (
+        provider_admission_summary.get("summary")
+        if isinstance(provider_admission_summary.get("summary"), dict)
+        else {}
+    )
+    result.summary = (
+        f"profile={profile} gate={gate}"
+        f" samples={summary.get('sample_count', 0)}"
+        f" completed={summary.get('completed_provider_runs', 0)}"
+        f" failed={summary.get('failed_provider_runs', 0)}"
+        f" skipped={summary.get('skipped_provider_runs', 0)}"
+        f" quality_warn={gate_summary.get('provider_quality_warning_runs', 0)}"
+        f" read_order_warn={gate_summary.get('provider_reading_order_warning_runs', 0)}"
+        f" route_mismatch={gate_summary.get('samples_best_provider_differs_from_route_primary', 0)}"
+        f" identity_drift={identity_drift}"
+        f" admission_ready={admission_overview.get('route_ready_count', 0)}"
+        f" admission_update={admission_overview.get('providers_requiring_config_update', 0)}"
+    )
+    return result
+
+
+def _skipped_provider_comparison_suite(
+    *,
+    suite: str,
+    fixture_root: str | None,
+    profile: str,
+    reason: str,
+    details: dict[str, Any] | None = None,
+) -> CheckResult:
+    payload = {
+        "suite": suite,
+        "fixture_root": fixture_root,
+        "profile": profile,
+    }
+    if details:
+        payload.update(details)
+    return CheckResult(
+        name="provider_comparison_suite",
+        status="skipped",
+        exit_code=None,
+        elapsed_s=0.0,
+        summary=reason,
+        details=payload,
+        tail=[],
+    )
+
+
+def _persist_provider_comparison_artifacts(
+    *,
+    profile: str,
+    out_path: str | Path,
+    report_payload: Mapping[str, Any],
+) -> dict[str, str]:
+    from tools import provider_comparison_report
+
+    json_path, markdown_path = _provider_comparison_artifact_paths(profile=profile, out_path=out_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    markdown_path.write_text(provider_comparison_report.render_markdown(dict(report_payload)), encoding="utf-8")
+    return {
+        "json": str(json_path),
+        "markdown": str(markdown_path),
+    }
+
+
+def _run_large_pdf_benchmark(config_path: str, *, config: str) -> CheckResult:
+    """Run large PDF benchmark gate from a config JSON file."""
+    from tools import large_pdf_stress
+
+    started = time.monotonic()
+    try:
+        benchmark_config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return CheckResult(
+            name="large_pdf_benchmark",
+            status="failed",
+            exit_code=1,
+            elapsed_s=round(time.monotonic() - started, 3),
+            summary=f"failed to load benchmark config: {exc}",
+            details={"config_path": config_path},
+            tail=[],
+        )
+
+    pdf_path = benchmark_config.get("pdf_path")
+    pdf_exists = pdf_path and Path(pdf_path).exists()
+    generate_pages = benchmark_config.get("total_pages", 17101) if not pdf_exists else 0
+
+    try:
+        report = large_pdf_stress.build_report(
+            config=config,
+            pdf=pdf_path if pdf_exists else None,
+            generate_pages=max(1, int(generate_pages)),
+            target_pages_per_part=benchmark_config.get("target_pages_per_part", 50),
+            max_active_parts_per_doc=benchmark_config.get("max_active_parts_per_doc"),
+            profile=benchmark_config.get("profile", "large-pdf"),
+            execute_parts=benchmark_config.get("execute_parts", False),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="large_pdf_benchmark",
+            status="failed",
+            exit_code=1,
+            elapsed_s=round(time.monotonic() - started, 3),
+            summary=f"benchmark execution failed: {exc}",
+            details={"config_path": config_path},
+            tail=[],
+        )
+
+    gate = large_pdf_stress.evaluate_gate(report, benchmark_config)
+    summary = report.get("summary") or {}
+    status = "passed" if gate["passed"] else "failed"
+    passed_checks = sum(1 for c in gate["checks"] if c["passed"])
+    total_checks = len(gate["checks"])
+    return CheckResult(
+        name="large_pdf_benchmark",
+        status=status,
+        exit_code=0 if gate["passed"] else 1,
+        elapsed_s=round(time.monotonic() - started, 3),
+        summary=(
+            f"gate={'passed' if gate['passed'] else 'failed'} "
+            f"checks={passed_checks}/{total_checks} "
+            f"pages={summary.get('total_pages', 0)} "
+            f"parts={summary.get('planned_parts', 0)} "
+            f"plan_elapsed_s={summary.get('plan_elapsed_s', 0)}"
+        ),
+        details={
+            "config_path": config_path,
+            "gate": gate,
+            "report_status": report.get("status"),
+            "pdf_path": report.get("pdf"),
+            "generated_pdf": report.get("generated_pdf", False),
+            "plan_elapsed_s": summary.get("plan_elapsed_s"),
+            "planned_parts": summary.get("planned_parts"),
+            "error_count": summary.get("error_count"),
+        },
+        tail=[],
+    )
+
+
 def _overall_status(results: list[CheckResult]) -> tuple[str, int]:
     if any(item.status == "failed" for item in results):
         return "failed", 1
@@ -542,13 +925,17 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     profile = _normalize_profile(args.profile)
     suite = args.suite or _default_suite_for_profile(profile)
+    provider_suite = args.provider_suite or _default_provider_suite_for_profile(profile)
     out_path_str = args.out or _default_out_for_profile(profile)
     results = [
         _run_unit_tests(),
         _run_runtime_describe(args.config),
     ]
+    if not args.skip_payload_contracts:
+        results.append(_run_payload_contract_check())
     regression_include_tags: tuple[str, ...] = ()
     regression_timeout_seconds: int | None = None
+    provider_comparison_timeout_seconds: int | None = None
     if not args.skip_regression:
         _, regression_include_tags, regression_timeout_seconds = _resolve_regression_profile(
             profile,
@@ -562,6 +949,72 @@ def main(argv: list[str] | None = None) -> int:
                 profile=profile,
             )
         )
+    if args.provider_suite and not args.skip_provider_comparison:
+        provider_comparison_timeout_seconds = (
+            args.provider_comparison_timeout_seconds
+            if args.provider_comparison_timeout_seconds is not None
+            else PROFILE_TIMEOUTS.get(profile, PROFILE_TIMEOUTS[FAST_PROFILE])
+        )
+        results.append(
+            _run_provider_comparison_suite(
+                config=args.config,
+                suite=args.provider_suite,
+                fixture_root=args.provider_fixture_root,
+                profile=args.provider_profile,
+                timeout_seconds=provider_comparison_timeout_seconds,
+            )
+        )
+    elif provider_suite and not args.skip_provider_comparison:
+        provider_comparison_timeout_seconds = (
+            args.provider_comparison_timeout_seconds
+            if args.provider_comparison_timeout_seconds is not None
+            else PROFILE_TIMEOUTS.get(profile, PROFILE_TIMEOUTS[FAST_PROFILE])
+        )
+        can_run_provider_suite, preflight = _default_provider_suite_preflight(
+            provider_suite,
+            fixture_root=args.provider_fixture_root,
+        )
+        if can_run_provider_suite:
+            results.append(
+                _run_provider_comparison_suite(
+                    config=args.config,
+                    suite=provider_suite,
+                    fixture_root=args.provider_fixture_root,
+                    profile=args.provider_profile,
+                    timeout_seconds=provider_comparison_timeout_seconds,
+                )
+            )
+        else:
+            results.append(
+                _skipped_provider_comparison_suite(
+                    suite=provider_suite,
+                    fixture_root=args.provider_fixture_root,
+                    profile=args.provider_profile,
+                    reason=str(preflight.get("message") or "provider suite skipped"),
+                    details=preflight,
+                )
+            )
+
+    provider_comparison_artifacts: dict[str, str] | None = None
+    for item in results:
+        if item.name != "provider_comparison_suite":
+            continue
+        report_payload = item.details.pop("report_payload", None)
+        if isinstance(report_payload, Mapping):
+            provider_comparison_artifacts = _persist_provider_comparison_artifacts(
+                profile=profile,
+                out_path=out_path_str,
+                report_payload=report_payload,
+            )
+            item.details["report_json"] = provider_comparison_artifacts["json"]
+            item.details["report_markdown"] = provider_comparison_artifacts["markdown"]
+            item.details["output_json_path"] = provider_comparison_artifacts["json"]
+            item.details["output_md_path"] = provider_comparison_artifacts["markdown"]
+        break
+
+    # P5-T12: optional large PDF benchmark gate
+    if args.large_pdf_benchmark:
+        results.append(_run_large_pdf_benchmark(args.large_pdf_benchmark, config=args.config))
 
     overall, exit_code = _overall_status(results)
     payload = {
@@ -570,9 +1023,22 @@ def main(argv: list[str] | None = None) -> int:
         "profile": profile,
         "config": str(args.config),
         "suite": None if args.skip_regression else str(suite),
+        "provider_suite": (
+            str(provider_suite)
+            if provider_suite and not args.skip_provider_comparison
+            else None
+        ),
+        "provider_fixture_root": (
+            str(args.provider_fixture_root)
+            if args.provider_fixture_root and provider_suite and not args.skip_provider_comparison
+            else None
+        ),
+        "provider_profile": args.provider_profile,
+        "provider_comparison_artifacts": provider_comparison_artifacts,
         "out": str(out_path_str),
         "regression_include_tags": list(regression_include_tags),
         "regression_timeout_seconds": regression_timeout_seconds,
+        "provider_comparison_timeout_seconds": provider_comparison_timeout_seconds,
         "checks": [asdict(item) for item in results],
     }
     if profile == PERF_PROFILE:

@@ -59,3 +59,4 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 
 - OCR HTTP 契约见 [ocr-gateway-contract.md](ocr-gateway-contract.md)
 - 产品灰度收口见 [go-live-readiness.md](go-live-readiness.md)
+- 本地 Provider 离线评估清单见 [local-provider-ir-upgrade-plan.md](local-provider-ir-upgrade-plan.md#离线评估清单)

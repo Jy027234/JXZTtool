@@ -12,6 +12,7 @@ from .exports import write_structured_projection
 DEFAULT_EXPORTS: tuple[tuple[str, str], ...] = (
     ("tables", "csv"),
     ("quality_signals", "jsonl"),
+    ("coverage", "jsonl"),
     ("parse_units", "tsv"),
 )
 
@@ -127,8 +128,10 @@ def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[
     field_filters = _field_filters(filters)
     page_range = _page_range(filters.get("page_range"))
 
-    for dataset in ("pages", "lines", "tables", "quality_signals", "parse_units", "records"):
+    for dataset in ("pages", "lines", "tables", "quality_signals", "coverage", "parse_units", "records", "reader"):
         rows = filtered.get(dataset)
+        if dataset == "coverage" and isinstance(rows, dict):
+            rows = rows.get("pages")
         if not isinstance(rows, list):
             continue
         kept = rows
@@ -149,6 +152,12 @@ def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[
                 row
                 for row in kept
                 if not isinstance(row, dict) or _record_has_quality_signal(row, quality_signal_filter)
+            ]
+        if dataset in {"coverage", "reader"} and quality_signal_filter is not None:
+            kept = [
+                row
+                for row in kept
+                if not isinstance(row, dict) or _row_has_quality_signal(row, quality_signal_filter)
             ]
         if dataset == "records" and field_filters:
             kept = [
@@ -198,6 +207,10 @@ def _field_filters(filters: dict[str, Any]) -> dict[str, str]:
 
 
 def _record_has_quality_signal(row: dict[str, Any], allowed: set[str]) -> bool:
+    return bool({str(code or "") for code in list(row.get("quality_signal_codes") or [])} & allowed)
+
+
+def _row_has_quality_signal(row: dict[str, Any], allowed: set[str]) -> bool:
     return bool({str(code or "") for code in list(row.get("quality_signal_codes") or [])} & allowed)
 
 

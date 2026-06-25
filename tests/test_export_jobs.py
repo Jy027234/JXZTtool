@@ -21,6 +21,7 @@ class ExportPackageTests(unittest.TestCase):
             "profile": "table-heavy",
             "tables": [{"table_id": "t1", "page_number": 1, "rows": 2}],
             "quality_signals": [{"code": "warn", "severity": "warning", "page_number": 1}],
+            "coverage": [{"page_number": 1, "indexable_unit_count": 1, "chunk_ids": ["chunk-1"]}],
             "parse_units": [{"parse_unit_id": "u1", "page_start": 1, "page_end": 2}],
         }
 
@@ -37,8 +38,13 @@ class ExportPackageTests(unittest.TestCase):
             self.assertEqual(
                 manifest["request"],
                 {
-                    "include": ["tables", "quality_signals", "parse_units"],
-                    "formats": {"tables": "csv", "quality_signals": "jsonl", "parse_units": "tsv"},
+                    "include": ["tables", "quality_signals", "coverage", "parse_units"],
+                    "formats": {
+                        "tables": "csv",
+                        "quality_signals": "jsonl",
+                        "coverage": "jsonl",
+                        "parse_units": "tsv",
+                    },
                     "filters": {},
                 },
             )
@@ -48,11 +54,13 @@ class ExportPackageTests(unittest.TestCase):
                 [
                     ("tables", "csv", "tables.csv"),
                     ("quality_signals", "jsonl", "quality_signals.jsonl"),
+                    ("coverage", "jsonl", "coverage.jsonl"),
                     ("parse_units", "tsv", "parse_units.tsv"),
                 ],
             )
             self.assertTrue(export_file_path(tmp, manifest["export_id"], "tables.csv").exists())
             self.assertTrue(export_file_path(tmp, manifest["export_id"], "quality_signals.jsonl").exists())
+            self.assertTrue(export_file_path(tmp, manifest["export_id"], "coverage.jsonl").exists())
             self.assertTrue(export_file_path(tmp, manifest["export_id"], "parse_units.tsv").exists())
             self.assertEqual(load_export_manifest(tmp, manifest["export_id"]), manifest)
             for entry in manifest["files"]:
@@ -164,6 +172,84 @@ class ExportPackageTests(unittest.TestCase):
             lines_content = export_file_path(tmp, manifest["export_id"], "lines.csv").read_text(encoding="utf-8")
             line_rows = list(csv.DictReader(io.StringIO(lines_content)))
             self.assertEqual([row["line_id"] for row in line_rows], ["l2"])
+
+    def test_custom_export_package_can_filter_coverage(self) -> None:
+        payload = {
+            "schema_version": "2026-06",
+            "doc_id": "doc-coverage",
+            "coverage": [
+                {
+                    "page_number": 1,
+                    "missing_reason": None,
+                    "quality_signal_codes": [],
+                },
+                {
+                    "page_number": 2,
+                    "missing_reason": "no_chunks_for_indexable_units",
+                    "quality_signal_codes": ["rag_units_without_chunks"],
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["coverage"],
+                formats={"coverage": "jsonl"},
+                filters={
+                    "page_range": {"start": 2, "end": 2},
+                    "quality_signal": "rag_units_without_chunks",
+                },
+            )
+
+            self.assertEqual(manifest["files"][0]["dataset"], "coverage")
+            self.assertEqual(manifest["files"][0]["records"], 1)
+            coverage_lines = export_file_path(tmp, manifest["export_id"], "coverage.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([json.loads(line)["page_number"] for line in coverage_lines], [2])
+
+    def test_custom_export_package_can_filter_reader_blocks(self) -> None:
+        payload = {
+            "schema_version": "2026-06-reader",
+            "doc_id": "doc-reader",
+            "reader": [
+                {
+                    "reader_block_id": "reader:000001",
+                    "type": "text",
+                    "page_number": 1,
+                    "text": "Overview",
+                    "quality_signal_codes": [],
+                },
+                {
+                    "reader_block_id": "reader:000002",
+                    "type": "figure",
+                    "page_number": 3,
+                    "text": "",
+                    "quality_signal_codes": ["rag_figure_caption_missing"],
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = create_export_package(
+                payload,
+                tmp,
+                includes=["reader"],
+                formats={"reader": "jsonl"},
+                filters={
+                    "page_range": {"start": 2, "end": 4},
+                    "quality_signal": "rag_figure_caption_missing",
+                },
+            )
+
+            self.assertEqual(manifest["files"][0]["dataset"], "reader")
+            self.assertEqual(manifest["files"][0]["records"], 1)
+            reader_lines = export_file_path(tmp, manifest["export_id"], "reader.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([json.loads(line)["reader_block_id"] for line in reader_lines], ["reader:000002"])
 
     def test_export_filters_records_by_quality_signal_and_fields(self) -> None:
         payload = {

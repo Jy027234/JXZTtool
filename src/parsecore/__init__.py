@@ -1,6 +1,6 @@
 from .bootstrap import build_runtime
 from .models import Block, BlockType, Chunk, ChunkSearchHit, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
-from .parsers import DocxParser, PdfTextParser, TextParser
+from .parsers import DocxParser, PdfTextParser, PyMuPdf4LlmParser, TextParser
 from .runtime import ParseRuntime
 from .stores import PgVectorIndex, PostgresJobStore, SQLiteJobStore
 from .worker import QueueWorker, build_worker, run_worker
@@ -19,6 +19,7 @@ __all__ = [
     "PdfTextParser",
     "PgVectorIndex",
     "PostgresJobStore",
+    "PyMuPdf4LlmParser",
     "QueueWorker",
     "SQLiteJobStore",
     "SemanticRole",
