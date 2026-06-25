@@ -1,0 +1,26 @@
+{
+  "gate_policy": {
+    "max_samples_best_provider_differs_from_route_primary": 0,
+    "max_providers_with_multiple_provider_versions": 0,
+    "max_providers_with_multiple_adapter_versions": 0,
+    "max_providers_requiring_config_update": 0,
+    "max_providers_with_route_mode_drift": 0,
+    "max_providers_with_gate_status_drift": 0,
+    "max_providers_with_gate_checks_drift": 0,
+    "max_providers_with_route_ready_drift": 0
+  },
+  "entries": [
+    {
+      "name": "primary-default",
+      "baseline": "baseline.json"
+    },
+    {
+      "name": "primary-table-structure",
+      "baseline": "baseline.table-structure.primary.json"
+    },
+    {
+      "name": "primary-strip-hf",
+      "baseline": "baseline.strip_hf.json"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "gate_policy": {
+    "max_samples_best_provider_differs_from_route_primary": 0,
+    "max_providers_with_multiple_provider_versions": 0,
+    "max_providers_with_multiple_adapter_versions": 0,
+    "max_providers_requiring_config_update": 0,
+    "max_providers_with_route_mode_drift": 0,
+    "max_providers_with_gate_status_drift": 0,
+    "max_providers_with_gate_checks_drift": 0,
+    "max_providers_with_route_ready_drift": 0
+  },
+  "entries": [
+    {
+      "name": "primary-default",
+      "baseline": "baseline.json"
+    },
+    {
+      "name": "primary-table-structure",
+      "baseline": "baseline.table-structure.primary.json"
+    },
+    {
+      "name": "primary-strip-hf",
+      "baseline": "baseline.strip_hf.json"
+    },
+    {
+      "name": "sample-25-51-06",
+      "baseline": "baseline.25-51-06.json"
+    },
+    {
+      "name": "sample-flight-ops-manual-r2",
+      "baseline": "baseline.flight-ops-manual-r2.json"
+    },
+    {
+      "name": "multi-column-pdf",
+      "disabled": true,
+      "fixture_relative_path": "fixtures/multi-column.pdf",
+      "_description": "P3-T07: 多栏 PDF — 读序低置信检测和跨栏 block 拆分"
+    },
+    {
+      "name": "figure-pdf",
+      "disabled": true,
+      "fixture_relative_path": "fixtures/figure-sample.pdf",
+      "_description": "P3-T07: 图示 PDF — figure block caption/alt_text"
+    },
+    {
+      "name": "docx-sample",
+      "disabled": true,
+      "fixture_relative_path": "fixtures/docx-sample.docx",
+      "_description": "P3-T07: DOCX — 标题层级和表格结构"
+    }
+  ]
+}

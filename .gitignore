@@ -9,7 +9,11 @@ build/
 var/parsecore.db
 var/*.db
 var/logs/
-var/regression/
+var/regression/*
+!var/regression/
+!var/regression/provider-suite.fast.json
+!var/regression/provider-suite.full.json
+!var/regression/provider-suite.perf.json
 var/self-check/
 var/tmp/
 var/uploads/

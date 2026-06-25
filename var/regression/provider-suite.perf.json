@@ -1,0 +1,22 @@
+{
+  "gate_policy": {
+    "max_provider_reading_order_warning_runs": 0,
+    "max_providers_with_multiple_provider_versions": 0,
+    "max_providers_with_multiple_adapter_versions": 0,
+    "max_providers_requiring_config_update": 0,
+    "max_providers_with_route_mode_drift": 0,
+    "max_providers_with_gate_status_drift": 0,
+    "max_providers_with_gate_checks_drift": 0,
+    "max_providers_with_route_ready_drift": 0
+  },
+  "entries": [
+    {
+      "name": "sample-27-81-17",
+      "baseline": "baseline.27-81-17.json"
+    },
+    {
+      "name": "sample-cmm-32-48-21-ocr",
+      "baseline": "baseline.cmm-32-48-21.json"
+    }
+  ]
+}
