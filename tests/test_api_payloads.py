@@ -8,6 +8,7 @@ from parsecore.api_payloads import (
     _document_providers_projection,
     _document_quality_projection,
     _document_records_projection,
+    _normalize_reader_text,
     _quality_required_provider_capabilities,
     _project_pages,
 )
@@ -15,6 +16,26 @@ from parsecore.models import Block, BlockType, Chunk, ParseJobState, SemanticRol
 
 
 class DocumentProjectionQualitySignalTests(unittest.TestCase):
+    def test_reader_text_preserves_regulatory_hierarchy_and_joins_continuations(self) -> None:
+        text = (
+            "(a) The competent authorities shall establish a system of record-keeping that allows\n"
+            "adequate traceability of each certificate.\n"
+            "(b) The records shall include as a minimum:\n"
+            "1. the application for an organisation approval;\n"
+            "2. the organisation approval certificate including any changes;\n"
+            "M.A.714 Record-keeping\n"
+            "The records shall be retained for five years."
+        )
+
+        self.assertEqual(
+            _normalize_reader_text(text),
+            "(a) The competent authorities shall establish a system of record-keeping that allows adequate traceability of each certificate.\n\n"
+            "(b) The records shall include as a minimum:\n\n"
+            "1. the application for an organisation approval;\n\n"
+            "2. the organisation approval certificate including any changes;\n\n"
+            "M.A.714 Record-keeping The records shall be retained for five years.",
+        )
+
     def test_quality_required_provider_capabilities_use_local_ocr_fallback(self) -> None:
         self.assertEqual(
             _quality_required_provider_capabilities(["rag_empty_text_page", "text_page_coverage_below_threshold"]),

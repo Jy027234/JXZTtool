@@ -706,6 +706,30 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 
 该工具对同一样本逐个运行已配置的本地 parser，输出 `ir_summary / coverage_summary / rag_coverage_quality / provider_report.comparison_report`。未配置、依赖缺失或不支持文件类型的候选会写成 `skipped/failed`，不会中断整批样本；远程 OCR provider 会在该离线工具中禁用，避免 Provider 对比时触发外部 OCR API。`--suite` 可读取新的 `samples / fixtures / cases` 清单，也可直接复用现有 `entries -> baseline -> fixtures` 回归套件；每个样本可用 `providers / provider_ids / profile / fixture_relative_path / page_range` 覆盖全局参数，suite 顶层还可声明 `gate_policy.max_provider_reading_order_warning_runs`、`gate_policy.max_provider_quality_warning_runs`、`gate_policy.max_samples_best_provider_differs_from_route_primary`、`gate_policy.max_providers_with_multiple_provider_versions`、`gate_policy.max_providers_with_multiple_adapter_versions` 这类基础门禁预算。仓库当前内置了 `var/regression/provider-suite.fast.json`、`var/regression/provider-suite.full.json` 与 `var/regression/provider-suite.perf.json` 三套工件，分别对应 `fast`、`full` 与 `perf` 自检默认 Provider 门禁。默认 auto route-plan 模式下，报告仍会保留 disabled/未接入候选的 `skipped` 解释，但 gate 不再把这类 `parser_not_configured` / `unsupported_media_type_or_extension` 直接当成 warning；只有显式指定的 Provider 被跳过，或出现非预期 skipped，才会进入 `provider_runs_skipped`。现在每次 provider run 还会显式回填 `provider_version / adapter_version`，suite 顶层新增 `provider_identity_summary`，用于追踪“同一个 provider id 实际跑的是哪版上游库/哪版 Adapter”；一旦同名 Provider 混入多版上游库或多版 Adapter，gate 会先给出 drift warning，再按上面的 budget 决定是否 fail。与此同时，报告还会输出 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action` 与 `requires_config_update`，并补齐 `drift_fields / drift_details / config_patch`，便于把对比结论直接回写到 `providers.local_parsers` 配置。如果希望把“准入建议还没收敛”也纳入 fail gate，suite 顶层还支持 `gate_policy.max_providers_requiring_config_update`、`gate_policy.max_providers_with_route_mode_drift`、`gate_policy.max_providers_with_gate_status_drift`、`gate_policy.max_providers_with_gate_checks_drift`、`gate_policy.max_providers_with_route_ready_drift` 五类 admission drift 预算，分别约束待回写 provider 数量以及 `route_mode / gate_status / gate_checks / route_ready` 四类配置漂移。`parsecore self-check` 在实际执行 provider comparison 时，会把 identity 和 admission 两份摘要一起带回检查结果，并在 summary 中追加 `identity_drift / admission_ready / admission_update` 计数。与此同时，self-check 仍会在输出目录自动落盘 `provider-comparison.fast/full/perf.json/.md`，并把路径写回 self-check JSON。`--fixture-root` 或 `PARSECORE_REGRESSION_FIXTURE_ROOT` 用于跨机器恢复真实样本路径。对 PDF 还支持 `--page-start / --page-end` 或 suite 内 `page_range` 局部评估：工具会先切出 part 文件，再把 IR / coverage / provider_report 页码平移回原始页号，便于大文件异常页和采样页灰度对比。
 
+### P2 人工确认 gold corpus
+
+`tools/provider_gold_evaluation.py` 在既有离线对比结果上执行页级准入评分。它只读取本地副本并写出报告，绝不修改 provider 配置、默认路由、活动产物或线上任务。每一个候选 block 都保留页码、位置、`provider_id / provider_version / source_kind` 和表格 cell 证据，以支持人工复核。
+
+仓库提供 [gold-corpus-v1.json](../fixtures/provider-evaluation/gold-corpus-v1.json) 作为受控入口；其中导入的 P0 样本均为 `seed`，不是人工确认的 gold 标签。评审人须为每页确认来源截图、页内 block 顺序、标题层级、表格行列/合并信息、关键 token 与应排除的页眉页脚，并把 `review_status` 改为 `approved`。在至少 50 页被确认前，任何候选只能保持 shadow-only。
+
+源文件映射必须留在本机或受控工件存储，不能提交业务 PDF 或凭据。以 [source-map.example.json](../fixtures/provider-evaluation/source-map.example.json) 复制出本地映射后运行：
+
+```powershell
+py tools/provider_gold_evaluation.py --config parsecore.toml --gold-corpus fixtures/provider-evaluation/gold-corpus-v1.json --source-map D:/secure/provider-gold-source-map.json --provider pymupdf4llm-local --provider docling-local --baseline-provider pdf-text --out-json var/self-check/provider-gold-v1.json
+```
+
+若尚未选出 50–100 页，可先生成待审核而非已批准的模板；两份文档各取 25 页即可形成 50 页初始队列：
+
+```powershell
+py tools/provider_gold_review_queue.py --source-map D:/secure/provider-gold-source-map.json --pages-per-document 25 --out-json D:/secure/provider-gold-review-queue.json
+```
+
+生成器不会调用 parser，也不会填充标签或将任何页面标为 `approved`。评审人必须在队列中填入 screenshot、block kinds、anchors、顺序、table anchors、关键 token 和页眉页脚排除项；完成后才能将相应记录合并至 gold corpus。
+
+可先使用重复的 `--document-id` 只诊断一个已映射文档，例如 `--document-id doc-62f0d9e0-3536-42d9-955c-9ea7447595b8 --include-seed`。这仅方便标注和问题页检查，绝不会因为子集通过而晋升 provider。
+
+评分权重为完整性 25、reading order 20、表格结构 25、标题层级 15、关键 token 10、运行成本 5。缺页/乱序/重复、关键 token 丢失、表格锚点缺失、block provenance 缺失，以及未获许可证与数据合规批准，都会触发 hard veto。报告即使给出 `manual_canary_config_review`，也只是建议：还必须达到较生产 provider 至少 +5 分、reading order 与表格不回退、连续三轮稳定，并通过独立配置评审后，才可将指定候选 profile 灰度为 `route`。默认 `pdf-text` 路由不会被该工具改写。
+
 大 PDF part 调度压测：
 
 ```powershell

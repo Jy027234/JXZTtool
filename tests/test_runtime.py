@@ -1225,6 +1225,42 @@ gate_status = "pending"
             assert requeued is not None
             self.assertEqual(requeued.state, ParseJobState.PENDING)
 
+    def test_cancelled_worker_cannot_save_blocks_after_parse_boundary(self) -> None:
+        with TemporaryWorkspace(QUEUE_RETRY_CONFIG) as workspace:
+            document_path = workspace.create_docx("cancelled-worker.docx", ["cancelled worker"])
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-cancelled-worker",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            claimed = runtime.claim_next_job()
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+
+            def cancel_claim(_request):
+                runtime.cancel_job(job_id=job.job_id)
+                return (
+                    Block(
+                        block_id="cancelled-block",
+                        doc_id="doc-cancelled-worker",
+                        type=BlockType.PARAGRAPH,
+                        content="this block must not persist after cancellation",
+                    ),
+                )
+
+            with patch.object(runtime, "_load_blocks_for_request", side_effect=cancel_claim):
+                with self.assertRaisesRegex(RuntimeError, "stale_claim"):
+                    runtime.execute(job_id=claimed.job_id, claim_token=claimed.claim_token)
+
+            self.assertEqual(tuple(runtime.job_store.get_blocks(doc_id="doc-cancelled-worker")), ())
+            cancelled = runtime.get_job(job_id=job.job_id)
+            assert cancelled is not None
+            self.assertEqual(cancelled.state, ParseJobState.FAILED)
+            self.assertEqual(cancelled.failure_reason, "cancelled")
+
     def test_tenant_dashboard_aggregates_usage_metrics_and_recent_jobs(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
@@ -2404,3 +2440,22 @@ gate_status = "pending"
             metrics = runtime.runtime_metrics(sample_size=50)
             self.assertGreaterEqual(metrics["part_jobs"]["parts_total"], 2)
             self.assertEqual(metrics["part_jobs"]["parts_cancelled"], 1)
+
+    def test_cancel_job_marks_pending_job_as_cancelled(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("cancel-job.pdf", [["one"]])
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-cancel-job",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                )
+            )
+
+            cancelled = runtime.cancel_job(job_id=job.job_id)
+
+            self.assertTrue(cancelled["cancelled"])
+            self.assertEqual(cancelled["state"], "cancelled")
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                runtime.execute(job_id=job.job_id)

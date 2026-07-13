@@ -141,6 +141,14 @@ class BackgroundParseRunner:
                     result["message"] = "cancelled"
         return result
 
+    def cancel_job(self, *, job_id: str) -> dict[str, object]:
+        with self._lock:
+            self.queued_job_ids = [queued_id for queued_id in self.queued_job_ids if queued_id != job_id]
+            future = self.inflight.get(job_id)
+            if future is not None and future.cancel():
+                self.inflight.pop(job_id, None)
+        return self.runtime.cancel_job(job_id=job_id)
+
     def _submit_existing_job(self, job: ParseJob, *, allow_queue: bool = False) -> None:
         with self._lock:
             if job.state != ParseJobState.PENDING:
@@ -232,6 +240,9 @@ class QueueSubmissionRunner:
 
     def cancel_pdf_part(self, **kwargs) -> dict[str, object]:
         return self.runtime.cancel_pdf_part(**kwargs)
+
+    def cancel_job(self, *, job_id: str) -> dict[str, object]:
+        return self.runtime.cancel_job(job_id=job_id)
 
     def shutdown(self) -> None:
         return None

@@ -169,6 +169,20 @@ ocr_render_resolution = 110
 ocr_confidence_threshold = 0.5
 ocr_merge_line_gap_ratio = 1.6
 
+# Registered for explicit P2 shadow evaluation only; disabled/evaluate provider
+# admission prevents them from becoming default route candidates.
+[[parsers]]
+name = "pymupdf4llm-local"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+options = { page_chunks = true, detect_tables = true }
+
+[[parsers]]
+name = "docling-local"
+media_types = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".pdf", ".docx"]
+options = { detect_tables = true }
+
 [[parsers]]
 name = "image-ocr"
 media_types = ["image/png", "image/jpeg"]

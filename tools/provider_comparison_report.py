@@ -632,6 +632,38 @@ def _snapshot(
     }
 
 
+def _gold_evidence(blocks: Sequence[Block]) -> list[dict[str, Any]]:
+    """Return bounded, page-scoped IR evidence for an external gold evaluator.
+
+    The report deliberately carries source/provider identifiers with each block so
+    an evaluator can reject a result that is textually plausible but not traceable.
+    This is a shadow-only diagnostic payload and is never used by the production
+    routing decision.
+    """
+    evidence: list[dict[str, Any]] = []
+    for position, block in enumerate(blocks, start=1):
+        metadata = dict(block.metadata or {})
+        try:
+            page_number = int(metadata.get("page") or 1)
+        except (TypeError, ValueError):
+            page_number = 1
+        evidence.append(
+            {
+                "position": position,
+                "page_number": page_number,
+                "block_id": str(block.block_id),
+                "kind": block.type.value,
+                "text": str(block.content or ""),
+                "semantic_role": str(metadata.get("semantic_role") or ""),
+                "provider_id": str(metadata.get("provider_id") or metadata.get("parser_name") or ""),
+                "provider_version": str(metadata.get("provider_version") or "") or None,
+                "source_kind": str(metadata.get("source_kind") or ""),
+                "table_cells": metadata.get("cells") if isinstance(metadata.get("cells"), list) else [],
+            }
+        )
+    return evidence
+
+
 def _run_provider(
     *,
     settings: Any,
@@ -743,6 +775,7 @@ def _run_provider(
         "coverage_summary": (coverage.get("coverage") or {}).get("summary") or {},
         "rag_coverage_quality": coverage.get("rag_coverage_quality") or {},
         "provider_report": provider_report,
+        "gold_evidence": _gold_evidence(blocks),
         "provider_score": ranking.get("score"),
         "recommendation": ranking.get("recommendation"),
     }

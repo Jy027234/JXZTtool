@@ -1495,11 +1495,62 @@ def _reader_text_block(
         index=index,
         block_type="title" if block_type == "title" else "text",
         display_kind=str(block.get("display_kind") or "text"),
-        text=rag_text or str(block.get("text") or ""),
+        text=_normalize_reader_text(rag_text or str(block.get("text") or "")),
         source_table_ids=[],
         source_figure_ids=[],
         knowledge_units=knowledge_units,
     )
+
+
+_READER_STRUCTURAL_LINE_PATTERN = re.compile(
+    r"^(?:[-*•·−–—]|\d+[.)、])\s+"
+    r"|^[（(]\s*(?:\d+|[a-z]{1,4})\s*[)）]\s+"
+    r"|^\d{1,2}(?:\.\d+){1,5}\s+\S"
+    r"|^(?:SECTION|SUBPART|APPENDIX|MODULE|Article|Appendix|AMC\d*|GM\d*|"
+    r"ED\s+Decision|Regulation\s+\(EU\)|[A-Z]{1,6}(?:\.[A-Z0-9]+){1,4}\s+)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_reader_text(text: str) -> str:
+    """Keep regulatory/list boundaries while joining wrapped continuation lines."""
+    lines = [line.strip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
+    if len(lines) <= 1:
+        return lines[0] if lines else ""
+
+    paragraphs: list[str] = []
+    current: list[str] = []
+    current_is_structural = False
+
+    def flush() -> None:
+        nonlocal current, current_is_structural
+        if not current:
+            return
+        joined = current[0]
+        for line in current[1:]:
+            if re.search(r"[A-Za-z]-$", joined) and re.match(r"^[a-z]", line):
+                joined = f"{joined[:-1]}{line}"
+            else:
+                joined = f"{joined} {line}"
+        paragraphs.append(joined)
+        current = []
+        current_is_structural = False
+
+    for line in lines:
+        structural = bool(_READER_STRUCTURAL_LINE_PATTERN.search(line))
+        if structural:
+            flush()
+            current.append(line)
+            current_is_structural = True
+            continue
+        previous_line = current[-1] if current else ""
+        if current_is_structural and re.search(r"[。！？.!?；;]$", previous_line) and re.match(r"^[A-Z][a-z]", line):
+            flush()
+        current.append(line)
+        if not current_is_structural and re.search(r"[。！？.!?；;:]$", line):
+            flush()
+    flush()
+    return "\n\n".join(paragraphs)
 
 
 def _reader_table_block(

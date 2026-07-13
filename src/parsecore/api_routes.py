@@ -80,6 +80,7 @@ class ApiRoutes:
             Route("/v1/parse/batch", self.parse_batch, methods=["POST"]),
             Route("/v1/parse/jobs", self.create_job, methods=["POST"]),
             Route("/v1/parse/jobs", self.list_jobs, methods=["GET"]),
+            Route("/v1/parse/jobs/{job_id}/cancel", self.cancel_job, methods=["POST"]),
             Route("/v1/parse/export-jobs/{export_id}", self.get_export_job, methods=["GET"]),
             Route("/v1/parse/export-jobs/{export_id}/download", self.download_export_file, methods=["GET"]),
             Route("/v1/parse/quotas/usage", self.quota_usage, methods=["GET"]),
@@ -902,6 +903,14 @@ class ApiRoutes:
         if job is None:
             return _error_response(request, code="job_not_found", message="Parse job not found", status_code=404)
         return JSONResponse(_to_payload(job))
+
+    async def cancel_job(self, request: Request) -> JSONResponse:
+        try:
+            result = request.app.state.runner.cancel_job(job_id=request.path_params["job_id"])
+        except LookupError:
+            return _error_response(request, code="job_not_found", message="Parse job not found", status_code=404)
+        status_code = 202 if result.get("cancelled") else 409
+        return JSONResponse(_to_payload(result), status_code=status_code)
 
     async def get_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime

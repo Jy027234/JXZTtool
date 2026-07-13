@@ -803,6 +803,43 @@ class ParseRuntime:
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
 
+    def cancel_job(self, *, job_id: str) -> dict[str, Any]:
+        """Cancel a host-owned parse job and revoke its claim.
+
+        Python worker threads cannot be forcefully interrupted safely.  Clearing
+        the claim makes the existing execution checks stop before the next
+        persistence boundary, while pending jobs are prevented from starting.
+        """
+        job = self.job_store.get_job(job_id=job_id)
+        if job is None:
+            raise LookupError(f"No parse job found for job_id={job_id!r}")
+        if job.state in {ParseJobState.DONE, ParseJobState.FAILED}:
+            already_cancelled = str(job.failure_reason or "").strip().lower() == "cancelled"
+            return {
+                "job": job,
+                "cancelled": already_cancelled,
+                "state": "cancelled" if already_cancelled else str(job.state.value),
+                "message": "cancelled" if already_cancelled else "job is already terminal",
+            }
+        cancelled = self._update_job_state(
+            job_id=job.job_id,
+            state=ParseJobState.FAILED,
+            failure_reason="cancelled",
+            clear_claim=True,
+        )
+        self.event_logger.log(
+            "cancelled",
+            job_id=job.job_id,
+            doc_id=job.doc_id,
+            state="cancelled",
+        )
+        return {
+            "job": cancelled,
+            "cancelled": True,
+            "state": "cancelled",
+            "message": "cancelled",
+        }
+
     def get_document(
         self,
         *,
