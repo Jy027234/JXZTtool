@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
-from .models import Block, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest
+from .models import Block, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest, RerankScore
 
 
 @runtime_checkable
@@ -22,6 +22,16 @@ class ChunkBuilder(Protocol):
 @runtime_checkable
 class EmbeddingProvider(Protocol):
     def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]: ...
+
+
+@runtime_checkable
+class RerankProvider(Protocol):
+    def rerank(
+        self,
+        *,
+        query: str,
+        documents: Sequence[str],
+    ) -> Sequence[RerankScore]: ...
 
 
 @runtime_checkable

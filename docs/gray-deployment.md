@@ -13,6 +13,8 @@
 
 没有真实 embedding key 时，使用 `parsecore.pgvector.fake-embedding.toml.example` 完成本地持久化和索引链路验证。
 
+已完成选型时可改用 `parsecore.pgvector.local-embedding.toml.example`（本地 384 维模型，镜像需安装 `.[local-embedding]`）或 `parsecore.pgvector.remote-embedding.toml.example`（远程网关，需通过环境变量注入凭证）。两者都不会修改默认配置；切换维度时必须迁移或重建 pgvector 表。
+
 ## 启动
 
 ```powershell

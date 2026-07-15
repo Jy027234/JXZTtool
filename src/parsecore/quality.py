@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from math import sqrt
 from typing import Iterable, Sequence
 
+from .audit_placeholders import is_non_content_audit_placeholder
 from .garble import analyze_text_fragments_garble
 from .models import Block, Chunk
 
@@ -38,7 +39,6 @@ _PDF_NAME_TOTAL_GATE_TOKENS = 120
 _MAX_CONTROL_CHAR_RATIO = 0.03
 _MIN_PRINTABLE_RATIO = 0.75
 _SHORT_TOKEN_REPEAT_GATE = 0.35
-
 @dataclass(slots=True)
 class PageQuality:
     page_number: int
@@ -176,6 +176,22 @@ def _page_number_of(block: Block) -> int:
         return 0
 
 
+def _is_non_content_audit_block(block: Block) -> bool:
+    """Return whether a block is page evidence rather than parsed content.
+
+    Empty/OCR-failed pages are deliberately emitted as non-indexable blocks so
+    page coverage remains auditable.  They must keep contributing to the page
+    denominator, but counting their empty text as a very-short content block
+    makes structural quality look worse whenever observability improves.
+    """
+
+    metadata = block.metadata or {}
+    return is_non_content_audit_placeholder(
+        semantic_role=metadata.get("semantic_role"),
+        metadata=metadata,
+    )
+
+
 def evaluate_blocks(blocks: Iterable[Block]) -> StructuralQualityReport:
     """Compute the structural quality report for a single document."""
 
@@ -193,15 +209,16 @@ def evaluate_blocks(blocks: Iterable[Block]) -> StructuralQualityReport:
 
     for page_number in sorted(page_buckets):
         page_blocks = page_buckets[page_number]
-        lengths = [len(block.content) for block in page_blocks]
+        content_blocks = [block for block in page_blocks if not _is_non_content_audit_block(block)]
+        lengths = [len(block.content) for block in content_blocks]
         all_lengths.extend(lengths)
 
         very_short = sum(1 for length in lengths if length < _VERY_SHORT_LEN)
         header_footer = sum(
-            1 for block in page_blocks if _is_suspected_header_footer(block.content)
+            1 for block in content_blocks if _is_suspected_header_footer(block.content)
         )
         numeric_heavy = sum(
-            1 for block in page_blocks if _is_numeric_heavy(block.content)
+            1 for block in content_blocks if _is_numeric_heavy(block.content)
         )
         long_blocks = sum(1 for length in lengths if length >= _LONG_BLOCK_LEN)
 
@@ -213,7 +230,7 @@ def evaluate_blocks(blocks: Iterable[Block]) -> StructuralQualityReport:
         pages.append(
             PageQuality(
                 page_number=page_number,
-                block_count=len(page_blocks),
+                block_count=len(content_blocks),
                 median_length=float(statistics.median(lengths)) if lengths else 0.0,
                 very_short_ratio=(very_short / len(lengths)) if lengths else 0.0,
                 suspected_header_footer=header_footer,
@@ -222,7 +239,7 @@ def evaluate_blocks(blocks: Iterable[Block]) -> StructuralQualityReport:
             )
         )
 
-    total = len(blocks_list)
+    total = sum(1 for block in blocks_list if not _is_non_content_audit_block(block))
     median_length = float(statistics.median(all_lengths)) if all_lengths else 0.0
     very_short_ratio = (very_short_total / total) if total else 0.0
 

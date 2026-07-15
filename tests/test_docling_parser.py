@@ -10,7 +10,7 @@ from unittest.mock import patch
 from parsecore.api_payloads import _document_projection
 from parsecore.bootstrap import build_runtime
 from parsecore.models import BlockType, ParseRequest, SemanticRole
-from parsecore.parsers import build_parser
+from parsecore.parsers import _build_docling_converter, build_parser
 from tests.support import TemporaryWorkspace
 
 
@@ -85,6 +85,116 @@ def _install_fake_docling(converter_cls: type[object]) -> dict[str, ModuleType]:
 
 
 class DoclingParserTests(unittest.TestCase):
+    def test_reuse_converter_defaults_off(self) -> None:
+        parser = build_parser(
+            "docling-local",
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+        )
+        self.assertFalse(parser._reuse_converter)
+
+    def test_pipeline_options_are_explicit_and_candidate_only(self) -> None:
+        class FakePipelineOptions:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        class FakePdfFormatOption:
+            def __init__(self, *, pipeline_options: object) -> None:
+                self.pipeline_options = pipeline_options
+
+        class FakeConverter:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        base_models = ModuleType("docling.datamodel.base_models")
+        base_models.InputFormat = SimpleNamespace(PDF="pdf")
+        pipeline_options = ModuleType("docling.datamodel.pipeline_options")
+        pipeline_options.ThreadedPdfPipelineOptions = FakePipelineOptions
+        converter_module = ModuleType("docling.document_converter")
+        converter_module.PdfFormatOption = FakePdfFormatOption
+        fake_modules = {
+            "docling.datamodel.base_models": base_models,
+            "docling.datamodel.pipeline_options": pipeline_options,
+            "docling.document_converter": converter_module,
+        }
+        converter_module.PdfFormatOption = FakePdfFormatOption
+        with patch.dict(sys.modules, fake_modules):
+            converter = _build_docling_converter(
+                FakeConverter,
+                pipeline_options={
+                    "do_ocr": False,
+                    "do_table_structure": False,
+                    "force_backend_text": True,
+                    "layout_batch_size": 1,
+                },
+            )
+
+        format_option = converter.kwargs["format_options"]["pdf"]
+        self.assertEqual(
+            format_option.pipeline_options.kwargs,
+            {
+                "do_ocr": False,
+                "do_table_structure": False,
+                "force_backend_text": True,
+                "layout_batch_size": 1,
+            },
+        )
+
+    def test_reuse_converter_is_explicit_and_reuses_one_instance(self) -> None:
+        instances: list[object] = []
+
+        class FakeDocumentConverter:
+            def __init__(self) -> None:
+                instances.append(self)
+
+            def convert(self, file_path: str, **kwargs: object) -> object:
+                return SimpleNamespace(
+                    document=_FakeDoclingDocument(
+                        [_FakeDoclingPage(1, f"Parsed {Path(file_path).name}")]
+                    )
+                )
+
+        fake_modules = _install_fake_docling(FakeDocumentConverter)
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, fake_modules):
+            first = Path(tmp) / "first.docx"
+            second = Path(tmp) / "second.docx"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            parser = build_parser(
+                "docling-local",
+                media_types=[
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ],
+                extensions=[".docx"],
+                options={"reuse_converter": True},
+            )
+            first_blocks = tuple(
+                parser.parse(
+                    ParseRequest(
+                        doc_id="doc-first",
+                        file_path=str(first),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                )
+            )
+            second_blocks = tuple(
+                parser.parse(
+                    ParseRequest(
+                        doc_id="doc-second",
+                        file_path=str(second),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                )
+            )
+
+        self.assertEqual(len(instances), 1)
+        self.assertIn("Parsed first.docx", "\n".join(block.content for block in first_blocks))
+        self.assertIn("Parsed second.docx", "\n".join(block.content for block in second_blocks))
+        self.assertFalse(first_blocks[0].metadata["converter_cache_hit"])
+        self.assertTrue(first_blocks[0].metadata["converter_reuse_enabled"])
+        self.assertTrue(second_blocks[0].metadata["converter_cache_hit"])
+        self.assertTrue(second_blocks[0].metadata["converter_reuse_enabled"])
+
     def test_parser_converts_docling_pages_to_blocks_and_tables(self) -> None:
         calls: list[dict[str, object]] = []
 

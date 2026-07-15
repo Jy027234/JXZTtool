@@ -1,0 +1,58 @@
+{
+  "schema_version": "2026-07-p0-quality-sample-set",
+  "description": "Portable P0 read-only audit sample set. Resolve file_name entries under --sample-root.",
+  "samples": [
+    {
+      "id": "ordinary-pdf",
+      "category": "ordinary_pdf",
+      "file_name": "36d65cd6b61346e28e97dbaf829646de.pdf",
+      "page_start": 1,
+      "page_end": 5,
+      "profile": "auto"
+    },
+    {
+      "id": "table-heavy-pdf",
+      "category": "table_heavy_pdf",
+      "file_name": "25-51-06.pdf",
+      "page_start": 1,
+      "page_end": 10,
+      "profile": "table-heavy"
+    },
+    {
+      "id": "multi-column-pdf",
+      "category": "multi_column_pdf",
+      "file_name": "飞行运行手册第二版R2(2021-04-06）.pdf",
+      "page_start": 1,
+      "page_end": 5,
+      "profile": "auto"
+    },
+    {
+      "id": "scan-ocr-pdf",
+      "category": "scan_or_ocr_pdf",
+      "file_name": "CMM 32-48-21 R3 TR32-1~2 (C20780000) A320NEO Carbon Brake 2024-9-17.pdf",
+      "page_start": 1,
+      "page_end": 3,
+      "profile": "scan-pdf"
+    },
+    {
+      "id": "figure-manual-pdf",
+      "category": "figure_or_manual_pdf",
+      "file_name": "SAP操作指南.pdf",
+      "page_start": 1,
+      "page_end": 5,
+      "profile": "auto"
+    },
+    {
+      "id": "docx-manual",
+      "category": "docx_manual",
+      "file_name": "上海凯奔-维修管理手册第五-3版(2).docx",
+      "profile": "auto"
+    },
+    {
+      "id": "excel-ledger",
+      "category": "excel_ledger",
+      "file_name": "金鹿维修管理系统升级开发计划控制表-0421.xlsx",
+      "profile": "ledger"
+    }
+  ]
+}

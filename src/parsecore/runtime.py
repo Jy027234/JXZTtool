@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from math import sqrt
+from math import isfinite, sqrt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -14,14 +15,17 @@ from .config import (
     local_provider_route_plan_payload,
     quality_gate_payload,
 )
-from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
-from .events import JobEventLogger
+from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, RerankProvider, TranslationAdapter
+from .events import JobEventLogger, ParseStageTimer
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
 from .ocr_trace import build_ocr_decision_trace
 from .payload_schemas import payload_schema_registry
 from .pdf_parts import child_doc_id, create_pdf_part_file, create_pdf_part_files, detect_pdf_page_count, plan_pdf_parts
 from .pipelines import ParsedDocumentArtifact, PipelineRegistry
 from .profiles import describe_parse_profiles
+from .provider_failures import PROVIDER_FAILURE_CATEGORIES, classify_provider_failure
+from .private_files import ensure_private_directory
+from .quality import evaluate_parse_quality
 
 
 _PDF_PARENT_JOB_KIND = "pdf_parent"
@@ -70,6 +74,37 @@ _NON_INDEXABLE_RAG_ROLES = {
 _LOCAL_PROVIDER_ROUTING_OPTION = "local_provider_routing"
 _LOCAL_PROVIDER_ROUTE_REQUEST_OPTION = "local_provider_route_request"
 _PART_RERUN_PREVIOUS_OBSERVATION_OPTION = "rerun_previous_part_observation"
+_QUALITY_GATE_VALUES = {
+    "disabled",
+    "accept",
+    "accept_with_warning",
+    "local_rerun",
+    "manual_review",
+}
+_QUALITY_GATE_FLAG_VALUES = {
+    "text_page_coverage_below_threshold",
+    "table_unit_coverage_below_threshold",
+    "unit_chunk_coverage_below_threshold",
+    "reading_order_confidence_below_threshold",
+    "rag_empty_text_page",
+    "rag_units_without_chunks",
+    "rag_chunks_not_embedded",
+    "rag_table_without_unit",
+    "rag_figure_caption_missing",
+}
+_QUALITY_SUMMARY_METRICS = {
+    "quality_score": "parse_document_quality_score",
+    "text_page_coverage_ratio": "parse_document_text_page_coverage_ratio",
+    "table_unit_coverage_ratio": "parse_document_table_unit_coverage_ratio",
+    "unit_chunk_coverage_ratio": "parse_document_unit_chunk_coverage_ratio",
+    "embedded_chunk_ratio": "parse_document_embedded_chunk_ratio",
+    "quality_signal_count": "parse_document_quality_signal_count",
+    "provider_warning_count": "parse_document_provider_warning_count",
+}
+
+
+def _prometheus_label_value(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
 class QuotaExceededError(RuntimeError):
@@ -104,6 +139,11 @@ class EventAggregator:
         self.max_ringbuffer_size = max_ringbuffer_size
         self.ringbuffer: list[dict[str, Any]] = []
         self.counters: dict[tuple[str, str, str], int] = {}  # (tenant_id, quota_key, event_type) -> count
+        self.provider_failure_counters: dict[tuple[str, str, str], int] = {}
+        self.quality_gate_counters: dict[str, int] = {}
+        self.quality_flag_counters: dict[str, int] = {}
+        self.quality_metric_sums: dict[str, float] = {}
+        self.quality_metric_counts: dict[str, int] = {}
 
     def record_event(
         self,
@@ -125,8 +165,34 @@ class EventAggregator:
         }
         if doc_id is not None:
             event["doc_id"] = doc_id
-        if details:
-            event.update(details)
+        event_details = dict(details or {})
+        if event_type == "provider_failure":
+            event_details["provider_type"] = str(event_details.get("provider_type") or "unknown")
+            event_details["provider_id"] = str(event_details.get("provider_id") or "unknown")
+            failure_category = str(event_details.get("failure_category") or "provider_failed")
+            event_details["failure_category"] = (
+                failure_category
+                if failure_category in PROVIDER_FAILURE_CATEGORIES
+                else "provider_failed"
+            )
+        elif event_type == "document_quality":
+            quality_gate = str(event_details.get("quality_gate") or "other")
+            event_details["quality_gate"] = (
+                quality_gate if quality_gate in _QUALITY_GATE_VALUES else "other"
+            )
+            raw_flags = event_details.get("quality_flags")
+            event_details["quality_flags"] = sorted(
+                {
+                    flag if flag in _QUALITY_GATE_FLAG_VALUES else "other"
+                    for flag in (
+                        str(item)
+                        for item in (raw_flags if isinstance(raw_flags, (list, tuple, set)) else ())
+                    )
+                    if flag
+                }
+            )
+        if event_details:
+            event.update(event_details)
 
         # Add to ringbuffer (FIFO with max size)
         self.ringbuffer.append(event)
@@ -136,6 +202,28 @@ class EventAggregator:
         # Update counters
         key = (tenant_id, quota_key, event_type)
         self.counters[key] = self.counters.get(key, 0) + max(1, int(count))
+        if event_type == "provider_failure":
+            provider_type = event_details["provider_type"]
+            provider_id = event_details["provider_id"]
+            failure_category = event_details["failure_category"]
+            provider_key = (provider_type, provider_id, failure_category)
+            self.provider_failure_counters[provider_key] = (
+                self.provider_failure_counters.get(provider_key, 0) + max(1, int(count))
+            )
+        elif event_type == "document_quality":
+            quality_gate = event_details["quality_gate"]
+            self.quality_gate_counters[quality_gate] = self.quality_gate_counters.get(quality_gate, 0) + 1
+            for flag in event_details["quality_flags"]:
+                self.quality_flag_counters[flag] = self.quality_flag_counters.get(flag, 0) + 1
+            for metric_key in _QUALITY_SUMMARY_METRICS:
+                raw_value = event_details.get(metric_key)
+                if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                    continue
+                value = float(raw_value)
+                if not isfinite(value):
+                    continue
+                self.quality_metric_sums[metric_key] = self.quality_metric_sums.get(metric_key, 0.0) + value
+                self.quality_metric_counts[metric_key] = self.quality_metric_counts.get(metric_key, 0) + 1
 
     def get_events(
         self,
@@ -209,6 +297,45 @@ class EventAggregator:
                 lines.append(
                     f'parse_embedding_skipped_total{{tenant_id="{tenant_id}",quota_key="{quota_key}"}} {count}'
                 )
+
+        lines.extend([
+            "# HELP parse_provider_failure_total Total terminal provider failures by stable category",
+            "# TYPE parse_provider_failure_total counter",
+        ])
+        for (provider_type, provider_id, failure_category), count in self.provider_failure_counters.items():
+            lines.append(
+                "parse_provider_failure_total{"
+                f'provider_type="{_prometheus_label_value(provider_type)}",'
+                f'provider_id="{_prometheus_label_value(provider_id)}",'
+                f'failure_category="{_prometheus_label_value(failure_category)}"'
+                f"}} {count}"
+            )
+
+        lines.extend([
+            "# HELP parse_document_quality_total Total completed document quality observations by gate",
+            "# TYPE parse_document_quality_total counter",
+        ])
+        for quality_gate, count in sorted(self.quality_gate_counters.items()):
+            lines.append(
+                f'parse_document_quality_total{{gate="{_prometheus_label_value(quality_gate)}"}} {count}'
+            )
+
+        lines.extend([
+            "# HELP parse_document_quality_flag_total Total document quality gate flags",
+            "# TYPE parse_document_quality_flag_total counter",
+        ])
+        for flag, count in sorted(self.quality_flag_counters.items()):
+            lines.append(
+                f'parse_document_quality_flag_total{{flag="{_prometheus_label_value(flag)}"}} {count}'
+            )
+
+        for metric_key, metric_name in _QUALITY_SUMMARY_METRICS.items():
+            lines.extend([
+                f"# HELP {metric_name} Distribution summary for {metric_key}",
+                f"# TYPE {metric_name} summary",
+                f"{metric_name}_sum {self.quality_metric_sums.get(metric_key, 0.0):.6f}",
+                f"{metric_name}_count {self.quality_metric_counts.get(metric_key, 0)}",
+            ])
 
         lines.extend([
             "# HELP parse_ocr_attempt_total Total pages where OCR was attempted",
@@ -293,11 +420,13 @@ class ParseRuntime:
         job_store: JobStore,
         event_logger: JobEventLogger | None = None,
         pipeline_registry: PipelineRegistry | None = None,
+        rerank_provider: RerankProvider | None = None,
     ) -> None:
         self.settings = settings
         self.parsers = tuple(parsers)
         self.chunk_builder = chunk_builder
         self.embedding_provider = embedding_provider
+        self.rerank_provider = rerank_provider
         self.index = index
         self.translator = translator
         self.product_adapter = product_adapter
@@ -306,6 +435,15 @@ class ParseRuntime:
         self.event_aggregator = EventAggregator(max_ringbuffer_size=1000)
         self.pipeline_registry = pipeline_registry
         self._search_layer_query_hits: dict[tuple[str, str], list[int]] = {}
+        # Part jobs are created and executed by this runtime instance. Keep a
+        # parent-scoped latest-child map so every completed part does not scan
+        # the entire tenant job table just to refresh the parent manifest. Queue
+        # workers keep this disabled because another worker may update a child
+        # job between refreshes; those workers must read the job store instead.
+        self._pdf_part_jobs_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def _pdf_part_cache_enabled(self) -> bool:
+        return str(self.settings.runtime.execution_mode or "inline").strip().lower() == "inline"
 
     def describe(self) -> dict[str, object]:
         description: dict[str, object] = {
@@ -314,6 +452,7 @@ class ParseRuntime:
             "database_url": self.settings.database_url,
             "object_store": self.settings.object_store,
             "index_mode": self.settings.index_mode,
+            "index_embedding_dimension": self.settings.index_embedding_dimension,
             "runtime": {
                 "execution_mode": self.settings.runtime.execution_mode,
                 "max_workers": self.settings.runtime.max_workers,
@@ -338,6 +477,12 @@ class ParseRuntime:
                 "enabled": self.settings.providers.embedding.enabled,
                 "provider": self.settings.providers.embedding.provider,
                 "model": self.settings.providers.embedding.model,
+            },
+            "rerank": {
+                "enabled": self.settings.providers.rerank.enabled,
+                "provider": self.settings.providers.rerank.provider,
+                "model": self.settings.providers.rerank.model,
+                "candidate_limit": self.settings.providers.rerank.candidate_limit,
             },
             "product_adapter": self.settings.product_adapter,
             "parsers": [parser.name for parser in self.parsers],
@@ -425,6 +570,13 @@ class ParseRuntime:
         )
         request, job = self._prepare_request_for_execution(request=request, job=job)
         started_at = time.monotonic()
+        stage_timer = ParseStageTimer(
+            self.event_logger,
+            job_id=job.job_id,
+            doc_id=job.doc_id,
+            part_id=str(job.options.get("part_id") or "") or None,
+            tenant_id=job.tenant_id,
+        )
         self.event_logger.log(
             "started",
             job_id=job.job_id,
@@ -445,17 +597,21 @@ class ParseRuntime:
                     doc_id=job.doc_id,
                     state=ParseJobState.PARSING.value,
                 )
-            blocks = self._load_blocks_for_request(request)
-            if _is_pdf_part_request(request):
-                blocks = self._normalize_pdf_part_blocks(request=request, blocks=blocks)
-            self._record_ocr_observability(request=request, blocks=blocks)
+            with stage_timer.stage("parse"):
+                if _is_pdf_part_request(request):
+                    self._ensure_pdf_part_file(request)
+                blocks = self._load_blocks_for_request(request)
+                if _is_pdf_part_request(request):
+                    blocks = self._normalize_pdf_part_blocks(request=request, blocks=blocks)
+                self._record_ocr_observability(request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request):
-                self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
-                self.job_store.save_blocks(
-                    doc_id=request.doc_id,
-                    blocks=blocks,
-                    tenant_id=request.tenant_id,
-                )
+                with stage_timer.stage("persist_blocks"):
+                    self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
+                    self.job_store.save_blocks(
+                        doc_id=request.doc_id,
+                        blocks=blocks,
+                        tenant_id=request.tenant_id,
+                    )
             self._update_job_state(
                 job_id=job.job_id,
                 state=ParseJobState.STRUCTURING,
@@ -468,8 +624,10 @@ class ParseRuntime:
                 state=ParseJobState.STRUCTURING.value,
             )
 
-            document = self._load_document_for_request(request, blocks=blocks)
-            chunks = tuple(self._load_chunks_for_request(request, blocks=blocks, document=document))
+            with stage_timer.stage("normalize_ir"):
+                document = self._load_document_for_request(request, blocks=blocks)
+            with stage_timer.stage("chunk"):
+                chunks = tuple(self._load_chunks_for_request(request, blocks=blocks, document=document))
             self._update_job_state(
                 job_id=job.job_id,
                 state=ParseJobState.EMBEDDING,
@@ -481,45 +639,80 @@ class ParseRuntime:
                 doc_id=job.doc_id,
                 state=ParseJobState.EMBEDDING.value,
             )
-            chunks = tuple(self._embed_chunks(doc_id=request.doc_id, chunks=chunks))
-            if _is_pdf_part_request(request):
-                chunks = self._normalize_pdf_part_chunks(request=request, chunks=chunks)
-
-            index_manifest = self._build_index_manifest(
-                request=request,
-                job_id=job.job_id,
-                document=document,
-                chunks=chunks,
-            )
-            self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
-            self.job_store.save_chunks(
-                doc_id=request.doc_id,
-                chunks=chunks,
-                tenant_id=request.tenant_id,
-            )
-            self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
-            self.index.upsert(
-                doc_id=request.doc_id,
-                chunks=chunks,
-                tenant_id=request.tenant_id,
-                document=document,
-                index_manifest=index_manifest,
-            )
-            final_job = self._update_job_state(
-                job_id=job.job_id,
-                state=ParseJobState.DONE,
-                claim_token=claim_token,
-                clear_claim=True,
-            )
-            outcome = ParseOutcome(job=final_job, blocks=blocks, chunks=chunks)
-            self._persist_document_views(job=final_job, blocks=blocks)
-            if _is_pdf_part_request(request):
-                self.refresh_partitioned_parent(
-                    doc_id=str(request.options.get("source_doc_id") or request.options.get("parent_doc_id") or ""),
-                    tenant_id=request.tenant_id,
-                    parent_job_id=str(request.options.get("parent_job_id") or ""),
-                    changed_part_ids=[str(request.options.get("part_id") or request.doc_id)],
+            with stage_timer.stage("embed"):
+                chunks = tuple(
+                    self._embed_chunks(
+                        doc_id=request.doc_id,
+                        chunks=chunks,
+                        tenant_id=request.tenant_id,
+                        quota_key=request.quota_key,
+                    )
                 )
+                if _is_pdf_part_request(request):
+                    chunks = self._normalize_pdf_part_chunks(request=request, chunks=chunks)
+
+            with stage_timer.stage("persist_index"):
+                index_manifest = self._build_index_manifest(
+                    request=request,
+                    job_id=job.job_id,
+                    document=document,
+                    chunks=chunks,
+                )
+                self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
+                self.job_store.save_chunks(
+                    doc_id=request.doc_id,
+                    chunks=chunks,
+                    tenant_id=request.tenant_id,
+                )
+                self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
+                self.index.upsert(
+                    doc_id=request.doc_id,
+                    chunks=chunks,
+                    tenant_id=request.tenant_id,
+                    document=document,
+                    index_manifest=index_manifest,
+                )
+                final_job = self._update_job_state(
+                    job_id=job.job_id,
+                    state=ParseJobState.DONE,
+                    claim_token=claim_token,
+                    clear_claim=True,
+                )
+                self._remember_pdf_part_job(final_job)
+                self._persist_document_views(job=final_job, blocks=blocks)
+                completed_parent_job = None
+                if _is_pdf_part_request(request):
+                    refreshed_parent = self.refresh_partitioned_parent(
+                        doc_id=str(request.options.get("source_doc_id") or request.options.get("parent_doc_id") or ""),
+                        tenant_id=request.tenant_id,
+                        parent_job_id=str(request.options.get("parent_job_id") or ""),
+                        changed_part_ids=[str(request.options.get("part_id") or request.doc_id)],
+                    )
+                    if getattr(refreshed_parent, "state", None) == ParseJobState.DONE:
+                        completed_parent_job = refreshed_parent
+            with stage_timer.stage("quality_observability"):
+                self._record_document_quality_observability(
+                    job=final_job,
+                    blocks=blocks,
+                    index_manifest=index_manifest,
+                )
+                if completed_parent_job is not None:
+                    self._record_document_quality_observability(job=completed_parent_job)
+            stage_timings = stage_timer.elapsed
+            # Saving blocks happens before normalization to preserve the
+            # existing failure semantics.  The aggregate is the end-to-end
+            # persistence/index phase used by performance tooling.
+            stage_timings["persist_index"] = round(
+                stage_timings.get("persist_blocks", 0.0)
+                + stage_timings.get("persist_index", 0.0),
+                4,
+            )
+            outcome = ParseOutcome(
+                job=final_job,
+                blocks=blocks,
+                chunks=chunks,
+                stage_timings=stage_timings,
+            )
             self.event_logger.log(
                 "completed",
                 job_id=job.job_id,
@@ -577,6 +770,7 @@ class ParseRuntime:
                         error=str(exc),
                     )
             if _job_kind(job) == _PDF_PART_JOB_KIND:
+                self._remember_pdf_part_job(failed_job)
                 self.refresh_partitioned_parent(
                     doc_id=str(job.options.get("source_doc_id") or job.options.get("parent_doc_id") or ""),
                     tenant_id=job.tenant_id,
@@ -628,6 +822,7 @@ class ParseRuntime:
                         error=str(exc),
                     )
             if _job_kind(job) == _PDF_PART_JOB_KIND:
+                self._remember_pdf_part_job(failed_job)
                 self.refresh_partitioned_parent(
                     doc_id=str(job.options.get("source_doc_id") or job.options.get("parent_doc_id") or ""),
                     tenant_id=job.tenant_id,
@@ -753,6 +948,7 @@ class ParseRuntime:
         replace_document_views = getattr(self.job_store, "replace_document_views_by_prefix", None)
         if replace_prefix and not callable(replace_document_views):
             return False
+
         if not replace_prefix and not callable(save_document_views):
             return False
         try:
@@ -799,6 +995,46 @@ class ParseRuntime:
                 details={"error": str(exc)},
             )
             return False
+
+    def _record_document_quality_observability(
+        self,
+        *,
+        job: Any,
+        blocks: Sequence[Any] | None = None,
+        index_manifest: Mapping[str, Any] | None = None,
+    ) -> None:
+        try:
+            doc_id = str(getattr(job, "doc_id", "") or "")
+            tenant_id = str(getattr(job, "tenant_id", "default") or "default")
+            observation_blocks = tuple(blocks or ())
+            observation_manifest = index_manifest
+            if blocks is None or index_manifest is None:
+                snapshot = self.get_document(doc_id=doc_id, tenant_id=tenant_id)
+                observation_blocks = tuple(snapshot.get("blocks") or ())
+                raw_manifest = snapshot.get("index_manifest")
+                observation_manifest = raw_manifest if isinstance(raw_manifest, Mapping) else {}
+            details = _runtime_document_quality_observation(
+                settings=self.settings,
+                blocks=observation_blocks,
+                index_manifest=observation_manifest or {},
+            )
+            self.event_aggregator.record_event(
+                "document_quality",
+                tenant_id=tenant_id,
+                quota_key=str(getattr(job, "quota_key", "default") or "default"),
+                doc_id=doc_id,
+                details={
+                    "job_id": str(getattr(job, "job_id", "") or ""),
+                    **details,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - quality telemetry must not fail parsing
+            self.event_logger.log(
+                "document_quality_observability_failed",
+                job_id=str(getattr(job, "job_id", "") or ""),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                error_type=type(exc).__name__,
+            )
 
     def get_job(self, *, job_id: str):
         return self.job_store.get_job(job_id=job_id)
@@ -994,6 +1230,7 @@ class ParseRuntime:
         ocr_heavy_pages_per_part: int | None = None,
         max_active_parts_per_doc: int | None = None,
         profile: str | None = None,
+        materialize_part_files: bool = True,
     ) -> dict[str, Any]:
         source_job = self._resolve_latest_non_partition_job(doc_id=doc_id, tenant_id=tenant_id)
         if source_job is None:
@@ -1068,7 +1305,14 @@ class ParseRuntime:
                     "page_end": spec.get("page_end"),
                 }
             )
-        create_pdf_part_files(source_job.file_path, part_file_specs)
+        if materialize_part_files:
+            for part_file_spec in part_file_specs:
+                target = Path(str(part_file_spec["target_path"]))
+                ensure_private_directory(
+                    target.parent,
+                    allowed_root=self._pdf_parts_root(source_path=source_job.file_path),
+                )
+            create_pdf_part_files(source_job.file_path, part_file_specs)
 
         part_jobs = []
         for spec in part_specs:
@@ -1079,7 +1323,7 @@ class ParseRuntime:
                     spec=spec,
                     profile=effective_profile,
                     max_active_parts_per_doc=max_active_parts_per_doc,
-                    create_part_file=False,
+                    create_part_file=materialize_part_files,
                 )
             )
         parent_job = self.refresh_partitioned_parent(
@@ -1225,6 +1469,7 @@ class ParseRuntime:
             doc_id=doc_id,
             tenant_id=parent_job.tenant_id,
             parent_job_id=parent_job.job_id,
+            refresh=True,
         ):
             if str((job.options or {}).get("part_id") or "") == str(part_id):
                 child_job = job
@@ -1241,6 +1486,7 @@ class ParseRuntime:
                 failure_reason="cancelled",
                 clear_claim=True,
             )
+            self._remember_pdf_part_job(job)
             cancelled = True
             self.refresh_partitioned_parent(
                 doc_id=doc_id,
@@ -1271,6 +1517,7 @@ class ParseRuntime:
             doc_id=doc_id,
             tenant_id=parent_job.tenant_id,
             parent_job_id=parent_job.job_id,
+            refresh=True,
         ):
             if str((job.options or {}).get("part_id") or "") == str(part_id):
                 return job
@@ -1295,6 +1542,7 @@ class ParseRuntime:
             doc_id=doc_id,
             tenant_id=parent_job.tenant_id,
             parent_job_id=parent_job.job_id,
+            refresh=True,
         )
         child_by_part_id = {
             str(job.options.get("part_id") or ""): job
@@ -1457,7 +1705,7 @@ class ParseRuntime:
             str((getattr(job, "options", {}) or {}).get("part_id") or job.doc_id): job
             for job in child_jobs
         }
-        replaced: list[tuple[str, tuple[Chunk, ...]]] = []
+        replaced: list[tuple[str, tuple[Any, ...], tuple[Chunk, ...]]] = []
         replace_blocks = getattr(self.job_store, "replace_blocks_by_prefix", None)
         replace_chunks = getattr(self.job_store, "replace_chunks_by_prefix", None)
         if not callable(replace_blocks) or not callable(replace_chunks):
@@ -1512,21 +1760,27 @@ class ParseRuntime:
                 self._persist_document_views(job=parent_job, blocks=blocks, replace_prefix=prefix)
                 and views_updated_all
             )
-            replaced.append((prefix, chunks))
+            replaced.append((prefix, blocks, chunks))
 
         if not replaced:
             return False, False
 
-        all_blocks = tuple(self.job_store.get_blocks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
-        all_chunks = tuple(self.job_store.get_chunks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
-        index_manifest = self._derive_index_manifest_from_snapshot(
-            job=parent_job,
-            blocks=all_blocks,
-            chunks=all_chunks,
+        index_manifest = self._incremental_partition_index_manifest(
+            parent_job=parent_job,
+            child_jobs=child_jobs,
+            changed_artifacts=replaced,
         )
+        if index_manifest is None:
+            all_blocks = tuple(self.job_store.get_blocks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
+            all_chunks = tuple(self.job_store.get_chunks(doc_id=parent_doc_id, tenant_id=parent_job.tenant_id))
+            index_manifest = self._derive_index_manifest_from_snapshot(
+                job=parent_job,
+                blocks=all_blocks,
+                chunks=all_chunks,
+            )
         replace_index = getattr(self.index, "replace_chunks_by_prefix", None)
         if callable(replace_index):
-            for prefix, chunks in replaced:
+            for prefix, _blocks, chunks in replaced:
                 replace_index(
                     doc_id=parent_doc_id,
                     chunks=chunks,
@@ -1544,6 +1798,147 @@ class ParseRuntime:
                 index_manifest=index_manifest,
             )
         return True, views_updated_all
+
+    def _incremental_partition_index_manifest(
+        self,
+        *,
+        parent_job: Any,
+        child_jobs: Sequence[Any],
+        changed_artifacts: Sequence[tuple[str, Sequence[Any], Sequence[Chunk]]],
+    ) -> dict[str, Any] | None:
+        """Update the parent index manifest without rereading all merged artifacts.
+
+        Prefix replacement already writes only the changed part's blocks/chunks.
+        Rebuilding a manifest from the full parent snapshot after every part made
+        large PDF execution quadratic in the number of completed parts.  The
+        manifest contains per-part counts and chunk IDs, so those values can be
+        updated from the changed part while retaining the prior manifest.
+        """
+
+        describe_document = getattr(self.index, "describe_document", None)
+        if not callable(describe_document):
+            return None
+        try:
+            existing = describe_document(doc_id=parent_job.doc_id, tenant_id=parent_job.tenant_id)
+        except Exception:
+            return None
+        if isinstance(existing, Mapping):
+            manifest = deepcopy(dict(existing))
+        else:
+            manifest = self._derive_index_manifest_from_snapshot(
+                job=parent_job,
+                blocks=(),
+                chunks=(),
+            )
+
+        base_part_index = self._partition_index_manifest(
+            parent_job=parent_job,
+            blocks=(),
+            chunks=(),
+        )
+        existing_part_index = manifest.get("part_index") if isinstance(manifest, Mapping) else None
+        parts_by_id = {
+            str(part.get("part_id") or ""): dict(part)
+            for part in (existing_part_index.get("parts", []) if isinstance(existing_part_index, Mapping) else ())
+            if isinstance(part, Mapping) and str(part.get("part_id") or "")
+        }
+        for part in base_part_index.get("parts", []):
+            part_id = str(part.get("part_id") or "")
+            if part_id:
+                if part_id not in parts_by_id:
+                    parts_by_id[part_id] = dict(part)
+                else:
+                    # A rerun creates a replacement child job. Refresh the
+                    # identity/state fields while retaining prior counts until
+                    # the changed part artifacts are written below.
+                    for key in (
+                        "part_doc_id",
+                        "job_id",
+                        "state",
+                        "page_range",
+                        "page_start",
+                        "page_end",
+                        "chunk_id_prefix",
+                        "index_version",
+                    ):
+                        if key in part:
+                            parts_by_id[part_id][key] = part[key]
+        for prefix, blocks, chunks in changed_artifacts:
+            prefix_text = str(prefix)
+            prefix_marker = f"{parent_job.doc_id}:merged:"
+            part_id = (
+                prefix_text[len(prefix_marker) : -1]
+                if prefix_text.startswith(prefix_marker) and prefix_text.endswith(":")
+                else ""
+            )
+            # The prefix is parent:merged:<part_id>:; prefer block metadata
+            # when a custom adapter uses a different delimiter.
+            if blocks:
+                metadata_part_id = str((getattr(blocks[0], "metadata", {}) or {}).get("part_id") or "")
+                if metadata_part_id:
+                    part_id = metadata_part_id
+            part = parts_by_id.get(part_id)
+            if part is None:
+                continue
+            part["chunk_ids"] = [str(chunk.chunk_id) for chunk in chunks if str(chunk.chunk_id)]
+            part["chunk_count"] = len(chunks)
+            part["block_count"] = len(blocks)
+            parts_by_id[part_id] = part
+
+        parts = [
+            parts_by_id[str(part.get("part_id") or "")]
+            for part in base_part_index.get("parts", [])
+            if str(part.get("part_id") or "") in parts_by_id
+        ]
+        manifest["doc_id"] = parent_job.doc_id
+        manifest["tenant_id"] = parent_job.tenant_id
+        manifest["index_version"] = parent_job.job_id
+        manifest["part_index"] = {
+            "strategy": "pdf_part",
+            "parent_job_id": parent_job.job_id,
+            "source_doc_id": parent_job.doc_id,
+            "part_count": len(parts),
+            "indexed_part_count": len([part for part in parts if int(part.get("chunk_count") or 0) > 0]),
+            "parts": parts,
+        }
+
+        layers = [dict(layer) for layer in (manifest.get("layers") or ()) if isinstance(layer, Mapping)]
+        changed_blocks = tuple(block for _prefix, blocks, _chunks in changed_artifacts for block in blocks)
+        changed_chunks = tuple(chunk for _prefix, _blocks, chunks in changed_artifacts for chunk in chunks)
+        for layer in layers:
+            name = str(layer.get("name") or "")
+            if name == "primary":
+                layer["item_count"] = sum(int(part.get("chunk_count") or 0) for part in parts)
+                layer["semantic_roles"] = sorted(
+                    {
+                        *[str(role) for role in tuple(layer.get("semantic_roles") or ()) if str(role)],
+                        *[str(chunk.semantic_role or "paragraph") for chunk in changed_chunks],
+                    }
+                )
+            elif name == "structure":
+                layer["item_count"] = sum(int(part.get("block_count") or 0) for part in parts)
+                layer["semantic_roles"] = sorted(
+                    {
+                        *[str(role) for role in tuple(layer.get("semantic_roles") or ()) if str(role)],
+                        *[
+                            str((getattr(block, "metadata", {}) or {}).get("semantic_role") or "paragraph")
+                            for block in changed_blocks
+                        ],
+                    }
+                )
+            elif name == "high_precision":
+                high_precision_ids = [str(chunk_id) for chunk_id in tuple(layer.get("chunk_ids") or ())]
+                for prefix, _blocks, chunks in changed_artifacts:
+                    high_precision_ids = [
+                        chunk_id for chunk_id in high_precision_ids if not chunk_id.startswith(str(prefix))
+                    ]
+                    high_precision_ids.extend(
+                        str(chunk.chunk_id) for chunk in _select_high_precision_chunks(chunks)
+                    )
+                layer["chunk_ids"] = high_precision_ids
+                layer["item_count"] = len(high_precision_ids)
+        manifest["layers"] = layers
+        return manifest
 
     def _start_pdf_part_job(
         self,
@@ -1568,8 +1963,11 @@ class ParseRuntime:
             parent_job_id=parent_job.job_id,
             part_id=part_id,
         )
-        if create_part_file:
-            part_file.parent.mkdir(parents=True, exist_ok=True)
+        if create_part_file and not part_file.exists():
+            ensure_private_directory(
+                part_file.parent,
+                allowed_root=self._pdf_parts_root(source_path=source_job.file_path),
+            )
             create_pdf_part_file(source_job.file_path, str(part_file), page_start, page_end)
         options = dict(source_job.options)
         options.pop(_LOCAL_PROVIDER_ROUTING_OPTION, None)
@@ -1598,7 +1996,7 @@ class ParseRuntime:
             options[_LOCAL_PROVIDER_ROUTE_REQUEST_OPTION] = dict(provider_route_request)
         if previous_part_observation:
             options[_PART_RERUN_PREVIOUS_OBSERVATION_OPTION] = _runtime_json_safe_mapping(previous_part_observation)
-        return self.start(
+        part_job = self.start(
             ParseRequest(
                 doc_id=part_doc_id,
                 file_path=str(part_file),
@@ -1609,6 +2007,30 @@ class ParseRuntime:
                 quota_units=source_job.quota_units,
             )
         )
+        self._remember_pdf_part_job(part_job)
+        return part_job
+
+    def _ensure_pdf_part_file(self, request: ParseRequest) -> None:
+        """Materialize a deferred PDF part immediately before execution."""
+        target = Path(request.file_path)
+        if target.exists():
+            return
+        options = request.options if isinstance(request.options, Mapping) else {}
+        source_job_id = str(options.get("source_job_id") or "").strip()
+        source_job = self.job_store.get_job(job_id=source_job_id) if source_job_id else None
+        source_path = str(getattr(source_job, "file_path", "") or "").strip()
+        page_start = _safe_int_runtime(options.get("page_start"), default=0)
+        page_end = _safe_int_runtime(options.get("page_end"), default=0)
+        if not source_path or page_start <= 0 or page_end < page_start:
+            return
+        ensure_private_directory(
+            target.parent,
+            allowed_root=self._pdf_parts_root(source_path=source_path),
+        )
+        create_pdf_part_file(source_path, str(target), page_start, page_end)
+
+    def _pdf_parts_root(self, *, source_path: str) -> Path:
+        return Path(source_path).parent / "_parsecore_parts"
 
     def _pdf_part_file_path(
         self,
@@ -1618,8 +2040,7 @@ class ParseRuntime:
         parent_job_id: str,
         part_id: str,
     ) -> Path:
-        source = Path(source_path)
-        return source.parent / "_parsecore_parts" / _safe_path_segment(parent_doc_id) / parent_job_id / f"{_safe_path_segment(part_id)}.pdf"
+        return self._pdf_parts_root(source_path=source_path) / _safe_path_segment(parent_doc_id) / parent_job_id / f"{_safe_path_segment(part_id)}.pdf"
 
     def _latest_partition_parent_job(self, *, doc_id: str, tenant_id: str | None = None):
         for job in self.list_jobs(doc_id=doc_id, tenant_id=tenant_id):
@@ -1639,7 +2060,21 @@ class ParseRuntime:
         doc_id: str,
         tenant_id: str | None,
         parent_job_id: str | None,
+        refresh: bool = False,
     ) -> tuple[Any, ...]:
+        normalized_tenant = str(tenant_id or "default")
+        cache_key = (str(doc_id), normalized_tenant, str(parent_job_id or ""))
+        if self._pdf_part_cache_enabled() and parent_job_id and not refresh and cache_key in self._pdf_part_jobs_cache:
+            cached = self._pdf_part_jobs_cache[cache_key]
+            return tuple(
+                sorted(
+                    cached.values(),
+                    key=lambda item: _safe_int_runtime(
+                        (getattr(item, "options", {}) or {}).get("part_index"),
+                        default=0,
+                    ),
+                )
+            )
         latest_by_part: dict[str, Any] = {}
         for job in self.list_jobs(tenant_id=tenant_id):
             options = getattr(job, "options", {}) or {}
@@ -1652,12 +2087,29 @@ class ParseRuntime:
             part_id = str(options.get("part_id") or job.doc_id)
             if part_id and part_id not in latest_by_part:
                 latest_by_part[part_id] = job
+        if self._pdf_part_cache_enabled() and parent_job_id:
+            self._pdf_part_jobs_cache[cache_key] = latest_by_part
         return tuple(
             sorted(
                 latest_by_part.values(),
                 key=lambda item: _safe_int_runtime((getattr(item, "options", {}) or {}).get("part_index"), default=0),
             )
         )
+
+    def _remember_pdf_part_job(self, job: Any) -> None:
+        if not self._pdf_part_cache_enabled():
+            return
+        options = getattr(job, "options", {}) or {}
+        if str(options.get("job_kind") or "") != _PDF_PART_JOB_KIND:
+            return
+        source_doc_id = str(options.get("source_doc_id") or options.get("parent_doc_id") or "")
+        parent_job_id = str(options.get("parent_job_id") or "")
+        part_id = str(options.get("part_id") or getattr(job, "doc_id", "") or "")
+        if not source_doc_id or not parent_job_id or not part_id:
+            return
+        tenant_id = str(getattr(job, "tenant_id", None) or "default")
+        cache_key = (source_doc_id, tenant_id, parent_job_id)
+        self._pdf_part_jobs_cache.setdefault(cache_key, {})[part_id] = job
 
     def _current_part_observation(
         self,
@@ -1978,7 +2430,12 @@ class ParseRuntime:
         if not chunks:
             return (), "keyword-fallback"
 
-        query_embedding = self._try_embed_search_query(query=query)
+        query_embedding = self._try_embed_search_query(
+            query=query,
+            doc_id=doc_id,
+            tenant_id=latest_job.tenant_id,
+            quota_key=latest_job.quota_key,
+        )
         retrieval_mode = _resolve_retrieval_mode(
             query_embedding=query_embedding,
             chunks=chunks,
@@ -2008,17 +2465,156 @@ class ParseRuntime:
                     text=chunk.text,
                     semantic_role=role,
                     score=round(score, 4),
+                    retrieval_score=round(score, 4),
                 )
             )
 
         ranked = sorted(scored, key=lambda item: (-item.score, item.chunk_id))
-        result = tuple(ranked[: max(1, int(limit))])
+        result_limit = max(1, int(limit))
+        candidates = tuple(ranked[: self._rerank_candidate_limit(result_limit)])
+        result, rerank_applied = self._rerank_candidates(
+            doc_id=doc_id,
+            tenant_id=latest_job.tenant_id,
+            quota_key=latest_job.quota_key,
+            query=query,
+            candidates=candidates,
+            limit=result_limit,
+        )
+        if rerank_applied:
+            retrieval_mode = f"{retrieval_mode}+rerank"
         self._record_search_effectiveness(
             tenant_id=latest_job.tenant_id,
             layer=requested_layer,
             hit_count=len(result),
         )
         return result, retrieval_mode
+
+    def _rerank_candidate_limit(self, result_limit: int) -> int:
+        settings = self.settings.providers.rerank
+        if not settings.enabled:
+            return result_limit
+        return max(result_limit, int(settings.candidate_limit))
+
+    def _rerank_candidates(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str,
+        quota_key: str,
+        query: str,
+        candidates: Sequence[ChunkSearchHit],
+        limit: int,
+    ) -> tuple[tuple[ChunkSearchHit, ...], bool]:
+        settings = self.settings.providers.rerank
+        fallback = tuple(candidates[:limit])
+        if not settings.enabled or self.rerank_provider is None or not candidates:
+            return fallback, False
+
+        try:
+            raw_scores = self.rerank_provider.rerank(
+                query=query,
+                documents=[candidate.text for candidate in candidates],
+            )
+        except Exception as exc:
+            failure_category = classify_provider_failure(exc)
+            self.event_logger.log(
+                "rerank_skipped",
+                doc_id=doc_id,
+                provider=settings.provider,
+                model=settings.model,
+                error_type=type(exc).__name__,
+                failure_category=failure_category,
+            )
+            self.event_aggregator.record_event(
+                "provider_failure",
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                doc_id=doc_id,
+                details={
+                    "provider_type": "rerank",
+                    "provider_id": settings.provider,
+                    "model": settings.model,
+                    "failure_category": failure_category,
+                    "operation": "rerank",
+                },
+            )
+            return fallback, False
+
+        scores_by_index: dict[int, float] = {}
+        for item in raw_scores:
+            raw_index = getattr(item, "index", None)
+            raw_score = getattr(item, "score", None)
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                continue
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+            index = raw_index
+            if index < 0 or index >= len(candidates) or index in scores_by_index:
+                continue
+            if isfinite(score):
+                scores_by_index[index] = score
+        if not scores_by_index:
+            self.event_logger.log(
+                "rerank_skipped",
+                doc_id=doc_id,
+                provider=settings.provider,
+                model=settings.model,
+                error_type="empty_or_invalid_response",
+                failure_category="invalid_response",
+            )
+            self.event_aggregator.record_event(
+                "provider_failure",
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                doc_id=doc_id,
+                details={
+                    "provider_type": "rerank",
+                    "provider_id": settings.provider,
+                    "model": settings.model,
+                    "failure_category": "invalid_response",
+                    "operation": "rerank",
+                },
+            )
+            return fallback, False
+
+        ranked_pairs = sorted(
+            enumerate(candidates),
+            key=lambda pair: (
+                pair[0] not in scores_by_index,
+                -scores_by_index[pair[0]] if pair[0] in scores_by_index else 0.0,
+                -(pair[1].retrieval_score if pair[1].retrieval_score is not None else pair[1].score),
+                pair[1].chunk_id,
+            ),
+        )
+        reranked: list[ChunkSearchHit] = []
+        for index, candidate in ranked_pairs:
+            rerank_score = scores_by_index.get(index)
+            if rerank_score is None:
+                reranked.append(candidate)
+                continue
+            reranked.append(
+                replace(
+                    candidate,
+                    score=round(rerank_score, 4),
+                    retrieval_score=(
+                        candidate.retrieval_score
+                        if candidate.retrieval_score is not None
+                        else candidate.score
+                    ),
+                    rerank_score=round(rerank_score, 4),
+                )
+            )
+        self.event_logger.log(
+            "rerank_applied",
+            doc_id=doc_id,
+            provider=settings.provider,
+            model=settings.model,
+            candidate_count=len(candidates),
+            scored_candidate_count=len(scores_by_index),
+        )
+        return tuple(reranked[:limit]), True
 
     def _record_search_effectiveness(self, *, tenant_id: str | None, layer: str, hit_count: int) -> None:
         normalized_tenant = str(tenant_id or "default").strip() or "default"
@@ -2162,7 +2758,14 @@ class ParseRuntime:
         )
         return task_hits[: max(1, int(limit))], mode
 
-    def _try_embed_search_query(self, *, query: str) -> tuple[float, ...] | None:
+    def _try_embed_search_query(
+        self,
+        *,
+        query: str,
+        doc_id: str,
+        tenant_id: str,
+        quota_key: str,
+    ) -> tuple[float, ...] | None:
         if not query.strip():
             return None
         probe = Chunk(
@@ -2174,12 +2777,53 @@ class ParseRuntime:
         try:
             embedded = tuple(self.embedding_provider.embed(doc_id="search-query", chunks=[probe]))
         except Exception as exc:
+            settings = self.settings.providers.embedding
+            failure_category = classify_provider_failure(exc)
             self.event_logger.log(
                 "search_embedding_skipped",
-                error=str(exc),
+                doc_id=doc_id,
+                provider=settings.provider,
+                model=settings.model,
+                error_type=type(exc).__name__,
+                failure_category=failure_category,
+            )
+            self.event_aggregator.record_event(
+                "provider_failure",
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                doc_id=doc_id,
+                details={
+                    "provider_type": "embedding",
+                    "provider_id": settings.provider,
+                    "model": settings.model,
+                    "failure_category": failure_category,
+                    "operation": "embed_query",
+                },
             )
             return None
         if not embedded or embedded[0].embedding is None:
+            settings = self.settings.providers.embedding
+            self.event_logger.log(
+                "search_embedding_skipped",
+                doc_id=doc_id,
+                provider=settings.provider,
+                model=settings.model,
+                error_type="empty_or_invalid_response",
+                failure_category="invalid_response",
+            )
+            self.event_aggregator.record_event(
+                "provider_failure",
+                tenant_id=tenant_id,
+                quota_key=quota_key,
+                doc_id=doc_id,
+                details={
+                    "provider_type": "embedding",
+                    "provider_id": settings.provider,
+                    "model": settings.model,
+                    "failure_category": "invalid_response",
+                    "operation": "embed_query",
+                },
+            )
             return None
         return tuple(float(item) for item in embedded[0].embedding)
 
@@ -3116,7 +3760,14 @@ class ParseRuntime:
                 count=trace.rejected_pages,
             )
 
-    def _embed_chunks(self, *, doc_id: str, chunks: Sequence[Any]) -> Sequence[Any]:
+    def _embed_chunks(
+        self,
+        *,
+        doc_id: str,
+        chunks: Sequence[Any],
+        tenant_id: str = "*",
+        quota_key: str = "*",
+    ) -> Sequence[Any]:
         if not chunks:
             return tuple(chunks)
         provider_settings = self.settings.providers.embedding
@@ -3133,6 +3784,8 @@ class ParseRuntime:
                 batch_index=batch_index,
                 max_retries=max_retries,
                 base_backoff_seconds=base_backoff_seconds,
+                tenant_id=tenant_id,
+                quota_key=quota_key,
             )
             if result is None:
                 failed_batches += 1
@@ -3158,6 +3811,8 @@ class ParseRuntime:
         batch_index: int,
         max_retries: int,
         base_backoff_seconds: float,
+        tenant_id: str,
+        quota_key: str,
     ) -> tuple[Any, ...] | None:
         attempts = max(1, max_retries + 1)
         for attempt in range(1, attempts + 1):
@@ -3169,6 +3824,8 @@ class ParseRuntime:
                     )
                 return embedded_batch
             except Exception as exc:
+                provider_settings = self.settings.providers.embedding
+                failure_category = classify_provider_failure(exc)
                 if attempt < attempts:
                     delay = min(base_backoff_seconds * (2 ** (attempt - 1)), 0.5)
                     self.event_logger.log(
@@ -3179,15 +3836,24 @@ class ParseRuntime:
                         max_attempts=attempts,
                         delay_s=round(delay, 3),
                         error=str(exc),
+                        provider=provider_settings.provider,
+                        model=provider_settings.model,
+                        failure_category=failure_category,
                     )
                     self.event_aggregator.record_event(
                         "embedding_retry",
+                        tenant_id=tenant_id,
+                        quota_key=quota_key,
                         doc_id=doc_id,
                         details={
                             "batch_index": batch_index,
                             "attempt": attempt,
                             "max_attempts": attempts,
                             "delay_s": round(delay, 3),
+                            "provider_type": "embedding",
+                            "provider_id": provider_settings.provider,
+                            "model": provider_settings.model,
+                            "failure_category": failure_category,
                         },
                     )
                     time.sleep(delay)
@@ -3199,11 +3865,36 @@ class ParseRuntime:
                     attempts=attempts,
                     chunks=len(batch),
                     error=str(exc),
+                    provider=provider_settings.provider,
+                    model=provider_settings.model,
+                    failure_category=failure_category,
                 )
                 self.event_aggregator.record_event(
                     "embedding_skipped",
+                    tenant_id=tenant_id,
+                    quota_key=quota_key,
                     doc_id=doc_id,
                     details={
+                        "batch_index": batch_index,
+                        "attempts": attempts,
+                        "chunks": len(batch),
+                        "provider_type": "embedding",
+                        "provider_id": provider_settings.provider,
+                        "model": provider_settings.model,
+                        "failure_category": failure_category,
+                    },
+                )
+                self.event_aggregator.record_event(
+                    "provider_failure",
+                    tenant_id=tenant_id,
+                    quota_key=quota_key,
+                    doc_id=doc_id,
+                    details={
+                        "provider_type": "embedding",
+                        "provider_id": provider_settings.provider,
+                        "model": provider_settings.model,
+                        "failure_category": failure_category,
+                        "operation": "embed_batch",
                         "batch_index": batch_index,
                         "attempts": attempts,
                         "chunks": len(batch),
@@ -3584,6 +4275,12 @@ def _runtime_rag_coverage_manifest(
     indexable_units = [unit for unit in units if bool(unit.get("should_index_for_rag"))]
     skipped_units = [unit for unit in units if not bool(unit.get("should_index_for_rag"))]
     chunked_units = [unit for unit in indexable_units if unit.get("chunk_ids")]
+    embedded_units = [unit for unit in indexable_units if bool(unit.get("embedded"))]
+    unembedded_units = [
+        unit
+        for unit in indexable_units
+        if unit.get("chunk_ids") and not bool(unit.get("embedded"))
+    ]
     text_pages = {
         _runtime_page_span_tuple(unit.get("page_span"))[0]
         for unit in units
@@ -3614,6 +4311,8 @@ def _runtime_rag_coverage_manifest(
         "unchunked_unit_count": len(indexable_units) - len(chunked_units),
         "chunk_count": len(all_chunk_ids),
         "embedded_chunk_count": len(embedded_chunk_ids),
+        "embedded_unit_count": len(embedded_units),
+        "unembedded_unit_count": len(unembedded_units),
         "coverage_score": _runtime_ratio(len(chunked_units), len(indexable_units)),
         "unit_chunk_coverage_ratio": _runtime_ratio(len(chunked_units), len(indexable_units)),
         "text_page_coverage_ratio": _runtime_ratio(len(pages_with_indexable_units), len(text_pages)),
@@ -3711,6 +4410,185 @@ def _runtime_provider_ids(blocks: Sequence[Any]) -> list[str]:
                 provider_ids.append(value)
                 break
     return provider_ids
+
+
+def _runtime_document_quality_observation(
+    *,
+    settings: ParseCoreSettings,
+    blocks: Sequence[Any],
+    index_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build quality telemetry without rebuilding the diagnostic projections."""
+    rag_manifest = _as_mapping_runtime(index_manifest.get("rag_coverage"))
+    text_ratio = _runtime_float(rag_manifest.get("text_page_coverage_ratio"), default=1.0)
+    table_ratio = _runtime_float(rag_manifest.get("table_unit_coverage_ratio"), default=1.0)
+    unit_chunk_ratio = _runtime_float(rag_manifest.get("unit_chunk_coverage_ratio"), default=1.0)
+    chunk_count = max(0, _safe_int_runtime(rag_manifest.get("chunk_count"), default=0))
+    embedded_chunk_count = max(
+        0,
+        _safe_int_runtime(rag_manifest.get("embedded_chunk_count"), default=0),
+    )
+    embedded_chunk_ratio = embedded_chunk_count / chunk_count if chunk_count else 1.0
+
+    units = [
+        item
+        for item in (rag_manifest.get("units") or [])
+        if isinstance(item, Mapping)
+    ]
+    unchunked_units = max(
+        0,
+        _safe_int_runtime(rag_manifest.get("unchunked_unit_count"), default=0),
+    )
+    unembedded_units = max(
+        0,
+        _safe_int_runtime(rag_manifest.get("unembedded_unit_count"), default=0),
+    )
+    figure_caption_missing_units = [
+        unit
+        for unit in units
+        if str(unit.get("unit_type") or "") == "figure_caption"
+        and not bool(unit.get("should_index_for_rag"))
+        and str(unit.get("skip_reason") or "") == "empty_text"
+    ]
+
+    page_confidences: dict[int, list[float]] = {}
+    signal_keys: set[tuple[int, str]] = set()
+    for block in blocks:
+        metadata = getattr(block, "metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            continue
+        page_number = _safe_int_runtime(metadata.get("page"), default=1)
+        confidence = metadata.get(
+            "reading_order_confidence",
+            metadata.get("layout_reading_order_confidence"),
+        )
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            page_confidences.setdefault(page_number, []).append(
+                max(0.0, min(1.0, float(confidence)))
+            )
+        for code in _runtime_string_list(metadata.get("quality_signal_codes")):
+            signal_keys.add((page_number, code))
+        if bool(metadata.get("ocr_attempted")):
+            signal_keys.add((page_number, "ocr_attempted"))
+        if metadata.get("ocr_error_reason"):
+            signal_keys.add((page_number, "ocr_failed"))
+        if (
+            not str(getattr(block, "content", "") or "").strip()
+            and str(metadata.get("semantic_role") or "") == "parse_artifact"
+        ):
+            signal_keys.add((page_number, "empty_page"))
+
+    page_reading_order = [
+        sum(values) / len(values) for values in page_confidences.values() if values
+    ]
+    reading_order_confidence = (
+        round(sum(page_reading_order) / len(page_reading_order), 4)
+        if page_reading_order
+        else None
+    )
+
+    gate_settings = settings.quality_gate
+    flags: list[str] = []
+    if text_ratio < gate_settings.min_text_page_coverage:
+        flags.append("text_page_coverage_below_threshold")
+    if table_ratio < gate_settings.min_table_unit_coverage:
+        flags.append("table_unit_coverage_below_threshold")
+    if unit_chunk_ratio < gate_settings.min_unit_chunk_coverage:
+        flags.append("unit_chunk_coverage_below_threshold")
+    if (
+        reading_order_confidence is not None
+        and reading_order_confidence < gate_settings.min_reading_order_confidence
+    ):
+        flags.append("reading_order_confidence_below_threshold")
+    if text_ratio < 1.0:
+        flags.append("rag_empty_text_page")
+    if unchunked_units > 0:
+        flags.append("rag_units_without_chunks")
+    if embedded_chunk_count < chunk_count or unembedded_units > 0:
+        flags.append("rag_chunks_not_embedded")
+    if table_ratio < 1.0:
+        flags.append("rag_table_without_unit")
+    if figure_caption_missing_units:
+        flags.append("rag_figure_caption_missing")
+    flags = list(dict.fromkeys(flags))
+
+    gate = "accept"
+    recommended_action: str | None = None
+    if not gate_settings.enabled:
+        gate = "disabled"
+        flags = []
+    elif "rag_empty_text_page" in flags:
+        gate = "manual_review" if gate_settings.allow_manual_review else "accept_with_warning"
+        recommended_action = "review_parse_ir"
+    elif "rag_table_without_unit" in flags:
+        gate = "local_rerun" if gate_settings.allow_local_rerun else "accept_with_warning"
+        recommended_action = "local_provider_rerun"
+    elif "reading_order_confidence_below_threshold" in flags:
+        gate = "local_rerun" if gate_settings.allow_local_rerun else "accept_with_warning"
+        recommended_action = "local_provider_rerun"
+    elif any(
+        flag in flags
+        for flag in (
+            "text_page_coverage_below_threshold",
+            "table_unit_coverage_below_threshold",
+        )
+    ):
+        gate = "local_rerun" if gate_settings.allow_local_rerun else "accept_with_warning"
+        recommended_action = "local_provider_rerun"
+    elif "rag_figure_caption_missing" in flags:
+        gate = "accept_with_warning"
+        recommended_action = "review_parse_ir"
+    elif (
+        "unit_chunk_coverage_below_threshold" in flags
+        or "rag_units_without_chunks" in flags
+    ):
+        gate = "accept_with_warning"
+        recommended_action = "rechunk_document"
+    elif "rag_chunks_not_embedded" in flags:
+        gate = "accept_with_warning"
+        recommended_action = "reembed_document"
+    elif flags:
+        gate = "accept_with_warning"
+
+    for unit in units:
+        page_start, _ = _runtime_page_span_tuple(unit.get("page_span"))
+        if bool(unit.get("should_index_for_rag")) and not unit.get("chunk_ids"):
+            signal_keys.add((page_start, "rag_units_without_chunks"))
+        if unit.get("chunk_ids") and not bool(unit.get("embedded")):
+            signal_keys.add((page_start, "rag_chunks_not_embedded"))
+    for unit in figure_caption_missing_units:
+        page_start, _ = _runtime_page_span_tuple(unit.get("page_span"))
+        signal_keys.add((page_start, "rag_figure_caption_missing"))
+
+    quality = evaluate_parse_quality(tuple(blocks))
+    provider_warning_count = len(_runtime_provider_ids(blocks)) if flags else 0
+    return {
+        "quality_gate": gate,
+        "quality_flags": flags,
+        "needs_attention": gate not in {"accept", "disabled"} or provider_warning_count > 0,
+        "recommended_action": recommended_action,
+        "quality_score": float(quality.score),
+        "quality_signal_count": len(signal_keys),
+        "provider_warning_count": provider_warning_count,
+        "text_page_coverage_ratio": round(text_ratio, 6),
+        "table_unit_coverage_ratio": round(table_ratio, 6),
+        "unit_chunk_coverage_ratio": round(unit_chunk_ratio, 6),
+        "embedded_chunk_ratio": round(embedded_chunk_ratio, 6),
+    }
+
+
+def _as_mapping_runtime(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _runtime_float(value: Any, *, default: float) -> float:
+    if isinstance(value, bool):
+        return float(default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if isfinite(parsed) else float(default)
 
 
 def _runtime_part_observation_payload(part: Mapping[str, Any]) -> dict[str, Any]:

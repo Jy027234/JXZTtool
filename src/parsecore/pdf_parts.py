@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+from .private_files import harden_private_file
+
 
 PdfReader = None
 PdfWriter = None
@@ -124,8 +126,9 @@ def create_pdf_part_files(source_path: str, parts: Sequence[Mapping[str, Any]]) 
                     writer.add_page(pages[page_number - 1])
                 target = Path(target_path)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("wb") as target_file:
+                with target.open("xb") as target_file:
                     writer.write(target_file)
+                harden_private_file(target)
     except ValueError:
         raise
     except ImportError:

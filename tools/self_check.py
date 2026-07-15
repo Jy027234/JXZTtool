@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -33,6 +34,16 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# When executed as ``python tools/self_check.py``, Python puts ``tools/``
+# (rather than the repository root) on sys.path.  Provider-suite preflight
+# imports sibling tools modules, so make the script entry point work without
+# requiring callers to set PYTHONPATH manually.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from parsecore.pdf_parts import detect_pdf_page_count
+
+
 FAST_PROFILE = "fast"
 FULL_PROFILE = "full"
 PERF_PROFILE = "perf"
@@ -57,6 +68,9 @@ PROFILE_INCLUDE_TAGS = {
     FULL_PROFILE: (),
     PERF_PROFILE: (),
 }
+FAST_PROVIDER_PAGE_BUDGET_KEY = "fast_page_budget"
+TIMEOUT_TREE_CLEANUP_GRACE_SECONDS = 10
+TIMEOUT_TREE_KILL_SECONDS = 15
 
 
 @dataclass
@@ -131,6 +145,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="override the provider-comparison timeout; defaults depend on --profile",
+    )
+    parser.add_argument(
+        "--reuse-parser-instances",
+        action="store_true",
+        help="reuse one parser instance per provider in the candidate provider suite for warm-state measurement",
     )
     parser.add_argument(
         "--large-pdf-benchmark",
@@ -218,6 +237,7 @@ def _build_provider_comparison_args(
     suite: str,
     fixture_root: str | None = None,
     profile: str = "default",
+    reuse_parser_instances: bool = False,
 ) -> list[str]:
     args = [
         sys.executable,
@@ -232,6 +252,8 @@ def _build_provider_comparison_args(
     ]
     if fixture_root:
         args.extend(["--fixture-root", fixture_root])
+    if reuse_parser_instances:
+        args.append("--reuse-parser-instances")
     return args
 
 
@@ -239,6 +261,7 @@ def _default_provider_suite_preflight(
     suite: str,
     *,
     fixture_root: str | None,
+    profile: str = FAST_PROFILE,
 ) -> tuple[bool, dict[str, Any]]:
     from tools import provider_comparison_report
 
@@ -268,12 +291,118 @@ def _default_provider_suite_preflight(
                 str(resolved_fixture_root) if resolved_fixture_root is not None else None
             ),
         }
-    return True, {
+    details: dict[str, Any] = {
         "sample_count": len(sample_specs),
         "resolved_fixture_root": (
             str(resolved_fixture_root) if resolved_fixture_root is not None else None
         ),
     }
+    if _normalize_profile(profile) != FAST_PROFILE:
+        return True, details
+
+    try:
+        suite_payload = json.loads(Path(suite).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, {
+            **details,
+            "reason": "fast_page_budget_unreadable",
+            "message": f"fast provider suite page budget could not be read: {exc}",
+        }
+    raw_budget = suite_payload.get(FAST_PROVIDER_PAGE_BUDGET_KEY) if isinstance(suite_payload, Mapping) else None
+    if not isinstance(raw_budget, Mapping):
+        return False, {
+            **details,
+            "reason": "fast_page_budget_missing",
+            "message": f"fast provider suite must declare {FAST_PROVIDER_PAGE_BUDGET_KEY}",
+        }
+
+    budget: dict[str, int] = {}
+    for field in ("max_pages_per_sample", "max_total_pages", "large_pdf_min_page_count"):
+        value = raw_budget.get(field)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 0
+        if isinstance(value, bool) or parsed <= 0:
+            return False, {
+                **details,
+                "reason": "fast_page_budget_invalid",
+                "message": f"fast provider suite {FAST_PROVIDER_PAGE_BUDGET_KEY}.{field} must be a positive integer",
+            }
+        budget[field] = parsed
+
+    source_page_counts: dict[Path, int] = {}
+    pdf_samples: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    total_selected_pages = 0
+    for sample in sample_specs:
+        source_path = Path(sample.path)
+        if source_path.suffix.lower() != ".pdf":
+            continue
+        try:
+            source_page_count = source_page_counts.get(source_path)
+            if source_page_count is None:
+                source_page_count = detect_pdf_page_count(str(source_path))
+                source_page_counts[source_path] = source_page_count
+        except Exception as exc:
+            return False, {
+                **details,
+                "reason": "fast_page_count_unavailable",
+                "message": f"fast provider suite could not inspect PDF page count for {source_path}: {exc}",
+                "page_budget": budget,
+            }
+
+        page_range = (
+            (int(sample.page_start), int(sample.page_end))
+            if sample.page_start is not None and sample.page_end is not None
+            else None
+        )
+        selected_page_count = (
+            page_range[1] - page_range[0] + 1 if page_range is not None else source_page_count
+        )
+        sample_details = {
+            "name": sample.name or source_path.name,
+            "document": str(source_path),
+            "source_page_count": source_page_count,
+            "page_range": (
+                {"start": page_range[0], "end": page_range[1]} if page_range is not None else None
+            ),
+            "selected_page_count": selected_page_count,
+        }
+        pdf_samples.append(sample_details)
+        total_selected_pages += selected_page_count
+
+        if source_page_count >= budget["large_pdf_min_page_count"] and page_range is None:
+            violations.append({"code": "large_pdf_requires_page_range", **sample_details})
+        if page_range is not None and page_range[1] > source_page_count:
+            violations.append({"code": "page_range_exceeds_document", **sample_details})
+        if selected_page_count > budget["max_pages_per_sample"]:
+            violations.append({"code": "sample_page_budget_exceeded", **sample_details})
+
+    page_budget_details = {
+        **budget,
+        "selected_pdf_pages": total_selected_pages,
+        "pdf_sample_count": len(pdf_samples),
+        "samples": pdf_samples,
+    }
+    details["page_budget"] = page_budget_details
+    if total_selected_pages > budget["max_total_pages"]:
+        violations.append(
+            {
+                "code": "total_page_budget_exceeded",
+                "selected_pdf_pages": total_selected_pages,
+                "max_total_pages": budget["max_total_pages"],
+            }
+        )
+    if violations:
+        violation_codes = ", ".join(str(item["code"]) for item in violations)
+        return False, {
+            **details,
+            "reason": "fast_page_budget_violation",
+            "message": f"fast provider suite page budget rejected: {violation_codes}",
+            "violations": violations,
+        }
+    return True, details
 
 
 def _command_env() -> dict[str, str]:
@@ -299,6 +428,128 @@ def _write_stdout(text: str) -> None:
     print(text.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8"))
 
 
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _combined_subprocess_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    return "\n".join(
+        part for part in (_subprocess_text(stdout), _subprocess_text(stderr)) if part
+    ).strip()
+
+
+def _subprocess_start_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "cwd": ROOT,
+        "env": _command_env(),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        # taskkill /T uses the direct child PID, while a separate process group
+        # prevents a timeout signal from joining the parent self-check process.
+        kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
+
+
+def _fallback_kill_process(process: Any, details: dict[str, Any]) -> None:
+    try:
+        process.kill()
+        details["fallback_root_kill"] = "sent"
+    except (OSError, AttributeError) as exc:
+        details["fallback_root_kill"] = f"failed: {exc}"
+
+
+def _terminate_timed_out_process_tree(process: Any) -> dict[str, Any]:
+    """Terminate a timed-out child and its descendants without touching the parent gate."""
+    pid = int(getattr(process, "pid", 0) or 0)
+    details: dict[str, Any] = {"attempted": True, "pid": pid, "platform": os.name}
+    if pid <= 0:
+        details.update({"strategy": "unavailable", "succeeded": False})
+        _fallback_kill_process(process, details)
+        return details
+
+    if os.name == "nt":
+        details["strategy"] = "taskkill_tree"
+        try:
+            completed = subprocess.run(
+                ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=TIMEOUT_TREE_KILL_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            details["taskkill_error"] = str(exc)
+            details["succeeded"] = False
+            _fallback_kill_process(process, details)
+            return details
+        details["taskkill_exit_code"] = completed.returncode
+        details["taskkill_stdout_tail"] = _tail_lines(_subprocess_text(completed.stdout), limit=5)
+        details["taskkill_stderr_tail"] = _tail_lines(_subprocess_text(completed.stderr), limit=5)
+        details["succeeded"] = completed.returncode == 0
+        if not details["succeeded"]:
+            _fallback_kill_process(process, details)
+        return details
+
+    details["strategy"] = "posix_process_group"
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        details["succeeded"] = True
+        return details
+    except ProcessLookupError:
+        details.update({"succeeded": True, "already_exited": True})
+        return details
+    except (OSError, ValueError) as exc:
+        details["process_group_error"] = str(exc)
+        details["succeeded"] = False
+        _fallback_kill_process(process, details)
+        return details
+
+
+def _timeout_exception_output(error: subprocess.TimeoutExpired) -> tuple[str, str]:
+    stdout = getattr(error, "stdout", None)
+    if stdout is None:
+        stdout = getattr(error, "output", None)
+    return _subprocess_text(stdout), _subprocess_text(getattr(error, "stderr", None))
+
+
+def _collect_timed_out_process_output(
+    process: Any,
+    timeout_error: subprocess.TimeoutExpired,
+) -> tuple[str, str, dict[str, Any]]:
+    """Drain output after tree cleanup without allowing inherited pipes to hang the gate."""
+    try:
+        stdout, stderr = process.communicate(timeout=TIMEOUT_TREE_CLEANUP_GRACE_SECONDS)
+        return _subprocess_text(stdout), _subprocess_text(stderr), {"drain_status": "completed"}
+    except subprocess.TimeoutExpired as drain_error:
+        details: dict[str, Any] = {"drain_status": "timed_out"}
+        _fallback_kill_process(process, details)
+        try:
+            stdout, stderr = process.communicate(timeout=TIMEOUT_TREE_CLEANUP_GRACE_SECONDS)
+            details["drain_status"] = "completed_after_root_kill"
+            return _subprocess_text(stdout), _subprocess_text(stderr), details
+        except subprocess.TimeoutExpired as final_error:
+            details["drain_status"] = "still_open_after_root_kill"
+            stdout, stderr = _timeout_exception_output(final_error)
+            if not stdout and not stderr:
+                stdout, stderr = _timeout_exception_output(drain_error)
+            if not stdout and not stderr:
+                stdout, stderr = _timeout_exception_output(timeout_error)
+            return stdout, stderr, details
+
+
 def _run_subprocess(
     name: str,
     args: list[str],
@@ -307,22 +558,27 @@ def _run_subprocess(
 ) -> tuple[CheckResult, str]:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
-            args,
-            cwd=ROOT,
-            env=_command_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-        )
-        combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        process = subprocess.Popen(args, **_subprocess_start_kwargs())
+    except OSError as exc:
         result = CheckResult(
             name=name,
-            status="passed" if completed.returncode == 0 else "failed",
-            exit_code=completed.returncode,
+            status="failed",
+            exit_code=1,
+            elapsed_s=round(time.monotonic() - started, 3),
+            summary=f"failed to start command: {exc}",
+            details={"start_error": str(exc)},
+            tail=[],
+        )
+        return result, ""
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        combined = _combined_subprocess_output(stdout, stderr)
+        return_code = process.returncode if isinstance(process.returncode, int) else 1
+        result = CheckResult(
+            name=name,
+            status="passed" if return_code == 0 else "failed",
+            exit_code=return_code,
             elapsed_s=round(time.monotonic() - started, 3),
             summary="command completed",
             details={},
@@ -330,16 +586,20 @@ def _run_subprocess(
         )
         return result, combined
     except subprocess.TimeoutExpired as exc:
-        output = "\n".join(
-            part for part in ((exc.stdout or ""), (exc.stderr or "")) if part
-        ).strip()
+        cleanup = _terminate_timed_out_process_tree(process)
+        stdout, stderr, drain_details = _collect_timed_out_process_output(process, exc)
+        output = _combined_subprocess_output(stdout, stderr)
         result = CheckResult(
             name=name,
             status="timeout",
             exit_code=None,
             elapsed_s=round(time.monotonic() - started, 3),
             summary=f"timed out after {timeout_seconds}s",
-            details={"timeout_seconds": timeout_seconds},
+            details={
+                "timeout_seconds": timeout_seconds,
+                "timeout_cleanup": cleanup,
+                "timeout_output_drain": drain_details,
+            },
             tail=_tail_lines(output),
         )
         return result, output
@@ -716,6 +976,7 @@ def _run_provider_comparison_suite(
     fixture_root: str | None,
     profile: str,
     timeout_seconds: int,
+    reuse_parser_instances: bool = False,
 ) -> CheckResult:
     result, output = _run_subprocess(
         "provider_comparison_suite",
@@ -724,6 +985,7 @@ def _run_provider_comparison_suite(
             suite=suite,
             fixture_root=fixture_root,
             profile=profile,
+            reuse_parser_instances=reuse_parser_instances,
         ),
         timeout_seconds=timeout_seconds,
     )
@@ -733,6 +995,7 @@ def _run_provider_comparison_suite(
             "suite": suite,
             "fixture_root": fixture_root,
             "profile": profile,
+            "reuse_parser_instances": bool(reuse_parser_instances),
         }
     )
     payload = _parse_json_output(output)
@@ -790,6 +1053,7 @@ def _run_provider_comparison_suite(
         f" identity_drift={identity_drift}"
         f" admission_ready={admission_overview.get('route_ready_count', 0)}"
         f" admission_update={admission_overview.get('providers_requiring_config_update', 0)}"
+        f" parser_lifecycle={((payload.get('measurement') or {}).get('parser_lifecycle') or 'unknown')}"
     )
     return result
 
@@ -801,6 +1065,7 @@ def _skipped_provider_comparison_suite(
     profile: str,
     reason: str,
     details: dict[str, Any] | None = None,
+    status: str = "skipped",
 ) -> CheckResult:
     payload = {
         "suite": suite,
@@ -811,8 +1076,8 @@ def _skipped_provider_comparison_suite(
         payload.update(details)
     return CheckResult(
         name="provider_comparison_suite",
-        status="skipped",
-        exit_code=None,
+        status=status,
+        exit_code=1 if status == "failed" else None,
         elapsed_s=0.0,
         summary=reason,
         details=payload,
@@ -870,6 +1135,8 @@ def _run_large_pdf_benchmark(config_path: str, *, config: str) -> CheckResult:
             max_active_parts_per_doc=benchmark_config.get("max_active_parts_per_doc"),
             profile=benchmark_config.get("profile", "large-pdf"),
             execute_parts=benchmark_config.get("execute_parts", False),
+            materialize_part_files=benchmark_config.get("materialize_part_files", True),
+            parallel_parts=max(1, int(benchmark_config.get("parallel_parts", 1) or 1)),
         )
     except Exception as exc:
         return CheckResult(
@@ -949,22 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
                 profile=profile,
             )
         )
-    if args.provider_suite and not args.skip_provider_comparison:
-        provider_comparison_timeout_seconds = (
-            args.provider_comparison_timeout_seconds
-            if args.provider_comparison_timeout_seconds is not None
-            else PROFILE_TIMEOUTS.get(profile, PROFILE_TIMEOUTS[FAST_PROFILE])
-        )
-        results.append(
-            _run_provider_comparison_suite(
-                config=args.config,
-                suite=args.provider_suite,
-                fixture_root=args.provider_fixture_root,
-                profile=args.provider_profile,
-                timeout_seconds=provider_comparison_timeout_seconds,
-            )
-        )
-    elif provider_suite and not args.skip_provider_comparison:
+    if provider_suite and not args.skip_provider_comparison:
         provider_comparison_timeout_seconds = (
             args.provider_comparison_timeout_seconds
             if args.provider_comparison_timeout_seconds is not None
@@ -973,18 +1225,21 @@ def main(argv: list[str] | None = None) -> int:
         can_run_provider_suite, preflight = _default_provider_suite_preflight(
             provider_suite,
             fixture_root=args.provider_fixture_root,
+            profile=profile,
         )
         if can_run_provider_suite:
-            results.append(
-                _run_provider_comparison_suite(
-                    config=args.config,
-                    suite=provider_suite,
-                    fixture_root=args.provider_fixture_root,
-                    profile=args.provider_profile,
-                    timeout_seconds=provider_comparison_timeout_seconds,
-                )
+            provider_result = _run_provider_comparison_suite(
+                config=args.config,
+                suite=provider_suite,
+                fixture_root=args.provider_fixture_root,
+                profile=args.provider_profile,
+                timeout_seconds=provider_comparison_timeout_seconds,
+                reuse_parser_instances=bool(args.reuse_parser_instances),
             )
+            provider_result.details.setdefault("preflight", preflight)
+            results.append(provider_result)
         else:
+            preflight_reason = str(preflight.get("reason") or "")
             results.append(
                 _skipped_provider_comparison_suite(
                     suite=provider_suite,
@@ -992,6 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
                     profile=args.provider_profile,
                     reason=str(preflight.get("message") or "provider suite skipped"),
                     details=preflight,
+                    status="failed" if preflight_reason.startswith("fast_") else "skipped",
                 )
             )
 
@@ -1034,6 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         "provider_profile": args.provider_profile,
+        "reuse_parser_instances": bool(args.reuse_parser_instances),
         "provider_comparison_artifacts": provider_comparison_artifacts,
         "out": str(out_path_str),
         "regression_include_tags": list(regression_include_tags),

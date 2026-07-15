@@ -135,6 +135,48 @@ class PyMuPdf4LlmParserTests(unittest.TestCase):
         self.assertEqual([block.metadata["page"] for block in blocks[1:]], [1, 1, 2])
         self.assertEqual([block.content for block in blocks[1:]], ["Heading", "Alpha", "Beta"])
 
+    def test_parser_passes_explicit_provider_tuning_options_without_changing_defaults(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def to_markdown(
+            _file_path: str,
+            *,
+            page_chunks: bool = False,
+            ignore_graphics: bool = False,
+            graphics_limit: int | None = None,
+        ):
+            calls.append({
+                "page_chunks": page_chunks,
+                "ignore_graphics": ignore_graphics,
+                "graphics_limit": graphics_limit,
+            })
+            return [{"metadata": {"page": 1}, "text": "Tuning probe"}]
+
+        fake_module = SimpleNamespace(__version__="0.tuning", to_markdown=to_markdown)
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"pymupdf4llm": fake_module}):
+            path = Path(tmp) / "tuning.pdf"
+            path.write_bytes(b"%PDF-1.4 fake")
+            parser = build_parser(
+                "pymupdf4llm-local",
+                media_types=["application/pdf"],
+                extensions=[".pdf"],
+                options={"ignore_graphics": True, "graphics_limit": 500},
+            )
+            tuple(
+                parser.parse(
+                    ParseRequest(
+                        doc_id="doc-tuning",
+                        file_path=str(path),
+                        media_type="application/pdf",
+                    )
+                )
+            )
+
+        self.assertEqual(
+            calls,
+            [{"page_chunks": True, "ignore_graphics": True, "graphics_limit": 500}],
+        )
+
     def test_missing_dependency_raises_clear_error(self) -> None:
         parser = build_parser(
             "pymupdf4llm-local",

@@ -11,11 +11,11 @@
 
 ## 能力边界
 
-ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产品的检索与业务判断：
+ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需的受配置管理能力；它不演变为通用模型平台或宿主业务系统：
 
-- 负责：文档解析、Block/Chunk 生成、结构化 metadata、可选 embedding 产出、异步任务与重跑
-- 不负责：RAG 检索 API、向量库产品选型、合规比对、SOP/工卡匹配、业务规则判定
-- 宿主产品可直接消费 `semantic_role`、`embedding`、layout metadata 等字段，自行决定写入 pgvector、Qdrant 或其他检索层
+- 负责：文档解析、Block/Chunk 生成、结构化 metadata、可选 embedding、轻量检索/pgvector 索引与可选二阶段 rerank、异步任务与重跑
+- 不负责：通用模型路由/模型市场、模型训练与生命周期治理、合规比对、SOP/工卡匹配、业务规则判定
+- 模型配置由部署侧 TOML + 环境变量管理；宿主仍可消费 `semantic_role`、`embedding`、layout metadata 并接入自己的 pgvector、Qdrant 或检索服务
 
 ## 当前交付范围
 
@@ -32,6 +32,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 - 超大 PDF 页段规划、part 子 job、局部复跑和父文档 partial 读模型
 - `pages / lines / records` document views 持久化、records 分页查询与大结果集导出
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
+- 可选 DashScope-compatible 二阶段 rerank provider，支持阿里 Qwen 排序模型与安全降级
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
 - `profile=auto` 自动路由，支持大文件、表格密集、OCR 密集、Excel 台账等解析策略分流
@@ -96,6 +97,7 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 │     ├─ config.py
 │     ├─ contracts.py
 │     ├─ models.py
+│     ├─ rerank.py
 │     ├─ runtime.py
 │     ├─ stores.py
 │     ├─ worker.py
@@ -111,6 +113,9 @@ ParseCore 当前只负责解析流水线内的公共能力，不吞并宿主产�
 ├─ parsecore.queue.toml
 ├─ parsecore.pgvector.toml.example
 ├─ parsecore.pgvector.fake-embedding.toml.example
+├─ parsecore.pgvector.aliyun-rag.toml.example
+├─ parsecore.pgvector.local-embedding.toml.example
+├─ parsecore.pgvector.remote-embedding.toml.example
 ├─ parsecore.remote-http.toml.example
 └─ pyproject.toml
 ```
@@ -249,7 +254,15 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
 ```
 
-说明：默认只做 plan-only，避免误跑超长任务；加 `--execute-parts` 后会 inline 执行 part，可用 `--max-parts` 先抽样压测。
+说明：默认只做 plan-only，避免误跑超长任务；加 `--execute-parts` 后会 inline 执行 part，可用 `--max-parts` 先抽样压测。压测默认强制使用一次性临时 SQLite，报告生成后自动删除，不会把计划分片写入 `parsecore.toml` 或 `PARSECORE_DATABASE_URL` 指向的共享队列。只有确实需要跨命令保留压测任务时才可显式追加 `--use-configured-job-store`，并且应让配置指向专用测试库，禁止对生产或共享任务库使用该开关。
+
+运行 P1 契约冻结与宿主接入验收：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
+```
+
+该门禁覆盖 6 类 schema、最小/复杂/异常/part-rerun 四组样例（24 个 payload）、旧 projection 兼容、IR→Reader 可追溯、coverage 一致性和动作合同四阶段。
 
 运行 OCR 长尾专项 benchmark：
 
@@ -271,7 +284,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
 ```
 
-说明：该基线输出每个样本的 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables`，并追加 `primary_provider_id / best_provider_id / best_provider_score / provider_report.comparison_report`，默认只扫表格扩展名；需要覆盖 PDF/DOCX 时可显式传 `--extensions .pdf,.docx,.xls,.xlsx,.xlsm`。
+说明：该基线输出每个样本的 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables`，并追加 `primary_provider_id / best_provider_id / best_provider_score / provider_report.comparison_report`，默认只扫表格扩展名；需要覆盖 PDF/DOCX 时可显式传 `--extensions .pdf,.docx,.xls,.xlsx,.xlsm`。为兼容历史内存基线，该工具默认启用 `tracemalloc`；只测量低干扰端到端延迟时追加 `--no-track-python-memory`，两种通道不得混作同一耗时序列。
 
 运行本地 Provider 离线对比：
 
@@ -378,12 +391,14 @@ API 依赖说明：
 
 - `retrieval_mode = "hybrid"`：query embedding 可用且至少有一条 chunk 向量参与排序
 - `retrieval_mode = "keyword-fallback"`：query embedding 不可用，或无可参与的 chunk 向量，自动回退关键词排序
+- `retrieval_mode = "hybrid+rerank"` 或 `"keyword-fallback+rerank"`：初检候选已由启用的二阶段排序模型重排；命中同时保留 `retrieval_score` 与 `rerank_score`
 
 检索策略：
 
 - 默认采用混合检索：向量优先（query embedding + cosine），关键词得分兜底
 - 当查询 embedding 不可用（未配置 key/服务异常/维度不匹配）时自动回退到纯关键词，不中断请求
 - 语义角色权重在融合后生效：title/warning 等提高排序优先级，toc_entry/lep_entry 适度降权
+- 开启 rerank 后只对初检的受限候选集重排；网关失败、超时或返回无效索引时保留初检顺序并记录 `rerank_skipped`
 
 搜索说明：
 
@@ -415,6 +430,20 @@ provider = "fake"
 - `provider = "fake"` 会生成确定性的 1536 维向量，与默认 pgvector 索引维度一致，适合本地 `re-embed`、hybrid search 和 API/存储链路验证
 - `provider = "fake"` / `"test"` / `"stub"` 都会走同一个本地 provider，不需要 `PARSECORE_EMBEDDING_API_KEY`
 - 生产环境仍应切回 `openai-compatible` 或宿主侧真实 embedding provider
+
+启用阿里 Qwen 二阶段排序：
+
+```toml
+[providers.rerank]
+enabled = true
+provider = "dashscope-compatible"
+model = "qwen/qwen3-vl-rerank"
+base_url = "https://model-router.edu-aliyun.com/v1"
+api_key_env = "PARSECORE_ALIYUN_API_KEY"
+candidate_limit = 30
+```
+
+完整的 `1024` 维 Qwen embedding + rerank + pgvector 部署模板见 [parsecore.pgvector.aliyun-rag.toml.example](parsecore.pgvector.aliyun-rag.toml.example)。这是一项受配置管理的检索增强能力，不会改变 OCR、解析 Provider 或默认 parser 路由。
 
 控制 OCR provider：
 

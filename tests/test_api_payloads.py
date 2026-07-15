@@ -667,6 +667,9 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(rag_manifest["indexable_unit_count"], 4)
         self.assertEqual(rag_manifest["skipped_unit_count"], 1)
         self.assertEqual(rag_manifest["chunked_unit_count"], 4)
+        self.assertEqual(rag_manifest["embedded_chunk_count"], 4)
+        self.assertEqual(rag_manifest["embedded_unit_count"], 4)
+        self.assertEqual(rag_manifest["unembedded_unit_count"], 0)
         self.assertEqual(rag_manifest["coverage_score"], 1.0)
         units_by_id = {unit["unit_id"]: unit for unit in rag_manifest["units"]}
         self.assertEqual(units_by_id["doc-ir-001:ku:000002"]["chunk_ids"], ["chunk-body"])
@@ -793,6 +796,8 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         rag_manifest = payload["index_manifest"]["rag_coverage"]
         self.assertEqual(rag_manifest["source"], "runtime_index_manifest")
         self.assertEqual(rag_manifest["strategy"], "document_knowledge_units")
+        self.assertEqual(rag_manifest["embedded_unit_count"], 1)
+        self.assertEqual(rag_manifest["unembedded_unit_count"], 0)
         self.assertEqual(rag_manifest["units"][0]["source_table_ids"], ["doc-runtime-ku-001:p1:t1", "itm-table"])
         reader_table = reader["blocks"][0]
         self.assertEqual(reader_table["type"], "table")

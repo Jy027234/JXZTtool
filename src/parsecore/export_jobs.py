@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from .exports import write_structured_projection
+from .private_files import ensure_private_directory, harden_private_file, write_private_bytes
 
 
 DEFAULT_EXPORTS: tuple[tuple[str, str], ...] = (
@@ -28,7 +29,11 @@ def create_export_package(
     """Create an isolated export package and return its manifest."""
     export_id = f"exp_{uuid4().hex}"
     package_dir = _export_package_dir(output_dir, export_id)
-    package_dir.mkdir(parents=True, exist_ok=False)
+    package_dir = ensure_private_directory(
+        package_dir,
+        allowed_root=output_dir,
+        exist_ok=False,
+    )
 
     filtered_payload = _filtered_payload(payload, filters or {})
     requested_specs = _export_specs(includes=includes, formats=formats)
@@ -60,6 +65,7 @@ def create_export_package(
             format=format_name,
             path=path,
         )
+        harden_private_file(path)
         manifest["files"].append(
             {
                 "dataset": dataset,
@@ -71,9 +77,8 @@ def create_export_package(
             }
         )
 
-    manifest_path = export_file_path(output_dir, export_id, "manifest.json")
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
-    manifest_path.write_bytes(manifest_bytes)
+    write_private_bytes(package_dir, "manifest.json", manifest_bytes)
     return manifest
 
 

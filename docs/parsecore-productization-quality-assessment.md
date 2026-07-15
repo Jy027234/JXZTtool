@@ -139,6 +139,8 @@ provider-suite fast 单独执行时曾超过 2 分钟没有中间输出。本次
 证据：
 
 - 6 类 payload schema 已通过 contract check。
+- 2026-07-15 新增并执行 `p1-contract-acceptance`：4 组样例共 24 个 payload 全部通过 schema，复杂/异常样例的旧 projection 兼容检查通过。
+- IR→Reader source block 可追溯、coverage 页/单元计数一致、动作合同四阶段和 part-rerun comparison 均通过自动化门禁。
 - API 测试和 schema snapshot 测试通过。
 - `describe` 能暴露 payload schema registry。
 

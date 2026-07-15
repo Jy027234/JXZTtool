@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from threading import Event
 import unittest
 from unittest.mock import patch
 
 from parsecore.config import OcrProviderSettings
-from parsecore.models import ParseRequest
+from parsecore.models import Block, BlockType, ParseRequest
 from parsecore.ocr import OcrRequestError
 from parsecore.parsers import (
     ImageOcrParser,
@@ -16,6 +18,9 @@ from parsecore.parsers import (
     _filter_repeated_pdf_figure_regions,
     _layout_reading_order_confidence,
     _ocr_fallback_reason_for_page,
+    _pdf_page_image_count_hint,
+    _select_pdf_layout_pages,
+    _select_pdf_layout_work,
     build_parser,
 )
 
@@ -31,6 +36,11 @@ class _FakePdfPage:
 class _FakePdfReader:
     def __init__(self, _path: str) -> None:
         self.pages = [_FakePdfPage("broken text")]
+
+
+class _FakeEmptyPdfReader:
+    def __init__(self, _path: str) -> None:
+        self.pages = [_FakePdfPage("")]
 
 
 class _FakeTable:
@@ -109,6 +119,91 @@ def _fake_page_layout(
 
 
 class PdfTextParserOptionsTests(unittest.TestCase):
+    def test_blank_pdf_page_is_preserved_as_non_indexable_artifact(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": False, "ocr_bad_pages": False}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "blank.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-empty-page",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakeEmptyPdfReader):
+                blocks = parser.parse(request)
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[1].content, "")
+        self.assertEqual(blocks[1].metadata["kind"], "empty_page")
+        self.assertEqual(blocks[1].metadata["missing_reason"], "page_without_extractable_content")
+        self.assertEqual(blocks[1].metadata["quality_flags"], ["empty_page"])
+
+    def test_adaptive_layout_selector_keeps_layout_and_ocr_pages(self) -> None:
+        page_texts = [
+            "ordinary native text",
+            "Table 1\nA   B\n1   2",
+            "ordinary native text",
+            "/0 /1 /2 /3 /4 /5",
+            "ordinary native text",
+            "ordinary native text",
+            "ordinary native text",
+            "ordinary native text",
+        ]
+        pages = [SimpleNamespace(images=[]) for _ in page_texts]
+        pages[2].images = [object()] * 5
+
+        selected = _select_pdf_layout_pages(
+            page_texts,
+            pages,
+            min_cid_tokens=5,
+            min_cid_char_ratio=0.12,
+            max_page_ratio=0.85,
+            min_pages=8,
+        )
+
+        self.assertEqual(selected, {2, 3, 4})
+
+    def test_adaptive_layout_selector_limits_table_workset_to_strong_signals(self) -> None:
+        page_texts = ["ordinary native text"] * 8
+        page_texts[1] = "Table 1\nA\nB"
+        page_texts[3] = "Removal Procedures Tables of the Harness Components."
+        page_texts[5] = "PART NUMBER\n320-366-701-0"
+        pages = [SimpleNamespace(images=[]) for _ in page_texts]
+
+        work = _select_pdf_layout_work(
+            page_texts,
+            pages,
+            min_cid_tokens=5,
+            min_cid_char_ratio=0.12,
+            max_page_ratio=0.85,
+            min_pages=8,
+        )
+
+        self.assertIsNotNone(work)
+        assert work is not None
+        self.assertIn(4, work[1])
+        self.assertNotIn(2, work[1])
+        self.assertNotIn(6, work[1])
+
+    def test_pdf_image_count_hint_reads_xobject_resources_without_materializing_images(self) -> None:
+        class _RawPage:
+            def __init__(self) -> None:
+                self.resources = {"/Resources": {"/XObject": {"/img": {"/Subtype": "/Image"}}}}
+
+            def get(self, key: str):
+                return self.resources.get(key)
+
+            @property
+            def images(self):
+                raise AssertionError("image objects should not be materialized")
+
+        self.assertEqual(_pdf_page_image_count_hint(_RawPage()), 1)
+
     def test_ocr_fallback_reason_supports_pdf_name_dense_tokens(self) -> None:
         text = " /0 /1 /2 /3 /i255 /i128 /9 /8 " * 6
         reason = _ocr_fallback_reason_for_page(
@@ -130,6 +225,166 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertFalse(parser._ocr_bad_pages_enabled)
         self.assertEqual(parser._ocr_bad_page_min_cid_tokens, 5)
         self.assertAlmostEqual(parser._ocr_bad_page_min_cid_char_ratio, 0.12)
+        self.assertFalse(parser._parse_cache_enabled)
+        self.assertEqual(parser._parse_cache_max_entries, 2)
+
+    def test_parse_cache_reuses_source_across_doc_ids_without_reloading_pdf(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"parse_cache": True, "parse_cache_max_entries": 2}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            copied_pdf_path = Path(temp_dir) / "copied-sample.pdf"
+            copied_pdf_path.write_bytes(pdf_path.read_bytes())
+            request = ParseRequest(
+                doc_id="doc-pdf-cache",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            second_request = ParseRequest(
+                doc_id="doc-pdf-cache-2",
+                file_path=str(copied_pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader) as mocked_reader:
+                first = parser.parse(request)
+                second = parser.parse(second_request)
+                copied_pdf_path.write_bytes(b"%PDF-1.5\n")
+                third = parser.parse(
+                    ParseRequest(
+                        doc_id="doc-pdf-cache-3",
+                        file_path=str(copied_pdf_path),
+                        media_type="application/pdf",
+                    )
+                )
+
+        self.assertEqual(tuple(block.content for block in first), tuple(block.content for block in second))
+        self.assertTrue(first[0].metadata["parse_cache_enabled"])
+        self.assertFalse(first[0].metadata["parse_cache_hit"])
+        self.assertEqual(first[0].metadata["parse_cache_state"], "cold")
+        self.assertTrue(second[0].metadata["parse_cache_enabled"])
+        self.assertTrue(second[0].metadata["parse_cache_hit"])
+        self.assertEqual(second[0].metadata["parse_cache_state"], "warm")
+        self.assertTrue(all(block.doc_id == "doc-pdf-cache-2" for block in second))
+        self.assertTrue(all(block.block_id.startswith("doc-pdf-cache-2-") for block in second))
+        self.assertTrue(all(block.doc_id == "doc-pdf-cache-3" for block in third))
+        self.assertFalse(third[0].metadata["parse_cache_hit"])
+        self.assertEqual(third[0].metadata["parse_cache_state"], "cold")
+        self.assertEqual(mocked_reader.call_count, 2)
+
+    def test_request_parse_cache_override_bypasses_reads_and_writes(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"parse_cache": True, "parse_cache_max_entries": 2}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            first_request = ParseRequest(
+                doc_id="doc-pdf-cache-default",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            direct_override = ParseRequest(
+                doc_id="doc-pdf-cache-direct-bypass",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"parse_cache": False},
+            )
+            nested_override = ParseRequest(
+                doc_id="doc-pdf-cache-nested-bypass",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"post_process": {"parse_cache": False}},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader) as mocked_reader:
+                parser.parse(first_request)
+                direct_blocks = parser.parse(direct_override)
+                nested_blocks = parser.parse(nested_override)
+
+        self.assertEqual(mocked_reader.call_count, 3)
+        for blocks in (direct_blocks, nested_blocks):
+            self.assertFalse(blocks[0].metadata["parse_cache_enabled"])
+            self.assertFalse(blocks[0].metadata["parse_cache_hit"])
+            self.assertEqual(blocks[0].metadata["parse_cache_state"], "disabled")
+
+    def test_parse_cache_rebinds_merged_block_ids(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+        )
+        cached = (
+            Block(
+                block_id="source-p-1",
+                doc_id="source",
+                type=BlockType.PARAGRAPH,
+                content="first",
+                metadata={"merged_block_ids": ["source-p-1", "source-p-2"]},
+            ),
+        )
+        rebound = parser._rebind_cached_blocks(
+            cached,
+            ParseRequest(doc_id="target", file_path="unused.pdf"),
+        )
+        self.assertEqual(rebound[0].block_id, "target-p-1")
+        self.assertEqual(rebound[0].doc_id, "target")
+        self.assertEqual(rebound[0].metadata["merged_block_ids"], ["target-p-1", "target-p-2"])
+
+    def test_parse_cache_single_flight_coalesces_concurrent_source_requests(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"parse_cache": True, "parse_cache_max_entries": 2}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            first_request = ParseRequest(
+                doc_id="doc-pdf-flight-a",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            second_request = ParseRequest(
+                doc_id="doc-pdf-flight-b",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            started = Event()
+            release = Event()
+            uncached_calls: list[str] = []
+            original_uncached = parser._parse_uncached
+
+            def slow_uncached(request: ParseRequest):
+                uncached_calls.append(request.doc_id)
+                started.set()
+                release.wait(timeout=2.0)
+                return original_uncached(request)
+
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader) as mocked_reader, patch.object(
+                parser,
+                "_parse_uncached",
+                side_effect=slow_uncached,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_future = executor.submit(parser.parse, first_request)
+                    self.assertTrue(started.wait(timeout=1.0))
+                    second_future = executor.submit(parser.parse, second_request)
+                    release.set()
+                    first = first_future.result(timeout=2.0)
+                    second = second_future.result(timeout=2.0)
+
+        self.assertEqual(len(uncached_calls), 1)
+        self.assertEqual(tuple(block.content for block in first), tuple(block.content for block in second))
+        self.assertTrue(all(block.doc_id == "doc-pdf-flight-b" for block in second))
+        self.assertTrue(all(block.block_id.startswith("doc-pdf-flight-b-") for block in second))
+        mocked_reader.assert_called_once_with()
 
     def test_options_override_post_process(self) -> None:
         parser = PdfTextParser(
@@ -229,6 +484,74 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertIsNotNone(captured.get("ocr_page_text_fn"))
         self.assertEqual(blocks[1].content, "Recovered OCR text")
         self.assertTrue(blocks[1].metadata["ocr_fallback_used"])
+
+    def test_request_ocr_cache_override_disables_layout_cache(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={
+                "post_process": {
+                    "dual_channel": True,
+                    "ocr_bad_pages": False,
+                    "ocr_cache": True,
+                    "adaptive_ocr_cache_fast_path": True,
+                }
+            },
+        )
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["ocr_cache_enabled"] = kwargs["ocr_cache"].enabled
+            captured["ocr_cache_fast_path"] = kwargs["ocr_cache_fast_path"]
+            return [_fake_page_layout(text_without_tables="Native text path", ocr_fallback_reason=None)]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-cache-bypass",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"post_process": {"ocr_cache": False}},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                parser.parse(request)
+
+        self.assertFalse(captured["ocr_cache_enabled"])
+        self.assertFalse(captured["ocr_cache_fast_path"])
+
+    def test_ocr_cache_config_opt_out_and_request_reenable_are_explicit(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_cache": False}},
+        )
+        self.assertFalse(parser._ocr_cache.enabled)
+        captured: dict[str, object] = {}
+
+        def fake_extract_pdfplumber_layout(*_args, **kwargs):
+            captured["ocr_cache_enabled"] = kwargs["ocr_cache"].enabled
+            return [_fake_page_layout(text_without_tables="Native text path", ocr_fallback_reason=None)]
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-cache-reenable",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+                options={"post_process": {"ocr_cache": True}},
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                side_effect=fake_extract_pdfplumber_layout,
+            ):
+                parser.parse(request)
+
+        self.assertTrue(captured["ocr_cache_enabled"])
 
     def test_layout_reading_order_flag_is_forwarded_to_layout_extractor(self) -> None:
         parser = PdfTextParser(
@@ -656,7 +979,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
             recovered_text, attempt_reason, error_reason, _timings = kwargs["ocr_page_text_fn"](
-                SimpleNamespace(),
+                SimpleNamespace(images=[object()]),
                 [],
                 1,
                 "",
@@ -716,9 +1039,39 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         self.assertEqual(blocks[1].content, "broken native text")
         self.assertTrue(blocks[1].metadata["ocr_attempted"])
-        self.assertEqual(blocks[1].metadata["ocr_attempt_reason"], "empty_text")
+        self.assertEqual(blocks[1].metadata["ocr_attempt_reason"], "native_text_empty")
         self.assertEqual(blocks[1].metadata["ocr_error_reason"], "provider_request_failed")
         self.assertNotIn("ocr_fallback_used", blocks[1].metadata)
+
+    def test_empty_image_page_is_ocr_candidate(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+        timings = SimpleNamespace(
+            render_elapsed_s=0.01,
+            call_elapsed_s=0.02,
+            provider_elapsed_s=0.02,
+            postprocess_elapsed_s=0.001,
+        )
+        with patch(
+            "parsecore.parsers.PdfTextParser._ensure_pdf_ocr_engine",
+            return_value=(object(), None, 0.0),
+        ), patch(
+            "parsecore.parsers._extract_ocr_text_from_page",
+            return_value=("Recovered scan text", None, timings),
+        ):
+            recovered, reason, error, _ = parser._maybe_recover_page_with_ocr(
+                SimpleNamespace(images=[object()]),
+                [],
+                1,
+                "",
+            )
+
+        self.assertEqual(recovered, "Recovered scan text")
+        self.assertEqual(reason, "native_text_empty")
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

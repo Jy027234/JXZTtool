@@ -1,0 +1,100 @@
+# Production RAG profile: self-hosted local Transformer embeddings.
+#
+# Replace the database URL, model path and runtime sizing for the deployment.
+# The serving image must include the optional `local-embedding` dependencies.
+# Do not point this 384-dimensional profile at existing 1536-dimensional
+# pgvector tables without an explicit migration or a fresh database/schema.
+
+[project]
+name = "parsecore-starter"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "queue-worker"
+max_workers = 2
+max_inflight_jobs = 0
+max_active_parts_per_doc = 0
+max_upload_bytes = 52428800
+staged_upload_max_bytes = 0
+allow_external_file_paths = false
+quota_enforce = false
+quota_window_hours = 24
+quota_default_limit_units = 0
+max_attempts = 3
+retry_backoff_seconds = 1.0
+retry_backoff_max_seconds = 60.0
+poll_interval_ms = 500
+log_path = "var/logs/job_events.jsonl"
+
+[storage]
+# Replace credentials and host through your deployment secret/config system.
+database_url = "postgresql://parsecore:parsecore@parsecore-postgres:5432/parsecore"
+object_store = "local://./var/uploads"
+
+[index]
+mode = "pgvector"
+# all-MiniLM-L6-v2 produces 384 dimensions.
+embedding_dimension = 384
+
+[translation]
+enabled = true
+strategy = "lazy"
+
+[product]
+adapter = "embedded"
+
+[providers.embedding]
+enabled = true
+provider = "sentence-transformers-local"
+# Replace with a read-only model snapshot prepared on every API/worker host.
+model = "/opt/parsecore/models/all-MiniLM-L6-v2"
+base_url = ""
+api_key_env = ""
+timeout_seconds = 30.0
+max_retries = 2
+batch_size = 16
+options = { local_files_only = true, device = "cpu", max_length = 256, normalize = true }
+
+[providers.ocr]
+enabled = true
+provider = "rapidocr"
+
+[[parsers]]
+name = "docx-native"
+media_types = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+extensions = [".docx"]
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]
+
+[parsers.options.post_process]
+dual_channel = true
+dual_table_min_rows = 2
+dual_table_min_cols = 2
+ocr_bad_pages = true
+ocr_bad_page_min_cid_tokens = 5
+ocr_bad_page_min_cid_char_ratio = 0.25
+ocr_render_resolution = 110
+ocr_confidence_threshold = 0.5
+ocr_merge_line_gap_ratio = 1.6
+
+[[parsers]]
+name = "image-ocr"
+media_types = ["image/png", "image/jpeg"]
+extensions = [".png", ".jpg", ".jpeg"]
+
+[[parsers]]
+name = "excel-native"
+media_types = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "application/vnd.ms-excel",
+]
+extensions = [".xlsx", ".xlsm", ".xls"]
+
+[[parsers]]
+name = "text-native"
+media_types = ["text/plain"]
+extensions = [".txt", ".md"]

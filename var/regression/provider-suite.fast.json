@@ -1,4 +1,9 @@
 {
+  "fast_page_budget": {
+    "max_pages_per_sample": 3,
+    "max_total_pages": 7,
+    "large_pdf_min_page_count": 32
+  },
   "gate_policy": {
     "max_samples_best_provider_differs_from_route_primary": 0,
     "max_providers_with_multiple_provider_versions": 0,
@@ -12,15 +17,42 @@
   "entries": [
     {
       "name": "primary-default",
-      "baseline": "baseline.json"
+      "baseline": "baseline.json",
+      "page_range": {
+        "start": 204,
+        "end": 206
+      },
+      "providers": [
+        "pdf-text",
+        "pymupdf4llm-local"
+      ],
+      "_description": "正文/章节窗口；默认路由与轻量 shadow Provider 的日常比较。"
     },
     {
       "name": "primary-table-structure",
-      "baseline": "baseline.table-structure.primary.json"
+      "baseline": "baseline.table-structure.primary.json",
+      "page_range": {
+        "start": 85,
+        "end": 85
+      },
+      "providers": [
+        "pdf-text",
+        "pymupdf4llm-local"
+      ],
+      "_description": "高密度表格窗口；保留表格结构与 provider 质量比较。"
     },
     {
       "name": "primary-strip-hf",
-      "baseline": "baseline.strip_hf.json"
+      "baseline": "baseline.strip_hf.json",
+      "page_range": {
+        "start": 145,
+        "end": 147
+      },
+      "providers": [
+        "pdf-text",
+        "pymupdf4llm-local"
+      ],
+      "_description": "跨页页眉/页脚和空白页证据窗口；重型 Docling 比较保留在 full/perf lane。"
     }
   ]
 }

@@ -12,6 +12,7 @@
 | API + 独立 Worker | `parsecore.queue.toml` | `queue-worker` | SQLite + 本地对象目录 | `docker compose up -d --build` |
 | 灰度/生产持久化 | `parsecore.pgvector.toml.example` | `queue-worker` | Postgres + pgvector | `docker compose --profile pgvector up -d --build` |
 | 本地验证 pgvector 链路 | `parsecore.pgvector.fake-embedding.toml.example` | `queue-worker` | Postgres + pgvector + fake embedding | `docker compose --profile pgvector up -d --build` |
+| 阿里 Qwen RAG + 二阶段排序 | `parsecore.pgvector.aliyun-rag.toml.example` | `queue-worker` | Postgres + pgvector + Qwen embedding/rerank | 注入 `PARSECORE_ALIYUN_API_KEY` 后按下文 smoke 验收 |
 | 复用宿主 OCR 网关 | `parsecore.remote-http.toml.example` | `queue-worker` | SQLite + 本地对象目录 | `PARSECORE_RUNTIME_CONFIG=./parsecore.remote-http.toml.example` |
 
 配置加载方式：
@@ -58,9 +59,12 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip 
 | 变量 | 用途 | 何时需要 |
 | --- | --- | --- |
 | `PARSECORE_RUNTIME_CONFIG` | Docker Compose 选择运行配置文件 | 使用 `docker-compose.yml` 时 |
+| `PARSECORE_DATABASE_URL` | 覆盖配置文件中的 `storage.database_url` | 密钥注入、隔离端口或宿主进程直连容器数据库时 |
 | `PARSECORE_API_KEY` | HTTP 入口鉴权密钥 | 配置 `runtime.api_key_env = "PARSECORE_API_KEY"` 时 |
 | `PARSECORE_OCR_API_KEY` | 远程 OCR 网关鉴权密钥 | `providers.ocr.provider = "remote-http"` 且配置 `api_key_env` 时 |
 | `PARSECORE_EMBEDDING_API_KEY` | OpenAI-compatible embedding 密钥 | `providers.embedding.enabled = true` 且非 fake provider 时 |
+| `PARSECORE_RERANK_API_KEY` | 通用 rerank provider 密钥 | `providers.rerank.enabled = true` 且该 provider 使用此环境变量时 |
+| `PARSECORE_ALIYUN_API_KEY` | 阿里 Qwen embedding 与 rerank 共用网关密钥 | 使用 `parsecore.pgvector.aliyun-rag.toml.example` 时 |
 | `PARSECORE_LLM_API_KEY` | LLM provider 密钥 | `providers.llm.enabled = true` 时 |
 | `PARSECORE_REGRESSION_FIXTURE_ROOT` | 回归样本根目录覆盖 | 自检样本不在默认路径时 |
 | `PARSECORE_REGRESSION_HEARTBEAT_S` | 回归解析 heartbeat 间隔 | 长样本自检时 |
@@ -105,6 +109,7 @@ poll_interval_ms = 500
 max_upload_bytes = 52428800
 staged_upload_max_bytes = 0
 allow_external_file_paths = false
+provider_comparison_artifact_retention_seconds = 2592000
 quota_enforce = false
 quota_window_hours = 24
 quota_default_limit_units = 0
@@ -129,6 +134,7 @@ log_path = "var/logs/job_events.jsonl"
 | `staged_upload_retention_seconds` | `86400` | 秒数 | 桥接暂存文件保留期，过期上传会在上传入口触发清理。 |
 | `part_artifact_retention_seconds` | `604800` | 秒数 | part PDF 等局部解析工件建议保留期，配合 `cleanup_artifacts()` 或运维任务清理。 |
 | `export_artifact_retention_seconds` | `2592000` | 秒数 | 异步导出包建议保留期，生产可按容量和审计要求调整。 |
+| `provider_comparison_artifact_retention_seconds` | `2592000` | 秒数；`0` 表示关闭 | self-check 生成的 Provider comparison JSON/Markdown 保留期；仅由 `cleanup-provider-comparison-artifacts` 运维命令消费，默认 dry-run，不会在解析或 self-check 时自动删除。 |
 | `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
 | `quota_enforce` | `false` | bool | 开启后按租户和 `quota_key` 做硬限校验。 |
@@ -147,6 +153,24 @@ log_path = "var/logs/job_events.jsonl"
 - 保持 `allow_external_file_paths = false`，跨服务提交文件优先使用 `/parse/uploads` 或 `/v1/parse/uploads`。
 - 大文件、并发或长耗时解析使用 `queue-worker`。
 - 灰度初期把 `max_workers` 和 `max_inflight_jobs` 设保守，再根据 `/v1/parse/metrics` 调整。
+
+Provider comparison 工件建议由定时任务从工作区根目录运行。首次和每次调整保留期后先保留默认 dry-run 结果；确认候选仅包含 `provider-comparison.<profile>.json/.md` 后，才追加 `--execute`：
+
+```powershell
+# 只输出候选清单，不删除任何文件。
+& '.\.venv\Scripts\python.exe' -m parsecore.cli cleanup-provider-comparison-artifacts `
+  --config parsecore.toml `
+  --root var/self-check `
+  --out var/self-check/provider-comparison-cleanup-dry-run.json
+
+# 已审核 dry-run 清单后才允许实际删除。
+& '.\.venv\Scripts\python.exe' -m parsecore.cli cleanup-provider-comparison-artifacts `
+  --config parsecore.toml `
+  --root var/self-check `
+  --execute
+```
+
+该命令不会清理 `self-check.json`、`latest*.json` 或其他审计 JSON/Markdown；将该配置设为 `0` 可禁用此清理通道。
 
 ## 鉴权、上传限制与配额
 
@@ -212,6 +236,8 @@ object_store = "local://./var/uploads"
 
 桥接上传当前要求 `storage.object_store` 使用 `local://...`。如果配置成非本地对象存储，`/parse/uploads` 与 `/v1/parse/uploads` 会返回 `500 staged_upload_requires_local_object_store`，避免把暂存文件退回到系统临时目录后绕开路径边界。
 
+运行时私有文件分区如下：同步解析上传写入 `_api_transient` 并在请求结束后删除，异步桥接上传写入 `_api_uploads`，导出包写入 `_exports/exp_<uuid>`，PDF part 写入 `_parsecore_parts/<doc>/<job>`。这些目录会复核解析后的真实路径仍位于受控根目录；上传文件使用随机名和独占创建，异常或 NTFS ADS 风格扩展名降级为 `.bin`。POSIX 目录/文件权限分别收紧为 `0700/0600`；Windows 依赖隔离子目录的继承 ACL，并执行 best-effort chmod。
+
 错误口径：
 
 | 场景 | HTTP | code |
@@ -253,6 +279,7 @@ object_store = "local://./var/uploads"
 
 [index]
 mode = "hybrid"
+embedding_dimension = 1536
 ```
 
 | 字段 | 支持值 | 说明 |
@@ -264,10 +291,12 @@ mode = "hybrid"
 | `index.mode` | `hybrid` | 默认值；Postgres 下会启用 pgvector 索引，非 Postgres 下自动退化。 |
 | `index.mode` | `pgvector` | 显式要求 pgvector 索引；需配合 Postgres。 |
 | `index.mode` | `null` / `memory` | 不启用持久索引。 |
+| `index.embedding_dimension` | 正整数，默认 `1536` | pgvector 列维度，必须与实际 embedding 模型返回的向量维度一致。 |
 
 注意：
 
 - `index.mode = "hybrid"` 搭配 SQLite 时不会启用 pgvector，搜索会走可用的关键词/本地回退路径。
+- pgvector 已建表后不能只靠改配置切换维度：切换模型维度前必须使用新数据库/schema，或执行受控迁移并重建全部向量；运行时会在不匹配时拒绝写入，避免静默混用向量空间。
 - API 与 Worker 分进程部署时，生产应使用 Postgres，否则多进程之间无法共享内存态数据。
 - Docker Compose 的 pgvector profile 已提供 `parsecore-postgres` 服务。
 
@@ -386,17 +415,129 @@ batch_size = 16
 options.dimensions = 1536
 ```
 
+可选的本地 Transformer embedding（仅用于明确配置的离线/受控验收，不改变默认路由）：
+
+```toml
+[providers.embedding]
+enabled = true
+provider = "sentence-transformers-local"
+# 可填 Hugging Face model id 或本地 snapshot 目录
+model = "sentence-transformers/all-MiniLM-L6-v2"
+batch_size = 16
+options.local_files_only = true
+options.device = "cpu"
+options.max_length = 256
+options.normalize = true
+```
+
+安装可选依赖：`py -m pip install -e ".[local-embedding]"`。离线环境应先准备模型目录并把 `model` 改为本地路径；该 provider 使用 mean pooling + L2 normalization 生成真实向量，不使用 fake embedding。
+
 | 字段 | 说明 |
 | --- | --- |
 | `enabled` | 关闭时不会生成 chunk embedding。 |
-| `provider` | 支持 `fake` / `test` / `stub` 和 `openai-compatible` / `openai` / `dashscope` / `qwen`。 |
+| `provider` | 支持 `fake` / `test` / `stub`、`openai-compatible` / `openai` / `dashscope` / `qwen`，以及可选的 `sentence-transformers-local` / `transformers-local`。 |
 | `base_url` | OpenAI-compatible API 根地址，不要带 `/embeddings`。 |
 | `model` | embedding 模型名。 |
 | `api_key_env` | 密钥环境变量名。 |
 | `batch_size` | 每批 embedding chunk 数量。 |
 | `options.dimensions` | 可选，透传给兼容 OpenAI 的 embedding 接口。 |
+| `options.local_files_only` | 本地 Transformer 是否禁止联网加载模型。 |
+| `options.device` / `options.max_length` / `options.normalize` | 本地 Transformer 的设备、最大 token 长度和向量归一化开关。 |
 
 若 provider 未配置好，运行时会降级为无 embedding，不阻断基础解析。
+
+### Rerank Provider
+
+Rerank 是可选的检索二阶段：ParseCore 先按既有 hybrid/关键词规则取得候选 chunk，再把至多 `candidate_limit` 条候选交给排序模型。它不参与文档解析、OCR、chunk 生成或 parser 路由，默认关闭。
+
+```toml
+[providers.rerank]
+enabled = true
+provider = "dashscope-compatible"
+model = "qwen/qwen3-vl-rerank"
+base_url = "https://model-router.edu-aliyun.com/v1"
+api_key_env = "PARSECORE_ALIYUN_API_KEY"
+timeout_seconds = 30.0
+max_retries = 2
+candidate_limit = 30
+# options = { enable_truncation = true }
+```
+
+当前内置的 `dashscope-compatible` 实现已按阿里 Qwen 排序网关实际协议适配：请求为 `POST {base_url}/rerank`，使用 `input.query` 和 `input.documents`；响应读取 `output.results[].index` 与 `relevance_score`。密钥始终只从 `api_key_env` 读取，不会写入 TOML、运行态描述或 smoke 工件。
+
+| 字段 | 说明 |
+| --- | --- |
+| `enabled` | 显式开启二阶段排序；默认 `false`。 |
+| `provider` | 目前支持 `dashscope-compatible` 及其 `qwen-rerank` / `aliyun-rerank` 别名，以及用于测试的 `fake`。 |
+| `model` / `base_url` | 排序模型名与兼容网关根地址；根地址不要带 `/rerank`。 |
+| `api_key_env` | 排序网关密钥的环境变量名，可与 embedding 复用同一受控密钥。 |
+| `candidate_limit` | 初检后送往排序模型的最多候选数；必须为正整数，并至少满足请求的 `limit`。 |
+| `options` | 透传到网关 `parameters`，例如由已验证网关支持时设置 `enable_truncation`。 |
+
+排序生效时，搜索响应的 `retrieval_mode` 会显示为 `hybrid+rerank` 或 `keyword-fallback+rerank`，每个命中保留 `retrieval_score` 并给出 `rerank_score`。若网关超时、不可用或返回不安全的索引，运行时保留初检结果、不阻断查询，并记录不含查询文本和密钥的 `rerank_skipped` 事件；同时写入固定 `failure_category` 的 `provider_failure` 运维事件和 Prometheus 终态失败计数。
+
+#### Production RAG 配置模板
+
+默认 `parsecore.toml` 继续保持 embedding 与 rerank 关闭。需要生产 RAG 时，从以下完整模板选择一条，复制为部署专用配置后替换数据库、模型或网关地址；不得把密钥写入 TOML。只有需要二阶段排序的 profile 才开启 `[providers.rerank]`。
+
+- [本地 Transformer + pgvector](../parsecore.pgvector.local-embedding.toml.example)：已按 `all-MiniLM-L6-v2` 的 `384` 维配置，模型目录必须提前放到每个 API/worker 节点，且镜像或虚拟环境需要安装 `.[local-embedding]`。
+- [远程 OpenAI-compatible 网关 + pgvector](../parsecore.pgvector.remote-embedding.toml.example)：采用不可路由的示例 URL 和 `PARSECORE_EMBEDDING_API_KEY` 环境变量；部署前由密钥管理系统注入真实 endpoint、模型和凭证。若网关不支持 `dimensions` 请求，删除该 option，并把 `index.embedding_dimension` 改为它实际返回的维度。
+- [阿里 Qwen embedding + rerank + pgvector](../parsecore.pgvector.aliyun-rag.toml.example)：使用已验证的 `qwen/text-embedding-v4`（实际返回 `1024` 维）与 `qwen/qwen3-vl-rerank`，共用 `PARSECORE_ALIYUN_API_KEY`。该网关在典型 PDF 切片验收中拒绝 16-input embedding 请求，因此模板固定 `batch_size=5`；启用前还须迁移或新建匹配 `1024` 维的 pgvector schema。
+
+本地路径仅在 pgvector 数据库已可连接、`.[local-embedding]` 已安装且模型目录已就绪后执行：
+
+```powershell
+& '.\.venv\Scripts\python.exe' tools/local_rag_acceptance.py `
+  --config parsecore.pgvector.local-embedding.toml.example `
+  --out-json var/self-check/local-rag-production-profile.json
+```
+
+远程路径仅在 pgvector 数据库已可连接，且真实网关 endpoint、模型和凭证均已通过部署环境注入后执行：
+
+```powershell
+& '.\.venv\Scripts\python.exe' tools/_embedding_smoke.py `
+  --config parsecore.pgvector.remote-embedding.toml.example `
+  --require-live `
+  --out-json var/self-check/remote-embedding-smoke.json
+```
+
+阿里 Qwen profile 可在数据库验收前先单独验证排序网关，不会写入文档或数据库：
+
+```powershell
+& '.\.venv\Scripts\python.exe' tools/_rerank_smoke.py `
+  --config parsecore.pgvector.aliyun-rag.toml.example `
+  --require-live `
+  --out-json var/self-check/aliyun-rerank-smoke.json
+```
+
+阿里 Qwen profile 的端到端技术验收可用 `PARSECORE_DATABASE_URL` 临时覆盖模板数据库地址，不需要修改或复制配置文件：
+
+```powershell
+$env:PARSECORE_DATABASE_URL = "postgresql://parsecore:replace-me@127.0.0.1:55433/parsecore"
+$env:PARSECORE_ALIYUN_API_KEY = "由密钥管理系统临时注入"
+& '.\.venv\Scripts\python.exe' tools/_embedding_smoke.py `
+  --config parsecore.pgvector.aliyun-rag.toml.example `
+  --require-live `
+  --out-json var/self-check/aliyun-pgvector-rag-smoke.json
+Remove-Item Env:PARSECORE_DATABASE_URL, Env:PARSECORE_ALIYUN_API_KEY
+```
+
+`_embedding_smoke.py` 使用受控的临时 DOCX，执行解析、embedding、pgvector 写入、hybrid 检索和可选 rerank；它可以证明技术链路及维度配置正确，但不能替代经批准的典型业务文档相关性验收。独立 `_rerank_smoke.py` 只验证排序 transport，不连接数据库。
+
+对真实外部文档或受控 PDF 页段执行可复现的 production profile 验收：
+
+```powershell
+& '.\.venv\Scripts\python.exe' tools/production_rag_acceptance.py `
+  --config parsecore.pgvector.aliyun-rag.toml.example `
+  --document D:\path\to\approved-manual.pdf `
+  --query-suite fixtures\rag\approved-query-suite.json `
+  --doc-id approved-manual-pages-204-206 `
+  --page-start 204 `
+  --page-end 206 `
+  --out-json var/self-check/approved-production-rag.json
+```
+
+查询套件必须显式声明 `approval_status / top_k / min_hit_rate_at_k / require_rerank / cases[]`；每个 case 提供稳定 `id`、`query` 与至少一个 `expected_any` 短语。工具不会把命中文本写进 JSON，只记录可审计分数和期望短语是否命中。`approval_status` 为 draft 时，即使技术门禁通过也不能称为业务 Gold。
 
 ### LLM Provider
 
@@ -466,6 +607,10 @@ gate_checks = ["samples", "license", "performance", "observability"]
 | `gate_checks` | 当前针对该 provider 记录的门禁维度，推荐固定为 `samples / license / performance / observability`。 |
 | `options` | 可选 provider 私有选项；本阶段只配置和透传，不触发外部服务调用。 |
 
+`pymupdf4llm-local` 当前支持将受控选项透传给上游 `to_markdown`，包括 `ignore_graphics`、`graphics_limit`、`table_strategy`、`ignore_images`、`dpi` 等；默认不设置这些选项，保持现状行为。它们只适合离线候选评测或人工批准后的灰度 profile，不能把 `ignore_graphics=true` 直接用于表格文档：第 165 页探针显示该快路径虽可把单页耗时从约 4.99s 降到约 0.1s，但 Markdown 表格分隔符从 630 变为 0。
+
+普通 PDF 的临时调参复跑已记录在 [provider-gold-tuned-ignore-graphics-ordinary-20260714.json](D:\个人文件\个人开发\解析管理中台\var\self-check\provider-gold-tuned-ignore-graphics-ordinary-20260714.json)，该工件不代表准入通过，也不会修改主配置。
+
 `providers.local_parser_routing` 控制实际解析路由：
 
 | 字段 | 说明 |
@@ -525,6 +670,41 @@ options = { detect_tables = true }
 
 `docling-local` 适合作为 PDF / DOCX 的统一结构对照 provider。建议先在 route-plan、provider-suite 或问题页段灰度中使用，再决定是否进入执行路由。
 
+对已确认“无表格、无 OCR 需求”的候选页，可在离线对标配置中显式开启
+`fast-text` 组合：
+
+```toml
+options = {
+  detect_tables = true,
+  reuse_converter = true,
+  do_ocr = false,
+  do_table_structure = false,
+  force_backend_text = true,
+  layout_batch_size = 1,
+  table_batch_size = 1,
+  ocr_batch_size = 1,
+  queue_max_size = 8,
+}
+```
+
+该组合不是默认值：它能明显减少文本页耗时，但会丢失表格结构。当前受控结果见
+`var/self-check/docling-pipeline-profile-probe-r18.json`，只有在页级信号确认无表格/OCR
+需求后才可作为候选 fallback。
+
+`reuse_converter = true` 是另一个显式候选开关：它在同一个长生命周期 worker
+中复用已构造的 `DocumentConverter`，适合分片重试或重复解析，减少模型/布局资源的
+冷启动；10 页受控 probe 观察到 cold `29.883 s` → warm `13.299 s`（约 `-55.5%`），
+结构指纹保持一致，且首块 provenance 会写入 `converter_reuse_enabled` 与
+`converter_cache_hit`，便于对比报告区分冷/热解析，详见
+`var/self-check/docling-reuse-probe-r19.json`。默认关闭，
+且不会把并发安全假设带入 `pdf-text` 主路线；仍需全量、工作集和并发复测。
+
+在 Windows 中文路径的虚拟环境中，`DoclingParser` 会在首次加载时为
+`docling-parse` 的原生 glyph 资源创建临时 ASCII junction；如果运行环境禁止
+junction，则退回一次性 ASCII 目录复制。这样无需手工设置 `PYTHONPATH`，也不会
+改变默认 `pdf-text` 路由。若日志仍出现 `additional.dat does not exist`，请检查
+临时目录写权限并重新安装 `.[docling]`。
+
 ## Parser 配置
 
 每个 parser 使用一个 `[[parsers]]` 块：
@@ -579,6 +759,8 @@ ocr_merge_line_gap_ratio = 1.6
 | `ocr_render_resolution` | OCR 渲染分辨率，越高越慢。 |
 | `ocr_confidence_threshold` | OCR 结果置信度阈值。 |
 | `ocr_merge_line_gap_ratio` | OCR 行合并间距比例。 |
+| `parse_cache` | 是否在同一 worker 内缓存同源重解析结果；默认库行为关闭，生产配置可按固定样本验证后开启。 |
+| `parse_cache_max_entries` | 同一 `pdf-text` parser 的缓存 LRU 上限，控制重解析缓存的内存边界。 |
 
 调参建议：
 
@@ -678,6 +860,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/o
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --config parsecore.toml
 ```
@@ -694,7 +877,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .pdf,.docx,.xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
 ```
 
-该报告除 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables` 外，还会为每个样本写入 `provider_report.comparison_report`，并在 Markdown 中展示 `primary_provider / best_provider / provider_score`，用于把固定样本性能与本地 Provider 对比口径放在同一份报告中。
+该报告除 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables` 外，还会为每个样本写入 `provider_report.comparison_report`，并在 Markdown 中展示 `primary_provider / best_provider / provider_score`，用于把固定样本性能与本地 Provider 对比口径放在同一份报告中。`parse_perf_baseline.py` 为兼容历史内存基线默认启用 `tracemalloc`；只测量低干扰端到端延迟时追加 `--no-track-python-memory`，此时 `peak_kb=null`，Provider 内存轴保持 pending，不能与内存追踪通道的耗时混作同一序列。独立的 Provider 对比工具默认不启用 `tracemalloc`，`elapsed_s` 只计 parser 执行时间；需要 Python 峰值内存诊断时显式追加 `--track-python-memory`，但该模式不应作为真实耗时 SLA。
 
 本地 Provider 离线对比：
 
@@ -704,13 +887,48 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
 ```
 
-该工具对同一样本逐个运行已配置的本地 parser，输出 `ir_summary / coverage_summary / rag_coverage_quality / provider_report.comparison_report`。未配置、依赖缺失或不支持文件类型的候选会写成 `skipped/failed`，不会中断整批样本；远程 OCR provider 会在该离线工具中禁用，避免 Provider 对比时触发外部 OCR API。`--suite` 可读取新的 `samples / fixtures / cases` 清单，也可直接复用现有 `entries -> baseline -> fixtures` 回归套件；每个样本可用 `providers / provider_ids / profile / fixture_relative_path / page_range` 覆盖全局参数，suite 顶层还可声明 `gate_policy.max_provider_reading_order_warning_runs`、`gate_policy.max_provider_quality_warning_runs`、`gate_policy.max_samples_best_provider_differs_from_route_primary`、`gate_policy.max_providers_with_multiple_provider_versions`、`gate_policy.max_providers_with_multiple_adapter_versions` 这类基础门禁预算。仓库当前内置了 `var/regression/provider-suite.fast.json`、`var/regression/provider-suite.full.json` 与 `var/regression/provider-suite.perf.json` 三套工件，分别对应 `fast`、`full` 与 `perf` 自检默认 Provider 门禁。默认 auto route-plan 模式下，报告仍会保留 disabled/未接入候选的 `skipped` 解释，但 gate 不再把这类 `parser_not_configured` / `unsupported_media_type_or_extension` 直接当成 warning；只有显式指定的 Provider 被跳过，或出现非预期 skipped，才会进入 `provider_runs_skipped`。现在每次 provider run 还会显式回填 `provider_version / adapter_version`，suite 顶层新增 `provider_identity_summary`，用于追踪“同一个 provider id 实际跑的是哪版上游库/哪版 Adapter”；一旦同名 Provider 混入多版上游库或多版 Adapter，gate 会先给出 drift warning，再按上面的 budget 决定是否 fail。与此同时，报告还会输出 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action` 与 `requires_config_update`，并补齐 `drift_fields / drift_details / config_patch`，便于把对比结论直接回写到 `providers.local_parsers` 配置。如果希望把“准入建议还没收敛”也纳入 fail gate，suite 顶层还支持 `gate_policy.max_providers_requiring_config_update`、`gate_policy.max_providers_with_route_mode_drift`、`gate_policy.max_providers_with_gate_status_drift`、`gate_policy.max_providers_with_gate_checks_drift`、`gate_policy.max_providers_with_route_ready_drift` 五类 admission drift 预算，分别约束待回写 provider 数量以及 `route_mode / gate_status / gate_checks / route_ready` 四类配置漂移。`parsecore self-check` 在实际执行 provider comparison 时，会把 identity 和 admission 两份摘要一起带回检查结果，并在 summary 中追加 `identity_drift / admission_ready / admission_update` 计数。与此同时，self-check 仍会在输出目录自动落盘 `provider-comparison.fast/full/perf.json/.md`，并把路径写回 self-check JSON。`--fixture-root` 或 `PARSECORE_REGRESSION_FIXTURE_ROOT` 用于跨机器恢复真实样本路径。对 PDF 还支持 `--page-start / --page-end` 或 suite 内 `page_range` 局部评估：工具会先切出 part 文件，再把 IR / coverage / provider_report 页码平移回原始页号，便于大文件异常页和采样页灰度对比。
+该工具对同一样本逐个运行已配置的本地 parser，输出 `ir_summary / coverage_summary / rag_coverage_quality / provider_report.comparison_report`。未配置、依赖缺失或不支持文件类型的候选会写成 `skipped/failed`，不会中断整批样本；远程 OCR provider 会在该离线工具中禁用，避免 Provider 对比时触发外部 OCR API。真正失败的 provider 还会写入 `failure_category`，并在 gate summary 的 `failure_categories` 中汇总 `provider_unavailable / timeout / invalid_input / permission_denied / unsupported / provider_failed`，用于区分环境阻塞与解析器运行退化。若候选暴露了 Docling converter telemetry，单次 run 还会带 `converter_reuse_enabled / converter_cache_hit / converter_cache_state`，suite summary 汇总 `converter_cache.observations / hits / misses`，方便把冷启动成本从稳态吞吐中拆出来。`--suite` 可读取新的 `samples / fixtures / cases` 清单，也可直接复用现有 `entries -> baseline -> fixtures` 回归套件；每个样本可用 `providers / provider_ids / profile / fixture_relative_path / page_range` 覆盖全局参数，suite 顶层还可声明 `gate_policy.max_provider_reading_order_warning_runs`、`gate_policy.max_provider_quality_warning_runs`、`gate_policy.max_samples_best_provider_differs_from_route_primary`、`gate_policy.max_providers_with_multiple_provider_versions`、`gate_policy.max_providers_with_multiple_adapter_versions` 这类基础门禁预算。仓库当前内置了 `var/regression/provider-suite.fast.json`、`var/regression/provider-suite.full.json` 与 `var/regression/provider-suite.perf.json` 三套工件，分别对应 `fast`、`full` 与 `perf` 自检默认 Provider 门禁。默认 auto route-plan 模式下，报告仍会保留 disabled/未接入候选的 `skipped` 解释，但 gate 不再把这类 `parser_not_configured` / `unsupported_media_type_or_extension` 直接当成 warning；只有显式指定的 Provider 被跳过，或出现非预期 skipped，才会进入 `provider_runs_skipped`。现在每次 provider run 还会显式回填 `provider_version / adapter_version`，suite 顶层新增 `provider_identity_summary`，用于追踪“同一个 provider id 实际跑的是哪版上游库/哪版 Adapter”；一旦同名 Provider 混入多版上游库或多版 Adapter，gate 会先给出 drift warning，再按上面的 budget 决定是否 fail。与此同时，报告还会输出 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action` 与 `requires_config_update`，并补齐 `drift_fields / drift_details / config_patch`，便于把对比结论直接回写到 `providers.local_parsers` 配置。如果希望把“准入建议还没收敛”也纳入 fail gate，suite 顶层还支持 `gate_policy.max_providers_requiring_config_update`、`gate_policy.max_providers_with_route_mode_drift`、`gate_policy.max_providers_with_gate_status_drift`、`gate_policy.max_providers_with_gate_checks_drift`、`gate_policy.max_providers_with_route_ready_drift` 五类 admission drift 预算，分别约束待回写 provider 数量以及 `route_mode / gate_status / gate_checks / route_ready` 四类配置漂移。`parsecore self-check` 在实际执行 provider comparison 时，会把 identity 和 admission 两份摘要一起带回检查结果，并在 summary 中追加 `identity_drift / admission_ready / admission_update` 计数。与此同时，self-check 仍会在输出目录自动落盘 `provider-comparison.fast/full/perf.json/.md`，并把路径写回 self-check JSON。`--fixture-root` 或 `PARSECORE_REGRESSION_FIXTURE_ROOT` 用于跨机器恢复真实样本路径。对 PDF 还支持 `--page-start / --page-end` 或 suite 内 `page_range` 局部评估：工具会先切出 part 文件，再把 IR / coverage / provider_report 页码平移回原始页号，便于大文件异常页和采样页灰度对比。
+
+Provider comparison 与运行时 embedding/rerank 共用固定低基数失败枚举：`invalid_input / permission_denied / rate_limited / timeout / provider_unavailable / invalid_response / configuration_error / unsupported / provider_failed`。运行时只对终态失败写入 `provider_failure` 事件和 `parse_provider_failure_total`，重试继续使用原有 `embedding_retry` 计数，避免重复放大故障；失败分类仅用于诊断，不改变重试、fallback 或检索排序。
+
+如需在同一 suite 内测量候选 Provider 的 warm-state，可追加 `--reuse-parser-instances`，让每个 Provider 在所有样本间复用一个 parser 实例，并在 measurement 中标记 `parser_lifecycle=provider_instance_reused`；默认关闭，仍按 `new_per_run` 生成冷启动基线，不能把两种口径直接混合比较。
+
+`pdf-text` 若启用了 `post_process.parse_cache`，Provider 对比还会读取首块 provenance 中的
+`parse_cache_state=cold|warm`，并在 suite summary 汇总 `parse_cache.observations / hits / misses`，用于量化同源重解析或 part retry 的缓存收益。
 
 ### P2 人工确认 gold corpus
 
 `tools/provider_gold_evaluation.py` 在既有离线对比结果上执行页级准入评分。它只读取本地副本并写出报告，绝不修改 provider 配置、默认路由、活动产物或线上任务。每一个候选 block 都保留页码、位置、`provider_id / provider_version / source_kind` 和表格 cell 证据，以支持人工复核。
 
-仓库提供 [gold-corpus-v1.json](../fixtures/provider-evaluation/gold-corpus-v1.json) 作为受控入口；其中导入的 P0 样本均为 `seed`，不是人工确认的 gold 标签。评审人须为每页确认来源截图、页内 block 顺序、标题层级、表格行列/合并信息、关键 token 与应排除的页眉页脚，并把 `review_status` 改为 `approved`。在至少 50 页被确认前，任何候选只能保持 shadow-only。
+仓库提供 [gold-corpus-v1.json](../fixtures/provider-evaluation/gold-corpus-v1.json) 作为受控入口；当前已导入 50 个 `approved` review-queue 页面。2026-07-14 本次批准由用户明确授权的 `Codex (AI-assisted, user-authorized)` 完成：它核对源截图/文本探针、SHA-256、`pdf-text` 基线块顺序与页级探针，并生成受限 expected labels；这不是独立人工 gold，也不改变 Provider 许可证或路由准入。若治理要求人工签字，仍需由 named reviewer 逐页复核。候选在至少 50 页受控批准前只能保持 shadow-only；当前即使达到 50 页，仍须通过许可证、结构质量和稳定运行门禁。
+
+实际审核入口分为两处：先打开 [RISK_REVIEW.md](D:\个人文件\个人开发\解析管理中台\output\pdf\provider-gold-review-20260714\RISK_REVIEW.md)（前 20 个高风险页）或证据包 [README.md](D:\个人文件\个人开发\解析管理中台\output\pdf\provider-gold-review-20260714\README.md)（全部 50 页），查看对应 PNG 和文本探针；然后只在受控队列 [gold-review-queue-v1.json](D:\个人文件\个人开发\解析管理中台\fixtures\provider-evaluation\gold-review-queue-v1.json) 中填写 `review.reviewer / review.reviewed_at / review.source_screenshot / review.notes`、`expected.blockKinds / anchors / orderedAnchors / tableAnchors / criticalTokens / mustNotBeHeading`，最后把该页 `review_status` 改为 `approved` 或 `rejected`。`manifest.json`、`RISK_REVIEW.md`、`provider-gold-pending-full-20260714.json` 和 `var/self-check` 下的生成副本都是证据/报告，不是审批入口；gold corpus 会按 `imports` 自动读取受控队列。
+
+编辑后可用只读校验器检查队列，不会自动修改任何页面：
+
+```powershell
+py tools/provider_gold_review_status.py `
+  --queue fixtures/provider-evaluation/gold-review-queue-v1.json `
+  --evidence-root output/pdf/provider-gold-review-20260714 `
+  --out-json var/self-check/provider-gold-review-status-20260714.json `
+  --require-minimum
+```
+
+`--require-minimum` 会在 approved 页数未达到 50 页时返回非零；当前队列校验结果为 `status=ready, 50 approved / 0 pending / 0 rejected / 0 errors`。只有校验达到 `status=ready` 后，才继续运行 Provider gold evaluation。
+
+本次用户已明确授权由 Codex 执行 AI 辅助核验，可复现命令如下；默认是 dry-run，只有追加 `--approve` 才会写入受控队列。该工具会把审核范围写成 `ai_assisted_review_not_human_gold`，不会修改 Provider 路由或许可证：
+
+```powershell
+py tools/ai_gold_review.py `
+  --queue fixtures/provider-evaluation/gold-review-queue-v1.json `
+  --manifest output/pdf/provider-gold-review-20260714/manifest.json `
+  --evaluation var/self-check/provider-gold-pending-full-20260714.json `
+  --out-queue fixtures/provider-evaluation/gold-review-queue-v1.json `
+  --audit-out var/self-check/provider-gold-ai-review-20260714.json `
+  --approve
+```
+
+批准后的状态审计工件为 [provider-gold-review-status-20260714-ai-r2.json](D:\个人文件\个人开发\解析管理中台\var\self-check\provider-gold-review-status-20260714-ai-r2.json)，AI 审核审计为 [provider-gold-ai-review-20260714.json](D:\个人文件\个人开发\解析管理中台\var\self-check\provider-gold-ai-review-20260714.json)。
 
 源文件映射必须留在本机或受控工件存储，不能提交业务 PDF 或凭据。以 [source-map.example.json](../fixtures/provider-evaluation/source-map.example.json) 复制出本地映射后运行：
 
@@ -725,6 +943,25 @@ py tools/provider_gold_review_queue.py --source-map D:/secure/provider-gold-sour
 ```
 
 生成器不会调用 parser，也不会填充标签或将任何页面标为 `approved`。评审人必须在队列中填入 screenshot、block kinds、anchors、顺序、table anchors、关键 token 和页眉页脚排除项；完成后才能将相应记录合并至 gold corpus。
+
+如果需要把原始页截图和文本探针一次性准备好，可在受控本地目录生成只读 evidence packet：
+
+```powershell
+py tools/provider_gold_evidence.py `
+  --queue var/self-check/p0-gold-review-queue-20260714.json `
+  --source-map var/self-check/p0-gold-source-map-20260714.json `
+  --out-dir output/pdf/provider-gold-review-20260714 `
+  --dpi 150 `
+  --evaluation-json var/self-check/provider-gold-pending-full-20260714.json
+```
+
+该命令会写出 `manifest.json`、`README.md`、每页 PNG 和 pypdf 文本探针；输出中的 `review_status` 保持 `pending`，不能替代人工 gold，也不会改写 `fixtures/provider-evaluation/gold-corpus-v1.json`。
+
+2026-07-14 已实际生成 [provider-gold-review-20260714/manifest.json](D:\个人文件\个人开发\解析管理中台\output\pdf\provider-gold-review-20260714\manifest.json)，50/50 页证据就绪，当前状态为 `approved=50 / pending=0 / rejected=0`；原始待审核双跑记录仍保留在 [provider-gold-pending-full-20260714.json](D:\个人文件\个人开发\解析管理中台\var\self-check\provider-gold-pending-full-20260714.json)，批准后真实耗时复评记录为 [provider-gold-ai-approved-20260714-r2.json](D:\个人文件\个人开发\解析管理中台\var\self-check\provider-gold-ai-approved-20260714-r2.json)。最新复评中候选 50/50 完成、基线 49/50，候选仍因许可证、结构风险和长尾被阻断，不会自动修改 route。
+
+执行 `provider_gold_evidence.py` 时追加 `--evaluation-json var/self-check/provider-gold-pending-full-20260714.json`，会在证据目录生成 [RISK_REVIEW.md](D:\个人文件\个人开发\解析管理中台\output\pdf\provider-gold-review-20260714\RISK_REVIEW.md)，把前 20 个风险页映射到 PNG/文本探针；它不会改变任何 `review_status`。
+
+评测报告中的 `gold_evaluation.risk_summary` 是只读的人工复核排序：`provider_metrics` 给出平均/p95/最大耗时与结构总量，`document_metrics` 按文档聚合，`priority_pages` 列出候选长尾、基线缺失、block/table/figure 变化页；它不把 pending 页面转换为 gold，也不改变准入结论。
 
 可先使用重复的 `--document-id` 只诊断一个已映射文档，例如 `--document-id doc-62f0d9e0-3536-42d9-955c-9ea7447595b8 --include-seed`。这仅方便标注和问题页检查，绝不会因为子集通过而晋升 provider。
 
@@ -752,13 +989,17 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/parse/prometheus
 | --- | --- | --- |
 | API 健康 | `/health`、`/v1/runtime` | 当前配置、execution_mode、api_auth_enabled、payload_schemas、provider_registry.summary |
 | 队列与任务 | `/v1/parse/metrics`、`/v1/parse/events`、`/v1/parse/jobs/{job_id}` | active/pending/failed/done、duration p95/p99、retry/dead_letter、claim_token、lease_expires_at |
-| 文档质量 | `/v1/parse/documents/{doc_id}/quality` | quality_gate.gate、recommended_action、attention_summary、quality_signal_counts |
+| 文档质量 | `/v1/parse/documents/{doc_id}/quality`、`/v1/parse/events?event_type=document_quality`、`/v1/parse/prometheus` | quality_gate.gate、recommended_action、attention_summary、quality_signal_counts、coverage/embedding ratio、provider warning、`parse_document_quality_total` |
 | RAG 覆盖 | `/coverage`、`projection=coverage` | text_page_coverage_ratio、table_unit_coverage_ratio、unit_chunk_coverage_ratio、gap_unit_ids |
-| Provider 灰度 | `/providers`、`/v1/parse/providers/route-plan` | primary_provider_id、best_provider_id、route_status、excluded reasons、admission drift |
+| Provider 灰度与故障 | `/providers`、`/v1/parse/providers/route-plan`、`/v1/parse/events?event_type=provider_failure`、`/v1/parse/prometheus` | primary_provider_id、best_provider_id、route_status、excluded reasons、admission drift、provider_type/provider_id/failure_category、`parse_provider_failure_total` |
 | Part 运维 | `/parts`、rerun response contracts | warning/failed parts、rerun_status、provider_changed_parts、monitor_requests、verify_requests |
 | 导出与工件 | export job manifest、retention 配置 | export status、file count、record count、artifact age、retention_seconds |
 
 事件日志 `runtime.log_path` 默认写入 `var/logs/job_events.jsonl`。事件字段应按 `job_id / doc_id / part_id / tenant_id / stage / error_category` 建索引；`api_key / token / authorization / secret / password` 等敏感字段会在事件日志写入前脱敏。
+
+完成态解析还会向进程内 EventAggregator 写入脱敏 `document_quality` 事件。它使用与 `/quality` 相同的配置阈值、coverage/embedding 语义和 report-only gate 优先级，但从本次 blocks/index manifest 生成轻量运维摘要，不在 execute 写路径中重建完整 Provider/part 诊断投影；`/quality` 仍是详细诊断的权威接口。事件只携带定位 ID、固定 `quality_gate / quality_flags`、质量分、质量信号数、Provider warning 数、coverage ratio 和 embedding ratio，不携带文档正文或原始异常。分片父文档只在全部 part 合并并进入 `DONE` 后记录最终观测。异步任务的 job 状态可能比该观测先短暂可见，接入方应按最终一致方式查询事件。
+
+Prometheus 暴露 `parse_document_quality_total{gate}`、`parse_document_quality_flag_total{flag}`，以及 `parse_document_quality_score`、`parse_document_text_page_coverage_ratio`、`parse_document_table_unit_coverage_ratio`、`parse_document_unit_chunk_coverage_ratio`、`parse_document_embedded_chunk_ratio`、`parse_document_quality_signal_count`、`parse_document_provider_warning_count` 的 `_sum/_count`。这些指标不使用 `doc_id` 标签，未知 gate/flag 归并为 `other`，避免高基数；当前聚合随进程重启清零，生产部署应由宿主 Prometheus 持续抓取 `/v1/parse/prometheus`。
 
 文档结果 projection：
 
@@ -856,7 +1097,7 @@ GET /v1/parse/schemas/document-reader
 
 `/quality` 返回文档级质量总览，除 `quality / quality_signals / quality_gate / rag_coverage_quality / parse_units` 外，当前还会补 `provider_diagnostics`、`parts_diagnostics` 与 `attention_summary`，让宿主在单次请求里同时看到 Provider 对比摘要、comparison actions、part 汇总、attention parts，以及一组已按优先级合并好的 `recommended_actions`。`attention_summary` 还会直接给出 `recommended_focus / recommended_action / recommended_entrypoint`，用来回答“下一步先看 quality、providers 还是 parts”；`attention_summary.entrypoints` 则会给出 `quality / providers / parts / coverage` 四个诊断视图的 endpoint、attention 状态、badge 数和推荐落点，适合驱动宿主的导航和红点。对于宿主联调更直接的筛选需求，`providers.context` 会带 `primary_provider_id / best_provider_id / attention_provider_ids`，`parts.context` 会带 `attention_part_ids / rerun_part_ids / provider_changed_part_ids / coverage_gap_part_ids / coverage_gap_unit_part_ids / rerun_gap_unit_part_ids / unembedded_part_ids / gap_unit_ids`，`coverage.context` 会带 `gap_page_numbers / pages_missing_rag_units / pages_missing_chunks / pages_chunks_not_embedded`。同时，`parts_diagnostics.attention_parts[]` 也已补齐 `coverage_gap_unit_count / gap_unit_ids / unembedded_unit_count / gap_unit_count_delta / gap_unit_ids_added / gap_unit_ids_removed`，方便宿主在不展开 `/parts` 明细页的前提下直接判断哪个 part 还有哪些 KnowledgeUnit 缺口、rerun 后是新增还是减少。另外，`attention_summary.contracts.default_request / preferred_execute_request / recommended_requests / inspect_requests / execute_requests / entrypoint_requests / parts_batch_rerun_requests / workflow` 会把这些建议进一步规范成统一 request 结构，适合宿主直接提交下钻或批量 rerun，并把查看类与执行类请求分开消费；其中 `workflow` 会显式描述 `inspect -> compare -> execute -> verify` 四阶段，帮助宿主把诊断页、Provider 复核和 part/document 复跑串成固定流程。`/coverage` 返回页级 RAG 覆盖报告和 `rag_coverage_quality`，包括 `rag_empty_text_page / rag_units_without_chunks / rag_chunks_not_embedded / rag_table_without_unit / rag_figure_caption_missing` 等信号；`/providers` 返回该文档实际使用的 Provider footprint，包括 provider 汇总、页级 `provider_ids`、覆盖缺口和 RAG 类质量信号，适合灰度对比、排版问题定位和 Provider 路由审计。`/providers.comparison_report` 会按 Provider 输出 `rankings / score / recommendation / axes`，当前覆盖文本覆盖、表格 unit、图示 caption、RAG chunk/embedding 风险，并会在 Provider provenance 提供时汇总 `reading_order_confidence / provider_elapsed_s / provider_memory_mb`；未观测到的字段会进入 `pending_axes`。为方便接入方直接消费，`comparison_report.summary` 现还会输出 `primary_provider_rank / primary_provider_score / primary_provider_recommendation / best_provider_score / best_provider_recommendation / best_provider_differs_from_primary / providers_with_quality_warnings / providers_with_reading_order_warning / providers_with_coverage_gaps / quality_warning_provider_ids / reading_order_warning_provider_ids / coverage_gap_provider_ids / attention_provider_ids / needs_attention / recommended_action`，前端无需再逐条扫描 `rankings` 才能做质量面板或 Provider 复核提示。`/providers` 顶层同时新增 `comparison_actions`，会按当前文档的 Provider 对比态势直接给出 `inspect_provider_comparison`、`inspect_provider_route_plan` 一类只读动作建议；同一份 payload 的 `quality_gate.provider_comparison` 也会带上同样的摘要和动作，并把这些动作合并进 `quality_gate.action_suggestions`，适合作为宿主产品的单一诊断入口。`/parts` 会在每个 part 上返回 `action_suggestions`，用于把 warning/failed 页段映射到 part 级复跑、重建 chunks、重建 embeddings 或质量报告查看入口。
 
-运行期 `index_manifest` 以及 `structured / ir / coverage` 的 `index_manifest` 会追加 `rag_coverage` 摘要。该摘要记录 KnowledgeUnit 到 chunk 的覆盖关系，包括 `unit_count / indexable_unit_count / skipped_unit_count / chunked_unit_count / coverage_score / chunk_ids`，并在 `units[]` 中保留每个 unit 的 `page_span / source_block_ids / source_table_ids / should_index_for_rag / skip_reason / chunk_ids / embedded`，用于宿主产品展示“哪些页进了 RAG，哪些没进，为什么”。
+运行期 `index_manifest` 以及 `structured / ir / coverage` 的 `index_manifest` 会追加 `rag_coverage` 摘要。该摘要记录 KnowledgeUnit 到 chunk 的覆盖关系，包括 `unit_count / indexable_unit_count / skipped_unit_count / chunked_unit_count / embedded_chunk_count / embedded_unit_count / unembedded_unit_count / coverage_score / chunk_ids`；其中 `embedded_unit_count` 只统计“至少有一个 chunk 且该 unit 的全部 chunk 都已写入向量”的可索引 KnowledgeUnit，`unembedded_unit_count` 统计已有 chunk 但尚未全部向量化的可索引 KnowledgeUnit。`units[]` 保留每个 unit 的 `page_span / source_block_ids / source_table_ids / should_index_for_rag / skip_reason / chunk_ids / embedded`，用于宿主产品展示“哪些页进了 RAG，哪些没进，为什么”。
 
 `/reader` 与 `projection=reader` 返回阅读页专用结构：顶层包含 `pages / blocks / reader_summary / quality_signals / quality_gate / index_manifest`。每个 reader block 带 `type / display_kind / reader_policy / text / source_block_ids / source_table_ids / source_figure_ids / bbox / provenance`；表格块额外带结构化 `table`，图示块额外带 `figure`。`reader_policy = hidden` 的页眉页脚、解析工件默认不进入 `blocks`，只在页级 `hidden_block_count` 中计数。
 

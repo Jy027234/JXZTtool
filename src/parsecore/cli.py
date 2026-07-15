@@ -4,11 +4,14 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Sequence
 
 from .asgi import create_app
 from .bootstrap import build_runtime
+from .config import load_settings
 from .models import ParseRequest
+from .parts import cleanup_provider_comparison_artifacts
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +51,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     payload_contract_check.add_argument("payload_contract_check_args", nargs=argparse.REMAINDER)
 
+    p1_contract_acceptance = sub.add_parser(
+        "p1-contract-acceptance",
+        help="Run the P1 contract-freeze and host-integration acceptance gate",
+    )
+    p1_contract_acceptance.add_argument("p1_contract_acceptance_args", nargs=argparse.REMAINDER)
+
     large_pdf_stress = sub.add_parser("large-pdf-stress", help="Run the large PDF part scheduling stress tool")
     large_pdf_stress.add_argument("stress_args", nargs=argparse.REMAINDER)
 
@@ -57,6 +66,20 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_reindex.add_argument("--doc-id", action="append", dest="doc_ids")
     batch_reindex.add_argument("--since-hours", type=float)
     batch_reindex.add_argument("--include-embeddings", action="store_true")
+
+    comparison_cleanup = sub.add_parser(
+        "cleanup-provider-comparison-artifacts",
+        help="Dry-run cleanup for self-check Provider comparison artifacts",
+    )
+    comparison_cleanup.add_argument("--config", default="parsecore.toml")
+    comparison_cleanup.add_argument("--root", default="var/self-check")
+    comparison_cleanup.add_argument("--retention-seconds", type=int)
+    comparison_cleanup.add_argument(
+        "--execute",
+        action="store_true",
+        help="remove candidates after reviewing the default dry-run report",
+    )
+    comparison_cleanup.add_argument("--out", default=None)
 
     return parser
 
@@ -71,6 +94,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from tools import payload_contract_check
 
         return int(payload_contract_check.main(raw_args[1:]))
+    if raw_args and raw_args[0] == "p1-contract-acceptance":
+        from tools import p1_contract_acceptance
+
+        return int(p1_contract_acceptance.main(raw_args[1:]))
     if raw_args and raw_args[0] == "large-pdf-stress":
         from tools import large_pdf_stress
 
@@ -108,6 +135,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "cleanup-provider-comparison-artifacts":
+        settings = load_settings(args.config)
+        retention_seconds = (
+            args.retention_seconds
+            if args.retention_seconds is not None
+            else settings.runtime.provider_comparison_artifact_retention_seconds
+        )
+        try:
+            payload = cleanup_provider_comparison_artifacts(
+                args.root,
+                retention_seconds=retention_seconds,
+                dry_run=not bool(args.execute),
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.out:
+            output_path = Path(args.out)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(payload_text + "\n", encoding="utf-8")
+        print(payload_text)
+        return 1 if payload["errors"] else 0
 
     options: dict[str, str] = {}
     if getattr(args, "mode", "default") != "default":

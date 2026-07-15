@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from parsecore.config import (
     load_settings,
@@ -27,6 +28,7 @@ job_timeout_seconds = 120
 part_timeout_seconds = 30
 retry_backoff_seconds = 2.5
 retry_backoff_max_seconds = 45
+provider_comparison_artifact_retention_seconds = 172800
 api_key_env = "PARSECORE_API_KEY"
 
 [storage]
@@ -35,6 +37,7 @@ object_store = "local://./var/uploads"
 
 [index]
 mode = "hybrid"
+embedding_dimension = 384
 
 [translation]
 enabled = true
@@ -59,6 +62,17 @@ model = "text-embedding-3-small"
 base_url = "https://example.invalid/v1"
 api_key_env = "PARSECORE_EMBEDDING_API_KEY"
 batch_size = 8
+
+[providers.rerank]
+enabled = true
+provider = "dashscope-compatible"
+model = "qwen/qwen3-vl-rerank"
+base_url = "https://example.invalid/v1"
+api_key_env = "PARSECORE_RERANK_API_KEY"
+timeout_seconds = 12.5
+max_retries = 3
+candidate_limit = 24
+options = { enable_truncation = true }
 
 [providers.ocr]
 enabled = true
@@ -113,6 +127,29 @@ extensions = [".docx"]
 
 
 class LoadSettingsParserOptionsTests(unittest.TestCase):
+    def test_database_url_can_be_overridden_by_environment(self) -> None:
+        override = "postgresql://parsecore:secret@127.0.0.1:55433/parsecore"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(_TOML, encoding="utf-8")
+            with patch.dict(
+                "os.environ", {"PARSECORE_DATABASE_URL": override}, clear=False
+            ):
+                settings = load_settings(path)
+
+        self.assertEqual(settings.database_url, override)
+
+    def test_blank_database_url_environment_falls_back_to_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(_TOML, encoding="utf-8")
+            with patch.dict(
+                "os.environ", {"PARSECORE_DATABASE_URL": "   "}, clear=False
+            ):
+                settings = load_settings(path)
+
+        self.assertEqual(settings.database_url, "sqlite:///./var/x.db")
+
     def test_parser_options_are_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "parsecore.toml"
@@ -131,6 +168,16 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertTrue(settings.providers.embedding.enabled)
         self.assertEqual(settings.providers.embedding.batch_size, 8)
         self.assertEqual(settings.providers.embedding.model, "text-embedding-3-small")
+        self.assertTrue(settings.providers.rerank.enabled)
+        self.assertEqual(settings.providers.rerank.provider, "dashscope-compatible")
+        self.assertEqual(settings.providers.rerank.model, "qwen/qwen3-vl-rerank")
+        self.assertEqual(settings.providers.rerank.candidate_limit, 24)
+        self.assertEqual(settings.providers.rerank.timeout_seconds, 12.5)
+        self.assertEqual(settings.providers.rerank.max_retries, 3)
+        self.assertEqual(
+            dict(settings.providers.rerank.options), {"enable_truncation": True}
+        )
+        self.assertEqual(settings.index_embedding_dimension, 384)
         self.assertTrue(settings.providers.ocr.enabled)
         self.assertEqual(settings.providers.ocr.provider, "remote-http")
         self.assertEqual(settings.providers.ocr.base_url, "https://example.invalid")
@@ -145,6 +192,7 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.runtime.part_timeout_seconds, 30)
         self.assertEqual(settings.runtime.retry_backoff_seconds, 2.5)
         self.assertEqual(settings.runtime.retry_backoff_max_seconds, 45)
+        self.assertEqual(settings.runtime.provider_comparison_artifact_retention_seconds, 172800)
         self.assertTrue(settings.quality_gate.enabled)
         self.assertEqual(settings.quality_gate.min_text_page_coverage, 0.99)
         self.assertEqual(settings.quality_gate.min_table_unit_coverage, 0.96)
@@ -152,6 +200,7 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.quality_gate.min_reading_order_confidence, 0.8)
         self.assertFalse(settings.quality_gate.allow_local_rerun)
         self.assertTrue(settings.quality_gate.allow_manual_review)
+
         self.assertEqual(
             dict(settings.providers.ocr.options),
             {"endpoint_path": "/ocr/v1", "det_use_dilation": True},
@@ -238,6 +287,66 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(gate["thresholds"]["min_text_page_coverage"], 0.99)
         self.assertFalse(gate["actions"]["allow_local_rerun"])
         self.assertEqual(gate["enforcement"], "report_only")
+
+    def test_index_embedding_dimension_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(
+                _TOML.replace("embedding_dimension = 384", "embedding_dimension = 0"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"index\.embedding_dimension"):
+                load_settings(path)
+
+    def test_index_embedding_dimension_defaults_to_1536(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(
+                _TOML.replace("embedding_dimension = 384\n", ""),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(path)
+
+        self.assertEqual(settings.index_embedding_dimension, 1536)
+
+    def test_rerank_candidate_limit_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(
+                _TOML.replace("candidate_limit = 24", "candidate_limit = 0"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"providers\.rerank\.candidate_limit"):
+                load_settings(path)
+
+    def test_rerank_candidate_limit_must_be_an_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(
+                _TOML.replace("candidate_limit = 24", "candidate_limit = 24.5"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"providers\.rerank\.candidate_limit"):
+                load_settings(path)
+
+    def test_provider_comparison_artifact_retention_defaults_to_30_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(
+                _TOML.replace(
+                    "provider_comparison_artifact_retention_seconds = 172800\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(path)
+
+        self.assertEqual(settings.runtime.provider_comparison_artifact_retention_seconds, 2592000)
 
     def test_local_provider_route_plan_excludes_evaluation_only_and_gate_failed_candidates(self) -> None:
         config = _TOML.replace(

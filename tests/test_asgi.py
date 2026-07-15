@@ -880,6 +880,21 @@ gate_status = "pending"
             self.assertEqual(payload["profile_source"], "auto")
             self.assertTrue(Path(payload["parsecore_server_file_path"]).exists())
 
+    def test_sync_upload_uses_private_transient_object_store_directory(self) -> None:
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            transient_dir = workspace.root / "object-store" / "_api_transient"
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/parse",
+                    data={"doc_id": "doc-private-transient"},
+                    files={"file": ("manual.txt:alternate", b"private upload", "text/plain")},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(transient_dir.is_dir())
+            self.assertEqual(list(transient_dir.iterdir()), [])
+
     def test_upload_bridge_requires_dedicated_api_key_when_configured(self) -> None:
         with TemporaryWorkspace(UPLOAD_BRIDGE_HARDENED_CONFIG) as workspace:
             with patch.dict(os.environ, {"PARSECORE_UPLOAD_BRIDGE_API_KEY": "bridge-secret"}, clear=False):
@@ -3002,6 +3017,7 @@ class ParseQueueApiTests(unittest.TestCase):
                         failed_data["events"][0]["error_reasons"],
                         ["provider_request_failed"],
                     )
+
                     self.assertEqual(
                         failed_data["counters"]["ocr-tenant:ocr-plan:ocr_failed"],
                         1,
@@ -3043,6 +3059,77 @@ class ParseQueueApiTests(unittest.TestCase):
                         'parse_ocr_rejected_total{tenant_id="ocr-tenant",quota_key="ocr-plan"} 1',
                         metrics_text,
                     )
+
+    def test_provider_failure_is_visible_through_events_and_prometheus_api(self) -> None:
+        class UnavailableQueryEmbeddingProvider:
+            def embed(self, *, doc_id: str, chunks):
+                raise RuntimeError("gateway unavailable")
+
+        with TemporaryWorkspace(STRICT_TEXT_API_CONFIG) as workspace:
+            app = create_app(config_path=workspace.config_path)
+            document = workspace.root / "object-store" / "provider-events.txt"
+            document.write_text("hydraulic warning procedure", encoding="utf-8")
+            with TestClient(app) as client:
+                created = client.post(
+                    "/v1/parse/jobs",
+                    json={
+                        "doc_id": "doc-provider-events",
+                        "file_path": str(document),
+                        "media_type": "text/plain",
+                        "tenant_id": "provider-tenant",
+                        "quota_key": "provider-plan",
+                    },
+                )
+                self.assertEqual(created.status_code, 202)
+                job_id = created.json()["job_id"]
+                for _ in range(20):
+                    current = client.get(f"/v1/parse/jobs/{job_id}")
+                    if current.json()["state"] == ParseJobState.DONE.value:
+                        break
+                self.assertEqual(current.json()["state"], ParseJobState.DONE.value)
+
+                quality_events = None
+                for _ in range(20):
+                    quality_events = client.get(
+                        "/v1/parse/events",
+                        params={"event_type": "document_quality", "tenant_id": "provider-tenant"},
+                    )
+                    if quality_events.json()["events"]:
+                        break
+                    time.sleep(0.01)
+                assert quality_events is not None
+
+                app.state.runtime.embedding_provider = UnavailableQueryEmbeddingProvider()
+                searched = client.get(
+                    "/v1/parse/documents/doc-provider-events/search",
+                    params={"q": "hydraulic warning", "tenant_id": "provider-tenant"},
+                )
+                events = client.get(
+                    "/v1/parse/events",
+                    params={"event_type": "provider_failure", "tenant_id": "provider-tenant"},
+                )
+                prometheus = client.get("/v1/parse/prometheus")
+
+        self.assertEqual(searched.status_code, 200)
+        self.assertEqual(searched.json()["retrieval_mode"], "keyword-fallback")
+        self.assertEqual(quality_events.status_code, 200)
+        quality_event_rows = quality_events.json()["events"]
+        self.assertEqual(len(quality_event_rows), 1)
+        self.assertIn(quality_event_rows[0]["quality_gate"], {"accept", "accept_with_warning"})
+        self.assertNotIn("text", quality_event_rows[0])
+        self.assertEqual(events.status_code, 200)
+        event_rows = events.json()["events"]
+        self.assertEqual(len(event_rows), 1)
+        self.assertEqual(event_rows[0]["provider_type"], "embedding")
+        self.assertEqual(event_rows[0]["failure_category"], "provider_unavailable")
+        self.assertEqual(event_rows[0]["operation"], "embed_query")
+        self.assertNotIn("error", event_rows[0])
+        provider_id = event_rows[0]["provider_id"]
+        self.assertIn(
+            f'parse_provider_failure_total{{provider_type="embedding",provider_id="{provider_id}",failure_category="provider_unavailable"}} 1',
+            prometheus.text,
+        )
+        self.assertIn("parse_document_quality_total", prometheus.text)
 
     def test_parse_batch_response_includes_ocr_decision_trace(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:

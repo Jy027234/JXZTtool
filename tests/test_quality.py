@@ -5,12 +5,142 @@ import unittest
 from parsecore.garble import detect_page_garble_reason
 from parsecore.ir import rag_coverage_quality_payload
 from parsecore.models import Block, BlockType, Chunk
+from parsecore.pipelines import DocumentArtifactItem, _build_structure_quality
 from parsecore.quality import (
+    evaluate_blocks,
     evaluate_chunk_embeddings,
     evaluate_layout_signals,
     evaluate_parse_quality,
     evaluate_projected_parse_quality,
 )
+
+
+class StructuralAuditArtifactQualityTests(unittest.TestCase):
+    def test_empty_page_artifact_counts_as_page_but_not_short_content(self) -> None:
+        blocks = [
+            Block(
+                block_id="blk-short",
+                doc_id="doc-audit",
+                type=BlockType.PARAGRAPH,
+                content="short",
+                metadata={"page": 1},
+            ),
+            Block(
+                block_id="blk-long",
+                doc_id="doc-audit",
+                type=BlockType.PARAGRAPH,
+                content="This content is long enough.",
+                metadata={"page": 1},
+            ),
+            Block(
+                block_id="blk-empty-page",
+                doc_id="doc-audit",
+                type=BlockType.PARAGRAPH,
+                content="",
+                metadata={
+                    "page": 2,
+                    "semantic_role": "parse_artifact",
+                    "index_policy": "skip",
+                    "missing_reason": "page_without_extractable_content",
+                },
+            ),
+        ]
+
+        report = evaluate_blocks(blocks)
+
+        self.assertEqual(report.total_blocks, 2)
+        self.assertEqual(report.page_count, 2)
+        self.assertEqual(report.very_short_ratio, 0.5)
+        empty_page = next(page for page in report.pages if page.page_number == 2)
+        self.assertEqual(empty_page.block_count, 0)
+        self.assertEqual(empty_page.very_short_ratio, 0.0)
+
+    def test_structure_quality_separates_audit_artifacts_from_noise(self) -> None:
+        items = (
+            DocumentArtifactItem(
+                item_id="itm-content",
+                block_ids=("blk-content",),
+                kind="paragraph",
+                semantic_role="paragraph",
+                text="Useful body content",
+                page_number=1,
+            ),
+            DocumentArtifactItem(
+                item_id="itm-empty-page",
+                block_ids=("blk-empty-page",),
+                kind="parse_artifact",
+                semantic_role="parse_artifact",
+                text="",
+                page_number=2,
+                metadata={
+                    "index_policy": "skip",
+                    "missing_reason": "page_without_extractable_content",
+                },
+            ),
+        )
+
+        quality = _build_structure_quality(items)
+
+        self.assertEqual(quality["noise_ratio"], 0.0)
+        self.assertEqual(quality["counts"]["total_items"], 2)
+        self.assertEqual(quality["counts"]["quality_denominator_items"], 1)
+        self.assertEqual(quality["counts"]["audit_artifact_items"], 1)
+
+    def test_ocr_empty_text_artifact_is_excluded_by_both_quality_consumers(self) -> None:
+        block = Block(
+            block_id="blk-ocr-empty",
+            doc_id="doc-audit-ocr",
+            type=BlockType.PARAGRAPH,
+            content="",
+            metadata={
+                "page": 1,
+                "semantic_role": "parse_artifact",
+                "index_policy": "skip",
+                "missing_reason": "ocr_empty_text",
+            },
+        )
+        item = DocumentArtifactItem(
+            item_id="itm-ocr-empty",
+            block_ids=("blk-ocr-empty",),
+            kind="parse_artifact",
+            semantic_role="parse_artifact",
+            text="",
+            page_number=1,
+            metadata={"index_policy": "skip", "missing_reason": "ocr_empty_text"},
+        )
+
+        self.assertEqual(evaluate_blocks([block]).total_blocks, 0)
+        quality = _build_structure_quality((item,))
+        self.assertEqual(quality["counts"]["quality_denominator_items"], 0)
+        self.assertEqual(quality["counts"]["audit_artifact_items"], 1)
+
+    def test_content_with_similar_metadata_stays_in_quality_denominators(self) -> None:
+        block = Block(
+            block_id="blk-user-content",
+            doc_id="doc-audit-content",
+            type=BlockType.PARAGRAPH,
+            content="Ordinary user-authored content.",
+            metadata={
+                "page": 1,
+                "semantic_role": "paragraph",
+                "index_policy": "skip",
+                "missing_reason": "ocr_empty_text",
+            },
+        )
+        item = DocumentArtifactItem(
+            item_id="itm-user-content",
+            block_ids=("blk-user-content",),
+            kind="paragraph",
+            semantic_role="paragraph",
+            text="Ordinary user-authored content.",
+            page_number=1,
+            metadata={"index_policy": "skip", "missing_reason": "ocr_empty_text"},
+        )
+
+        self.assertEqual(evaluate_blocks([block]).total_blocks, 1)
+        quality = _build_structure_quality((item,))
+        self.assertEqual(quality["counts"]["quality_denominator_items"], 1)
+        self.assertEqual(quality["counts"]["audit_artifact_items"], 0)
 
 
 class EvaluateChunkEmbeddingsTests(unittest.TestCase):

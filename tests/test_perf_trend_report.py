@@ -80,6 +80,82 @@ class PerfTrendReportTests(unittest.TestCase):
             },
         }
 
+    def _baseline_payload(
+        self,
+        *,
+        version: str = "baseline-1",
+        lane: str = "clean_latency",
+        track_python_memory: bool = False,
+        cache_mode: str = "ocr_warm",
+        p50_elapsed_s: float = 10.0,
+        peak_rss_mib: float = 800.0,
+        telemetry_status: str = "available",
+    ) -> dict:
+        def telemetry(peak_mib: float) -> dict:
+            if telemetry_status != "available":
+                return {"status": telemetry_status}
+            peak_rss_bytes = int(peak_mib * 1024 * 1024)
+            return {
+                "status": "available",
+                "collector": "psutil",
+                "scope": "runtime.submit_end_to_end",
+                "sample_interval_ms": 100,
+                "working_set_semantics": "Windows working set (rss)",
+                "peak": {
+                    "rss_bytes": peak_rss_bytes,
+                    "working_set_bytes": peak_rss_bytes,
+                    "vms_bytes": peak_rss_bytes + 64 * 1024 * 1024,
+                },
+                "delta": {
+                    "cpu_total_s": 10.0,
+                    "io_read_bytes": 32 * 1024 * 1024,
+                    "io_write_bytes": 16 * 1024 * 1024,
+                },
+            }
+
+        return {
+            "schema_version": "2026-07-parse-perf-stability",
+            "version": version,
+            "status": "ok",
+            "generated_at": version,
+            "measurement": {
+                "elapsed_scope": "runtime.submit_end_to_end",
+                "track_python_memory": track_python_memory,
+                "lane": lane,
+                "cache": {"mode": cache_mode},
+                "runtime_lifecycle": {"reuse_runtime": True, "warmup_runs": 1},
+                "process_telemetry": {"enabled": True, "sample_interval_ms": 100},
+            },
+            "summary": {
+                "documents": 2,
+                "p50_elapsed_s": p50_elapsed_s,
+                "p95_elapsed_s": p50_elapsed_s + 1.0,
+                "max_elapsed_s": p50_elapsed_s + 2.0,
+                "max_peak_kb": 1024.0 if track_python_memory else None,
+            },
+            "results": [
+                {
+                    "status": "done",
+                    "file_name": "heavy.pdf",
+                    "size_bytes": 2048,
+                    "process_telemetry": telemetry(peak_rss_mib - 50.0),
+                },
+                {
+                    "status": "done",
+                    "file_name": "heavy.pdf",
+                    "size_bytes": 2048,
+                    "process_telemetry": telemetry(peak_rss_mib),
+                },
+            ],
+            "stability": {
+                "gates": [],
+                "stage_timings_s": {
+                    "parse": {"count": 2, "p50": 8.0, "p95": 9.0, "max": 9.5, "cv_pct": 4.0},
+                    "chunk": {"count": 2, "p50": 1.0, "p95": 1.1, "max": 1.2, "cv_pct": 5.0},
+                },
+            },
+        }
+
     def test_build_summary_preserves_perf_tracking(self) -> None:
         summary = perf_trend_report.build_summary(self._sample_payload())
 
@@ -172,6 +248,115 @@ class PerfTrendReportTests(unittest.TestCase):
         self.assertIn("v2", markdown)
         self.assertIn("v3", markdown)
         self.assertIn("improving", markdown)
+
+    def test_build_summary_aggregates_baseline_process_telemetry(self) -> None:
+        summary = perf_trend_report.build_summary(
+            self._baseline_payload(peak_rss_mib=900.0)
+        )
+
+        self.assertEqual(summary["report_kind"], "parse_perf_baseline")
+        self.assertEqual(summary["overview"]["p50_elapsed_s"], 10.0)
+        telemetry = summary["process_telemetry"]
+        self.assertEqual(telemetry["status"], "available")
+        self.assertEqual(telemetry["available_runs"], 2)
+        self.assertEqual(telemetry["peak_rss_bytes"]["max"], 900 * 1024 * 1024)
+        self.assertEqual(telemetry["cpu_total_s"]["sum"], 20)
+
+    def test_baseline_trend_keeps_incompatible_memory_lanes_separate(self) -> None:
+        clean = self._baseline_payload(version="clean", track_python_memory=False)
+        tracked = self._baseline_payload(
+            version="tracked",
+            lane="python_allocation_tracked",
+            track_python_memory=True,
+        )
+
+        trend = perf_trend_report.build_trend_summary([clean, tracked])
+
+        self.assertFalse(trend["available"])
+        self.assertEqual(trend["reason"], "incompatible_measurement_channels")
+        self.assertEqual(len(trend["versions"]), 2)
+        self.assertFalse(trend["process_telemetry"]["available"])
+        self.assertEqual(
+            trend["process_telemetry"]["reason"],
+            "incompatible_process_telemetry_channels",
+        )
+
+    def test_process_telemetry_trend_is_observation_only(self) -> None:
+        first = self._baseline_payload(version="v1", peak_rss_mib=800.0)
+        last = self._baseline_payload(
+            version="v2", p50_elapsed_s=9.0, peak_rss_mib=1000.0
+        )
+
+        trend = perf_trend_report.build_process_telemetry_trend([first, last])
+
+        self.assertTrue(trend["available"])
+        self.assertTrue(trend["observation_only"])
+        self.assertEqual(trend["peak_rss_direction"], "increased")
+        self.assertEqual(trend["peak_rss_bytes_max_change_pct"], 25.0)
+
+    def test_process_telemetry_trend_handles_missing_telemetry(self) -> None:
+        first = self._baseline_payload(version="v1")
+        missing = self._baseline_payload(version="v2", telemetry_status="unavailable")
+
+        trend = perf_trend_report.build_process_telemetry_trend([first, missing])
+
+        self.assertFalse(trend["available"])
+        self.assertEqual(trend["reason"], "process_telemetry_unavailable")
+
+    def test_stage_timing_trend_compares_only_identical_channels(self) -> None:
+        first = self._baseline_payload(version="v1")
+        last = self._baseline_payload(version="v2", p50_elapsed_s=9.0)
+        last["stability"]["stage_timings_s"]["parse"]["p50"] = 6.0
+
+        trend = perf_trend_report.build_stage_timing_trend([first, last])
+
+        self.assertTrue(trend["available"])
+        self.assertTrue(trend["observation_only"])
+        self.assertEqual(trend["common_stage_count"], 2)
+        self.assertEqual(trend["stages"]["parse"]["change_pct"], -25.0)
+        self.assertEqual(trend["stages"]["parse"]["direction"], "improving")
+
+    def test_stage_timing_trend_rejects_incompatible_channels(self) -> None:
+        clean = self._baseline_payload(version="clean")
+        tracked = self._baseline_payload(
+            version="tracked",
+            lane="python_allocation_tracked",
+            track_python_memory=True,
+        )
+
+        trend = perf_trend_report.build_stage_timing_trend([clean, tracked])
+
+        self.assertFalse(trend["available"])
+        self.assertEqual(trend["reason"], "incompatible_measurement_channels")
+
+    def test_stage_timing_trend_reports_missing_stages(self) -> None:
+        first = self._baseline_payload(version="v1")
+        last = self._baseline_payload(version="v2")
+        last["stability"]["stage_timings_s"].pop("chunk")
+
+        trend = perf_trend_report.build_stage_timing_trend([first, last])
+
+        self.assertTrue(trend["available"])
+        self.assertFalse(trend["stage_set_consistent"])
+        self.assertEqual(trend["missing_stages_by_version"], {"v2": ["chunk"]})
+
+    def test_baseline_markdown_marks_incompatible_channels_as_observations(self) -> None:
+        clean = self._baseline_payload(version="clean", track_python_memory=False)
+        tracked = self._baseline_payload(
+            version="tracked",
+            lane="python_allocation_tracked",
+            track_python_memory=True,
+        )
+
+        markdown = perf_trend_report.render_markdown(
+            clean, trend_reports=[clean, tracked]
+        )
+
+        self.assertIn("# ParseCore Parse Performance Trend", markdown)
+        self.assertIn("## Process Telemetry (Observation Only)", markdown)
+        self.assertIn("### Stage Timing Trend", markdown)
+        self.assertIn("incompatible_measurement_channels", markdown)
+        self.assertIn("does not create an alert", markdown)
 
     def test_cli_writes_markdown_and_json_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -107,6 +107,10 @@ class ParseOutcome:
     job: ParseJob
     blocks: tuple[Block, ...]
     chunks: tuple[Chunk, ...]
+    # Execution timing is optional observability data.  Keeping it on the
+    # outcome lets tooling inspect a completed inline run without changing
+    # persisted job or API payload schemas.
+    stage_timings: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,6 +120,16 @@ class ChunkSearchHit:
     block_ids: tuple[str, ...]
     text: str
     semantic_role: str
+    score: float
+    retrieval_score: float | None = None
+    rerank_score: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class RerankScore:
+    """A model-provided relevance score for one candidate input position."""
+
+    index: int
     score: float
 
 

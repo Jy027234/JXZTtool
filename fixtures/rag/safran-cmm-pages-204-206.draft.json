@@ -1,0 +1,29 @@
+{
+  "schema_version": "2026-07-rag-query-suite",
+  "approval_status": "agent_derived_draft_requires_business_review",
+  "top_k": 3,
+  "min_hit_rate_at_k": 1.0,
+  "require_rerank": true,
+  "cases": [
+    {
+      "id": "insulation-sleeve-length",
+      "query": "How long should insulation sleeves 3-145 be cut?",
+      "expected_any": ["2.68 in", "68 mm"]
+    },
+    {
+      "id": "alumel-contact-selection",
+      "query": "Which contact must be crimped on the alumel conductor of cable D?",
+      "expected_any": ["alumel contact 3-142"]
+    },
+    {
+      "id": "locking-wire-turns",
+      "query": "How many locking-wire turns are required over a length of 0.39 inch?",
+      "expected_any": ["between 3 and 6", "number of turns"]
+    },
+    {
+      "id": "plug-connector-caution",
+      "query": "What part of plug connector C136 must not be damaged during installation?",
+      "expected_any": ["do not damage the grommet", "grommet of the plug connector"]
+    }
+  ]
+}

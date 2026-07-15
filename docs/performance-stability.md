@@ -27,7 +27,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 ## 大 PDF 压测入口
 
-`parsecore large-pdf-stress` 用于验证页段规划、part 子 job、父文档增量合并和 manifest part index。默认是 plan-only，适合先验证 17000 页级别的切分成本；需要压实际解析链路时再加 `--execute-parts`，并用 `--max-parts` 先抽样。
+`parsecore large-pdf-stress` 用于验证页段规划、part 子 job、父文档增量合并和 manifest part index。默认是 plan-only，适合先验证 17000 页级别的切分成本；需要压实际解析链路时再加 `--execute-parts`，并用 `--max-parts` 先抽样。无论是否执行 part，工具默认都把任务写入一次性临时 SQLite，并在报告完成后删除，因此不会污染配置文件或 `PARSECORE_DATABASE_URL` 指向的共享队列。
 
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 17000 --target-pages-per-part 200 --out-json var/self-check/large-pdf-stress.json --out-md var/self-check/large-pdf-stress.md
@@ -35,6 +35,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 ```
 
 报告会输出 `planned_parts / executed_parts / plan_elapsed_s / part_timings / manifest_part_index`。其中 `manifest_part_index` 对应文档 `index_manifest.part_index.parts[]`，可用于确认 `chunk_ids / page_range / index_version` 是否随 part rerun 正常刷新。
+
+只有需要跨命令保留压测 job 时才允许追加 `--use-configured-job-store`。该开关会恢复使用部署配置选中的 JobStore，必须同时指向专用测试 SQLite/Postgres；禁止对生产库或多个宿主共享的任务库使用。报告中的 `job_store.mode` 会明确记录 `temporary_sqlite` 或 `configured`，便于门禁审计存储隔离是否生效。
 
 ### 真实 17,101 页样本基线
 
@@ -176,6 +178,40 @@ Actions summary 会额外展示：
 ```powershell
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/perf_trend_report.py var/self-check/latest.perf.json --out-md var/self-check/latest.perf.md --out-json var/self-check/latest.perf.summary.json
 ```
+
+### H-02 进程遥测趋势
+
+`tools/perf_trend_report.py` 也可直接读取 `tools/parse_perf_baseline.py` 的稳定性 JSON。它会汇总每次计量运行的 RSS / working set / VMS、CPU 和 I/O，并把 RSS 标记为 `Observation Only`：该值不会自动改变发布结论，也不会代替 `tracemalloc` 的 Python allocation 预算。
+
+长期比较必须使用同一测量通道：`lane`、`track_python_memory`、`elapsed_scope`、`cache_mode`、`reuse_runtime`、`warmup_runs` 与样本文件名/字节数均需一致；RSS 还要求采样间隔、collector、working set 语义和采样 scope 一致。任一条件不一致时，工具保留各报告的观测行并返回 `incompatible_measurement_channels`，不会计算聚合趋势。
+
+例如只比较同一条 OCR-warm 纯延迟通道：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/perf_trend_report.py `
+  var/self-check/optimization-next-latency-stability.json `
+  --trend-reports var/self-check/optimization-previous-latency-stability.json `
+  --out-md var/self-check/optimization-next-latency-trend.md `
+  --out-json var/self-check/optimization-next-latency-trend.json
+```
+
+当前 H-02 的 clean latency 与 Python allocation-tracked 工件刻意不可合并；`var/self-check/h02-process-telemetry-trend-20260715.json/.md` 保留了两者的 RSS 观测和不可比较结论，作为后续分别积累历史序列的起点。
+
+### H-06 阶段耗时趋势与 RSS 专项
+
+H-06 进一步把 `stability.stage_timings_s` 纳入同一严格通道规则。至少两份 parse performance baseline 同时满足 measurement channel 后，趋势 JSON 的 `trend.stage_timings` 会按阶段输出 P50 首值、末值、变化率和方向；新增或消失的阶段写入 `missing_stages_by_version`，只比较各版本共有阶段。阶段趋势与 RSS 一样属于 observation-only，不自动新增发布阈值。
+
+报告顺序必须按时间从旧到新传入，例如：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/perf_trend_report.py `
+  var/self-check/previous-clean-latency.json `
+  --trend-reports var/self-check/current-clean-latency.json `
+  --out-json var/self-check/clean-latency-stage-trend.json `
+  --out-md var/self-check/clean-latency-stage-trend.md
+```
+
+当前尚无业务批准的进程 RSS 绝对上限，因此没有把 RSS 观察转成告警或 release gate。专项任务见 `var/self-check/h06-high-rss-optimization-task-20260715.json/.md`：先在受控 runner 积累严格同通道历史、定位主要分配来源，再由业务或部署负责人批准容量上限。Python allocation-tracked 通道继续只用于诊断，不能替代 clean-latency RSS 容量口径。
 
 推荐约定：
 

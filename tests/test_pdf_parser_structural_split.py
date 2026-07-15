@@ -178,6 +178,7 @@ class MergeCrossPageParagraphBlocksTests(unittest.TestCase):
         self.assertIn("DME 台被称作关键 DME", merged[1].content)
         self.assertEqual(merged[1].metadata["page"], 13)
         self.assertEqual(merged[1].metadata["page_end"], 14)
+        self.assertEqual(merged[1].metadata["page_span"], [13, 14])
         self.assertTrue(merged[1].metadata["cross_page_continuation"])
         self.assertEqual(merged[1].metadata["merged_block_ids"], ["doc-p-1", "doc-p-2"])
 

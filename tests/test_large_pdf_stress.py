@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
+from contextlib import closing
 
 from tests.support import TemporaryWorkspace
 from tools import large_pdf_stress
@@ -30,6 +32,49 @@ extensions = [".pdf"]
 
 
 class LargePdfStressTests(unittest.TestCase):
+    def test_default_job_store_is_temporary_and_does_not_touch_configured_database(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            configured_database = workspace.root / "parsecore.db"
+            report = large_pdf_stress.build_report(
+                config=workspace.config_path,
+                generated_pdf=workspace.root / "stress-isolated.pdf",
+                generate_pages=3,
+                lines_per_page=3,
+                target_pages_per_part=1,
+                doc_id="doc-stress-isolated",
+            )
+            configured_database_exists = configured_database.exists()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["job_store"]["mode"], "temporary_sqlite")
+        self.assertFalse(report["job_store"]["configured_store_used"])
+        self.assertEqual(report["job_store"]["cleanup"], "removed_after_report")
+        self.assertFalse(configured_database_exists)
+
+    def test_configured_job_store_requires_explicit_opt_in(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            configured_database = workspace.root / "parsecore.db"
+            report = large_pdf_stress.build_report(
+                config=workspace.config_path,
+                generated_pdf=workspace.root / "stress-persisted.pdf",
+                generate_pages=3,
+                lines_per_page=3,
+                target_pages_per_part=1,
+                doc_id="doc-stress-persisted",
+                use_configured_job_store=True,
+            )
+            with closing(sqlite3.connect(configured_database)) as conn:
+                state_counts = dict(
+                    conn.execute(
+                        "SELECT state, COUNT(*) FROM parse_jobs GROUP BY state"
+                    ).fetchall()
+                )
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["job_store"]["mode"], "configured")
+        self.assertTrue(report["job_store"]["configured_store_used"])
+        self.assertEqual(state_counts, {"partial": 1, "pending": 4})
+
     def test_build_report_plans_parts_and_records_manifest_summary(self) -> None:
         with TemporaryWorkspace(PDF_CONFIG) as workspace:
             generated_pdf = workspace.root / "stress.pdf"
@@ -80,7 +125,46 @@ class LargePdfStressTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["summary"]["planned_parts"], 2)
+        self.assertEqual(payload["job_store"]["mode"], "temporary_sqlite")
         self.assertTrue(markdown_exists)
+
+    def test_build_report_can_execute_parts_with_bounded_parallelism(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            report = large_pdf_stress.build_report(
+                config=workspace.config_path,
+                generated_pdf=workspace.root / "stress-parallel.pdf",
+                generate_pages=4,
+                lines_per_page=3,
+                target_pages_per_part=1,
+                doc_id="doc-stress-parallel",
+                execute_parts=True,
+                max_parts=2,
+                parallel_parts=2,
+            )
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["parallel_parts"], 2)
+        self.assertEqual(report["summary"]["executed_parts"], 2)
+        self.assertEqual(len(report["errors"]), 0)
+
+    def test_build_report_can_start_execution_from_a_later_part(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            report = large_pdf_stress.build_report(
+                config=workspace.config_path,
+                generated_pdf=workspace.root / "stress-offset.pdf",
+                generate_pages=4,
+                lines_per_page=3,
+                target_pages_per_part=1,
+                doc_id="doc-stress-offset",
+                execute_parts=True,
+                part_start=3,
+                max_parts=1,
+            )
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["part_start"], 3)
+        self.assertEqual(report["summary"]["executed_parts"], 1)
+        self.assertEqual(report["part_timings"][0]["part_id"], "doc-stress-offset-part-3")
 
 
 class EvaluateGateTests(unittest.TestCase):
@@ -141,6 +225,32 @@ class EvaluateGateTests(unittest.TestCase):
         gate = large_pdf_stress.evaluate_gate(report, self._sample_config())
         self.assertFalse(gate["passed"])
         self.assertTrue(all(not c["passed"] for c in gate["checks"]))
+
+    def test_evaluate_gate_skips_snapshot_threshold_for_plan_only_runs(self) -> None:
+        config = {
+            "thresholds": {
+                "part_count_min": 1,
+                "snapshot_blocks_min": 100,
+            }
+        }
+        gate = large_pdf_stress.evaluate_gate(self._sample_report(planned_parts=1), config)
+
+        self.assertTrue(gate["passed"])
+        snapshot_check = next(check for check in gate["checks"] if check["metric"] == "snapshot_blocks")
+        self.assertTrue(snapshot_check["skipped"])
+        self.assertEqual(snapshot_check["reason"], "part_execution_disabled")
+
+    def test_evaluate_gate_uses_snapshot_block_count_when_parts_execute(self) -> None:
+        config = {"thresholds": {"snapshot_blocks_min": 100}}
+        report = self._sample_report()
+        report["execute_parts"] = True
+        report["summary"]["executed_parts"] = 1
+        report["summary"]["snapshot_blocks"] = 101
+
+        gate = large_pdf_stress.evaluate_gate(report, config)
+
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["checks"][0]["actual"], 101)
 
 
 if __name__ == "__main__":

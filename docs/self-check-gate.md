@@ -57,6 +57,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 输出会同时打印到终端。默认 `fast` profile 写入 [var/self-check/latest.json](../var/self-check/latest.json)，`slow/full` 默认写入 [var/self-check/latest.full.json](../var/self-check/latest.full.json)，`perf` 默认写入 [var/self-check/latest.perf.json](../var/self-check/latest.perf.json)；显式传 `--out` 时仍以手工路径为准。若 provider comparison 实际执行，self-check 还会在同目录额外落盘 `provider-comparison.fast/full/perf.json/.md`，并把这些路径写回 self-check JSON 的 `provider_comparison_artifacts` 与 `checks[].details.report_json/report_markdown`，便于后续排障和复盘。当前 provider comparison 结果还会额外输出 `provider_identity_summary`，收口每个 provider id 的 `provider_version / adapter_version / status_counts`；同时新增 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action`、`requires_config_update`、`drift_fields` 和 `config_patch`。self-check 会把这两份摘要分别写进 `checks[].details.provider_identity_summary` 和 `checks[].details.provider_admission_summary`，并在终端 summary 中追加 `identity_drift / admission_ready / admission_update`，用于提示“同一个 provider 名称是否混入多版实现”“有哪些候选已具备进入 route 的条件”“哪些现有配置建议回写”。如果 provider suite 配置了 `max_providers_requiring_config_update`、`max_providers_with_route_mode_drift`、`max_providers_with_gate_status_drift`、`max_providers_with_gate_checks_drift`、`max_providers_with_route_ready_drift` 这五类 admission drift 预算，self-check 会沿用 provider comparison 的 fail/warn 结果，把“准入配置还没收敛”直接升级成标准门禁信号。
 
+Provider comparison 工件不在 self-check 过程中自动删除。运维清理使用 `parsecore cleanup-provider-comparison-artifacts`，默认只输出 dry-run 清单；它只匹配 `provider-comparison.<profile>.json/.md`，不会匹配 self-check 主报告或其他审计工件。实际删除前必须审核清单并显式传入 `--execute`，具体保留期和命令见 [配置手册](configuration.md#runtime-配置)。
+
 CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径和 `fixture_relative_path` 元数据；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。若仍缺样本，workflow 才会把 fast 降级为 smoke-only，并跳过 full/perf 专项门禁，而不是直接失败。
 
 ## 覆盖范围
@@ -87,7 +89,21 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 
 `--progress` 会把每个样本的开始和结束信息写到 stderr，不改变 JSON stdout；`self-check` 调用 provider comparison 时会默认启用该进度输出，避免长样本门禁看起来像无响应。
 
+候选 Provider 的“连续 3 次稳定运行”可在同一组真实窗口上单独收口。先用相同的 `--sample / --page-start / --page-end` 生成三份双 Provider 报告，再运行稳定性门禁：
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_stability_gate.py --provider pymupdf4llm-local --baseline-provider pdf-text --report var/self-check/p0-candidate-stable-comparison-run-1.json --report var/self-check/p0-candidate-stable-comparison-run-2.json --report var/self-check/p0-candidate-stable-comparison-run-3.json --out-json var/self-check/p0-candidate-stability-gate-20260714.json --out-md var/self-check/p0-candidate-stability-gate-20260714.md
+```
+
+该门禁只锁定候选的 blocks/chunks/tables、页覆盖、chunk/embedding 和 RAG quality signature；候选与基线的结构差异会作为 warning 保留，不能被误当作“稳定通过后自动切换路由”。
+
 `provider-suite.fast.json` 当前镜像 `suite.fast.json` 的三条主线 baseline；`provider-suite.full.json` 镜像 `suite.full.json` 的五个主线 PDF baseline；两者都先用 `max_samples_best_provider_differs_from_route_primary = 0` 约束 route-plan 主候选与实测最佳 Provider 的偏差不要被放大，同时把 `max_providers_with_multiple_provider_versions = 0`、`max_providers_with_multiple_adapter_versions = 0` 以及五类 admission drift 预算固定为默认值 `0`，避免“同一个 Provider 名称实际切到另一版上游库/Adapter”或“suite 建议已变化但主配置还没收敛”悄悄混进灰度结果。`provider-suite.perf.json` 则继续收口 `sample-27-81-17` 与 `sample-cmm-32-48-21-ocr` 两个 provider 对比重样本，并同样约束 identity drift 与 admission drift。现阶段已支持十类 gate policy 预算：`max_provider_reading_order_warning_runs`、`max_provider_quality_warning_runs`、`max_samples_best_provider_differs_from_route_primary`、`max_providers_with_multiple_provider_versions`、`max_providers_with_multiple_adapter_versions`，以及 `max_providers_requiring_config_update`、`max_providers_with_route_mode_drift`、`max_providers_with_gate_status_drift`、`max_providers_with_gate_checks_drift`、`max_providers_with_route_ready_drift`。前五类用于约束读序 warning、Provider 质量 warning、route primary 与实测 best provider 的偏差，以及 Provider 身份漂移是否被放大；后五类用于约束 admission 配置回写数量和 `route_mode / gate_status / gate_checks / route_ready` 的收敛状态。
+
+### Fast Provider 页数预算与超时清理
+
+日常 fast lane 不再重复解析三次 297 页样本。`var/regression/provider-suite.fast.json` 声明 `fast_page_budget`，其中 `max_pages_per_sample`、`max_total_pages` 和 `large_pdf_min_page_count` 都是必填的正整数。fast 预检会读取 PDF 物理页数，并把原文页数、声明的 `page_range`、实际选择页数和总预算写入 `checks[].details.preflight.page_budget`：达到 `large_pdf_min_page_count` 的 PDF 必须有 `page_range`，任何单样本或总页数超预算都会使 Provider check 失败，而不是悄悄跳过或回退为整文档解析。
+
+当前 fast 套件覆盖 7 页正文、表格、跨页页眉/页脚及空白页证据窗口，执行默认 `pdf-text` 与 `pymupdf4llm-local` shadow 对比；Docling 等重型候选仍保留在 full/perf lane。Provider 质量分相同时，排名会先保持当前 route primary、再比较 elapsed time，避免一次性微小耗时波动把 shadow Provider 误建议为默认路由；质量分真正更高的候选仍会作为 route mismatch 进入门禁。Provider 子进程超时后，Windows 会使用 `taskkill.exe /PID <pid> /T /F` 清理进程树，并把清理和输出 drain 结果写入 check JSON；若树清理失败，再记录 root-process fallback kill。
 
 ## 退出码语义
 
@@ -105,6 +121,9 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tool
 
 # 自动发现（suite 文件放在 var/regression/ 下）
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tools.self_check
+
+# 候选 warm-state 测量（仅 Provider 对比，不改变默认路由）
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tools.self_check --provider-suite var/regression/provider-suite.fast.json --reuse-parser-instances
 ```
 
 ### 输出位置
@@ -123,6 +142,11 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tool
 | `checks[].details.output_md_path` | provider comparison Markdown 工件路径 |
 | `checks[].details.summary` | 样本和 provider 统计摘要 |
 | `checks[].details.gate_summary` | gate 判定结果和 warning 计数 |
+| `checks[].details.reuse_parser_instances` | 是否启用候选 parser 实例复用 |
+
+`--reuse-parser-instances` 仅用于同一 suite 内的 warm-state probe；报告会把
+`measurement.parser_lifecycle` 标为 `provider_instance_reused`，默认不传该参数时仍为
+`new_per_run` 冷启动口径。两种测量口径不能直接混合成同一性能基线。
 
 ### 判定规则
 

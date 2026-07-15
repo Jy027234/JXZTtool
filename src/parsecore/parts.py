@@ -661,6 +661,17 @@ def _string_list(value: Any) -> list[str]:
 
 
 _ARTIFACT_KINDS = ("part_pdf", "export_package", "comparison_report")
+_PROVIDER_COMPARISON_ARTIFACT_SELECTOR = "provider-comparison.<profile>.{json,md}"
+
+
+def _is_provider_comparison_artifact(entry: Any) -> bool:
+    """Return whether *entry* is a report written by ``self-check``.
+
+    Cleanup intentionally excludes the self-check JSON itself and arbitrary
+    JSON/Markdown audit reports that share the same parent directory.
+    """
+    name = str(getattr(entry, "name", "") or "").casefold()
+    return name.startswith("provider-comparison.") and name.endswith((".json", ".md"))
 
 
 def list_artifact_candidates(
@@ -686,6 +697,8 @@ def list_artifact_candidates(
     candidates: list[dict[str, Any]] = []
     for entry in root.rglob("*"):
         if not entry.is_file():
+            continue
+        if kind == "comparison_report" and not _is_provider_comparison_artifact(entry):
             continue
         try:
             age = int(now - entry.stat().st_mtime)
@@ -752,10 +765,69 @@ def cleanup_artifacts(
     }
 
 
+def cleanup_provider_comparison_artifacts(
+    artifact_root: Any,
+    *,
+    retention_seconds: int,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Clean only self-check Provider comparison artifacts.
+
+    ``dry_run`` defaults to true so an operator must explicitly opt in to
+    deletion. A retention of zero disables this cleanup lane entirely.
+    """
+    try:
+        retention = int(retention_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provider comparison artifact retention must be an integer") from exc
+    if retention < 0:
+        raise ValueError("provider comparison artifact retention must be non-negative")
+
+    common = {
+        "schema_version": "2026-07-provider-comparison-artifact-cleanup",
+        "scope": "self_check_provider_comparison_artifacts",
+        "artifact_selector": _PROVIDER_COMPARISON_ARTIFACT_SELECTOR,
+    }
+    if retention == 0:
+        return {
+            **common,
+            "status": "disabled",
+            "kind": "comparison_report",
+            "dry_run": bool(dry_run),
+            "artifact_root": str(artifact_root) if artifact_root is not None else None,
+            "retention_seconds": retention,
+            "candidates": 0,
+            "removed": 0,
+            "errors": 0,
+            "files": [],
+        }
+
+    report = cleanup_artifacts(
+        artifact_root,
+        retention_seconds=retention,
+        kind="comparison_report",
+        dry_run=dry_run,
+    )
+    report.update(
+        {
+            **common,
+            "status": (
+                "dry_run"
+                if dry_run
+                else "completed_with_errors"
+                if report["errors"]
+                else "completed"
+            ),
+        }
+    )
+    return report
+
+
 __all__ = [
     "PART_STATE_FILTERS",
     "document_parts_projection",
     "list_artifact_candidates",
     "cleanup_artifacts",
+    "cleanup_provider_comparison_artifacts",
     "_ARTIFACT_KINDS",
 ]

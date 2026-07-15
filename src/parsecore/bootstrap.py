@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -8,9 +9,10 @@ from .embeddings import EmbeddingConfigurationError, build_embedding_provider
 from .llm import LlmBoundaryRefiner, LlmConfigurationError, build_llm_client
 from .parsers import build_parser
 from .pipelines import build_pipeline_registry
+from .rerank import RerankConfigurationError, build_rerank_provider
 from .runtime import ParseRuntime
 from .stores import PgVectorIndex, PostgresJobStore, SQLiteJobStore
-from .stubs import EchoTranslator, EmbeddedProductAdapter, InMemoryJobStore, NullEmbeddingProvider, NullIndex, ParagraphChunkBuilder
+from .stubs import EchoTranslator, EmbeddedProductAdapter, InMemoryJobStore, NullEmbeddingProvider, NullIndex, NullRerankProvider, ParagraphChunkBuilder
 
 
 def _build_job_store(database_url: str):
@@ -26,12 +28,17 @@ def _build_job_store(database_url: str):
     )
 
 
-def _build_index(database_url: str, index_mode: str):
+def _build_index(
+    database_url: str,
+    index_mode: str,
+    *,
+    embedding_dimension: int = 1536,
+):
     mode = (index_mode or "").strip().lower()
     if mode in ("pgvector", "hybrid") and database_url.startswith(
         ("postgresql://", "postgres://")
     ):
-        return PgVectorIndex(database_url)
+        return PgVectorIndex(database_url, dim=embedding_dimension)
     # "null" / "hybrid" without pg / "memory" all fall back to NullIndex.
     return NullIndex()
 
@@ -40,8 +47,14 @@ def build_runtime(
     config_path: str | Path,
     *,
     semantic_refiner: Any = None,
+    database_url_override: str | None = None,
 ) -> ParseRuntime:
     settings = load_settings(config_path)
+    if database_url_override is not None:
+        normalized_database_url = str(database_url_override).strip()
+        if not normalized_database_url:
+            raise ValueError("database_url_override must not be blank")
+        settings = replace(settings, database_url=normalized_database_url)
 
     boundary_refiner = None
     if settings.providers.llm.enabled:
@@ -77,7 +90,11 @@ def build_runtime(
     )
     pipeline_registry.warmup()
     job_store = _build_job_store(settings.database_url)
-    index = _build_index(settings.database_url, settings.index_mode)
+    index = _build_index(
+        settings.database_url,
+        settings.index_mode,
+        embedding_dimension=settings.index_embedding_dimension,
+    )
     product_adapter = EmbeddedProductAdapter()
     try:
         embedding_provider = (
@@ -86,11 +103,19 @@ def build_runtime(
         )
     except EmbeddingConfigurationError:
         embedding_provider = NullEmbeddingProvider()
+    try:
+        rerank_provider = (
+            build_rerank_provider(settings.providers.rerank)
+            or NullRerankProvider()
+        )
+    except RerankConfigurationError:
+        rerank_provider = NullRerankProvider()
     return ParseRuntime(
         settings=settings,
         parsers=parsers,
         chunk_builder=chunk_builder,
         embedding_provider=embedding_provider,
+        rerank_provider=rerank_provider,
         index=index,
         translator=EchoTranslator(),
         product_adapter=product_adapter,

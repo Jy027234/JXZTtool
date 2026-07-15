@@ -42,6 +42,12 @@ from .models import ParseRequest
 from .payload_schemas import payload_schema, payload_schema_names, payload_schema_registry
 from .parts import PART_STATE_FILTERS, document_parts_projection
 from .pdf_parts import detect_pdf_page_count
+from .private_files import (
+    ensure_private_directory,
+    harden_private_file,
+    safe_upload_suffix,
+    write_private_bytes,
+)
 from .profiles import describe_parse_profiles, resolve_parse_profile
 from .runtime import ParseRuntime, QuotaExceededError
 
@@ -1875,9 +1881,7 @@ def _export_root(runtime_obj: ParseRuntime) -> Path:
     root = _resolve_local_object_store_root(runtime_obj)
     if root is None:
         raise ValueError("export_requires_local_object_store")
-    export_root = root / "_exports"
-    export_root.mkdir(parents=True, exist_ok=True)
-    return export_root
+    return ensure_private_directory(root / "_exports", allowed_root=root)
 
 
 def _resolve_request_profile(
@@ -2018,27 +2022,28 @@ def _persist_upload_file(
     file_name: str,
     doc_id: str,
 ) -> tuple[str, bool]:
-    suffix = Path(file_name).suffix or ".bin"
-    if runtime_obj.settings.runtime.execution_mode != "queue-worker":
-        with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-            handle.write(content)
-            return handle.name, True
-
-    object_store = str(runtime_obj.settings.object_store or "")
-    if object_store.startswith("local://"):
-        root = Path(object_store[len("local://"):])
-        if not root.is_absolute():
-            root = Path.cwd() / root
-        upload_dir = root / "_api_uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
+    suffix = safe_upload_suffix(file_name)
+    root = _resolve_local_object_store_root(runtime_obj)
+    if root is not None:
+        directory_name = (
+            "_api_uploads"
+            if runtime_obj.settings.runtime.execution_mode == "queue-worker"
+            else "_api_transient"
+        )
+        upload_dir = ensure_private_directory(root / directory_name, allowed_root=root)
         safe_doc_id = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in doc_id).strip("._") or "upload-doc"
-        file_path = upload_dir / f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}"
-        file_path.write_bytes(content)
-        return str(file_path), False
+        file_path = write_private_bytes(
+            upload_dir,
+            f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}",
+            content,
+        )
+        return str(file_path), runtime_obj.settings.runtime.execution_mode != "queue-worker"
 
     with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
         handle.write(content)
-        return handle.name, True
+        temp_path = handle.name
+    harden_private_file(temp_path)
+    return temp_path, True
 
 
 def _persist_staged_upload_file(
@@ -2048,15 +2053,18 @@ def _persist_staged_upload_file(
     file_name: str,
     doc_id: str,
 ) -> str:
-    suffix = Path(file_name).suffix or ".bin"
+    suffix = safe_upload_suffix(file_name)
     upload_dir = _resolve_staged_upload_dir(runtime_obj)
     if upload_dir is not None:
         safe_doc_id = "".join(
             char if char.isalnum() or char in {"-", "_", "."} else "_"
             for char in doc_id
         ).strip("._") or "upload-doc"
-        file_path = upload_dir / f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}"
-        file_path.write_bytes(content)
+        file_path = write_private_bytes(
+            upload_dir,
+            f"{safe_doc_id}-{uuid4().hex[:12]}{suffix}",
+            content,
+        )
         return str(file_path)
 
     raise RuntimeError("staged_upload_requires_local_object_store")
@@ -2066,12 +2074,10 @@ def _resolve_staged_upload_dir(runtime_obj: ParseRuntime) -> Path | None:
     object_store = runtime_obj.settings.object_store
     if not object_store.startswith("local://"):
         return None
-    root = Path(object_store[len("local://"):])
-    if not root.is_absolute():
-        root = Path.cwd() / root
-    upload_dir = root / "_api_uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir
+    root = _resolve_local_object_store_root(runtime_obj)
+    if root is None:
+        return None
+    return ensure_private_directory(root / "_api_uploads", allowed_root=root)
 
 
 def _cleanup_expired_staged_uploads(runtime_obj: ParseRuntime) -> None:

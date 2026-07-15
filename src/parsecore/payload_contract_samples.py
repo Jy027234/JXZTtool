@@ -724,7 +724,12 @@ def build_part_rerun_sample_snapshot() -> dict[str, object]:
         "blocks": blocks,
         "chunks": chunks,
         "provider_registry": _base_provider_registry(),
-        "parse_units": [
+        # Runtime snapshots expose partitioned parse units as ``partition_parts``.
+        # Keeping the sample on the same boundary is important: otherwise the
+        # generic fallback path silently drops previous_part_observation and
+        # rerun_comparison, so the P1 part-rerun contract is not actually
+        # exercised by the sample payloads.
+        "partition_parts": [
             {
                 "part_id": f"{doc_id}-part-1",
                 "parse_unit_id": f"{doc_id}-part-1",

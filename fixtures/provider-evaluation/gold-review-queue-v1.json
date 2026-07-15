@@ -1,0 +1,1838 @@
+{
+  "schema_version": "2026-07-provider-gold-review-queue",
+  "description": "AI-assisted, user-authorized review output. Review evidence and expected labels are recorded with an explicit non-human reviewer identity; do not treat this as independent human gold.",
+  "minimum_approved_pages": 50,
+  "minimum_stable_runs": 3,
+  "minimum_score_improvement": 5,
+  "approved_provider_ids": [
+    "pdf-text"
+  ],
+  "pages": [
+    {
+      "id": "review-figure-manual-pdf-p1",
+      "document_id": "figure-manual-pdf",
+      "page_number": 1,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0001.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "image",
+          "paragraph"
+        ],
+        "anchors": [
+          "第 1 页图示区域",
+          "PUBLIC (公共)",
+          "2023-06-27"
+        ],
+        "orderedAnchors": [
+          "第 1 页图示区域",
+          "PUBLIC (公共)",
+          "2023-06-27"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "第 1 页图示区域",
+          "PUBLIC (公共)",
+          "2023-06-27"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p38",
+      "document_id": "figure-manual-pdf",
+      "page_number": 38,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0038.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "• 第 41 页上的“卡视图”",
+          "1.2.6.2.1.2.1 表工具栏",
+          "表工具栏包含以下功能："
+        ],
+        "orderedAnchors": [
+          "• 第 41 页上的“卡视图”",
+          "1.2.6.2.1.2.1 表工具栏",
+          "表工具栏包含以下功能："
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "• 第 41 页上的“卡视图”",
+          "1.2.6.2.1.2.1 表工具栏",
+          "表工具栏包含以下功能："
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p74",
+      "document_id": "figure-manual-pdf",
+      "page_number": 74,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0074.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          " 注意",
+          "您可以使用表工具栏中的图标管理和定制表中的数据，例如排序、筛选和分组数据（ 视图设置）、导出",
+          "记录（ 导出到 Excel）以及控制数据在表中的显示方式（ 表视图、 图表视图和 卡视图）。更多信息，"
+        ],
+        "orderedAnchors": [
+          " 注意",
+          "您可以使用表工具栏中的图标管理和定制表中的数据，例如排序、筛选和分组数据（ 视图设置）、导出",
+          "记录（ 导出到 Excel）以及控制数据在表中的显示方式（ 表视图、 图表视图和 卡视图）。更多信息，"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          " 注意",
+          "您可以使用表工具栏中的图标管理和定制表中的数据，例如排序、筛选和分组数据（ 视图设置）、导出",
+          "记录（ 导出到 Excel）以及控制数据在表中的显示方式（ 表视图、 图表视图和 卡视图）。更多信息，"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p111",
+      "document_id": "figure-manual-pdf",
+      "page_number": 111,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0111.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "1.4.8.2 处理应收预留发票",
+          "Web Client 中的详细视图使您可以在一个位置查看和处理记录的所有相关详细信息。抬头区域包含有关特定数",
+          "据记录和业务操作按钮的关键信息，而内容区域显示一系列选项卡中包含的相关字段。在详细视图中打开数据记录"
+        ],
+        "orderedAnchors": [
+          "1.4.8.2 处理应收预留发票",
+          "Web Client 中的详细视图使您可以在一个位置查看和处理记录的所有相关详细信息。抬头区域包含有关特定数",
+          "据记录和业务操作按钮的关键信息，而内容区域显示一系列选项卡中包含的相关字段。在详细视图中打开数据记录"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "1.4.8.2 处理应收预留发票",
+          "Web Client 中的详细视图使您可以在一个位置查看和处理记录的所有相关详细信息。抬头区域包含有关特定数",
+          "据记录和业务操作按钮的关键信息，而内容区域显示一系列选项卡中包含的相关字段。在详细视图中打开数据记录"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p147",
+      "document_id": "figure-manual-pdf",
+      "page_number": 147,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0147.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "使用抬头工具",
+          "抬头右上角的 共享菜单可用来执行很多操作，例如，通过电子邮件共享清单视图（“通过电子邮件发送”），",
+          "或在主页上将选定的视图另存为磁贴（“另存为磁贴”）。更多信息，请参阅第 36 页上的“抬头工具”。"
+        ],
+        "orderedAnchors": [
+          "使用抬头工具",
+          "抬头右上角的 共享菜单可用来执行很多操作，例如，通过电子邮件共享清单视图（“通过电子邮件发送”），",
+          "或在主页上将选定的视图另存为磁贴（“另存为磁贴”）。更多信息，请参阅第 36 页上的“抬头工具”。"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "使用抬头工具",
+          "抬头右上角的 共享菜单可用来执行很多操作，例如，通过电子邮件共享清单视图（“通过电子邮件发送”），",
+          "或在主页上将选定的视图另存为磁贴（“另存为磁贴”）。更多信息，请参阅第 36 页上的“抬头工具”。"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p184",
+      "document_id": "figure-manual-pdf",
+      "page_number": 184,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0184.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "第 195 页上的“管理业务伙伴目录编号”",
+          "第 196 页上的“创建业务伙伴”",
+          "1.6.1 业务伙伴"
+        ],
+        "orderedAnchors": [
+          "第 195 页上的“管理业务伙伴目录编号”",
+          "第 196 页上的“创建业务伙伴”",
+          "1.6.1 业务伙伴"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "第 195 页上的“管理业务伙伴目录编号”",
+          "第 196 页上的“创建业务伙伴”",
+          "1.6.1 业务伙伴"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p220",
+      "document_id": "figure-manual-pdf",
+      "page_number": 220,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0220.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "Web Client 中的清单视图允许您搜索特定数据记录，使用筛选器限制当前在表区域中显示的数据记录，并使用",
+          "记录执行各种操作。清单视图也是导航到特定数据记录详细视图的入口点。要打开特定数据记录的详细视图，点击",
+          "相关记录所在行的 详细信息，或点击记录行中的任意位置。默认情况下，现有记录以查看模式显示。"
+        ],
+        "orderedAnchors": [
+          "Web Client 中的清单视图允许您搜索特定数据记录，使用筛选器限制当前在表区域中显示的数据记录，并使用",
+          "记录执行各种操作。清单视图也是导航到特定数据记录详细视图的入口点。要打开特定数据记录的详细视图，点击",
+          "相关记录所在行的 详细信息，或点击记录行中的任意位置。默认情况下，现有记录以查看模式显示。"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "Web Client 中的清单视图允许您搜索特定数据记录，使用筛选器限制当前在表区域中显示的数据记录，并使用",
+          "记录执行各种操作。清单视图也是导航到特定数据记录详细视图的入口点。要打开特定数据记录的详细视图，点击",
+          "相关记录所在行的 详细信息，或点击记录行中的任意位置。默认情况下，现有记录以查看模式显示。"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p257",
+      "document_id": "figure-manual-pdf",
+      "page_number": 257,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0257.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "1.12 服务",
+          "如果贵公司为客户提供服务，或是接受供应商的支持服务，您可以使用“服务”组中的应用管理与这些服务相关的",
+          "所有活动。"
+        ],
+        "orderedAnchors": [
+          "1.12 服务",
+          "如果贵公司为客户提供服务，或是接受供应商的支持服务，您可以使用“服务”组中的应用管理与这些服务相关的",
+          "所有活动。"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "1.12 服务",
+          "如果贵公司为客户提供服务，或是接受供应商的支持服务，您可以使用“服务”组中的应用管理与这些服务相关的",
+          "所有活动。"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p293",
+      "document_id": "figure-manual-pdf",
+      "page_number": 293,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0293.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "“名称” 当前查询的描述名称。",
+          "“类别” 当前查询分类依据的组。",
+          "“SQL 语句” 用于查询 SAP Business One 数据库以获取数据或信息的结构化查询语言（SQL）语句。"
+        ],
+        "orderedAnchors": [
+          "“名称” 当前查询的描述名称。",
+          "“类别” 当前查询分类依据的组。",
+          "“SQL 语句” 用于查询 SAP Business One 数据库以获取数据或信息的结构化查询语言（SQL）语句。"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "“名称” 当前查询的描述名称。",
+          "“类别” 当前查询分类依据的组。",
+          "“SQL 语句” 用于查询 SAP Business One 数据库以获取数据或信息的结构化查询语言（SQL）语句。"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-figure-manual-pdf-p330",
+      "document_id": "figure-manual-pdf",
+      "page_number": 330,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/figure-manual-pdf/p0330.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "www.sap.com/contactsap",
+          "© 2023 SAP 股份有限公司或其关联公司版权所有，保留所有权利。",
+          "未经 SAP 股份有限公司或其关联公司明确许可，任何人不得以任何形式或为"
+        ],
+        "orderedAnchors": [
+          "www.sap.com/contactsap",
+          "© 2023 SAP 股份有限公司或其关联公司版权所有，保留所有权利。",
+          "未经 SAP 股份有限公司或其关联公司明确许可，任何人不得以任何形式或为"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "www.sap.com/contactsap",
+          "© 2023 SAP 股份有限公司或其关联公司版权所有，保留所有权利。",
+          "未经 SAP 股份有限公司或其关联公司明确许可，任何人不得以任何形式或为"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p1",
+      "document_id": "multi-column-pdf",
+      "page_number": 1,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0001.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "image",
+          "paragraph"
+        ],
+        "anchors": [
+          "第 1 页图示区域",
+          "营运管理手册 手册编码：BDJ-06-FD",
+          "金鹿(北京)公务航空有限公司"
+        ],
+        "orderedAnchors": [
+          "第 1 页图示区域",
+          "营运管理手册 手册编码：BDJ-06-FD",
+          "金鹿(北京)公务航空有限公司"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "第 1 页图示区域",
+          "营运管理手册 手册编码：BDJ-06-FD",
+          "金鹿(北京)公务航空有限公司"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p65",
+      "document_id": "multi-column-pdf",
+      "page_number": 65,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0065.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册3",
+          "DEERJET",
+          "3机组健康与航空卫生"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册3",
+          "DEERJET",
+          "3机组健康与航空卫生"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册3",
+          "DEERJET",
+          "3机组健康与航空卫生"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p128",
+      "document_id": "multi-column-pdf",
+      "page_number": 128,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0128.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 7"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 7"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 7"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p192",
+      "document_id": "multi-column-pdf",
+      "page_number": 192,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0192.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "table"
+        ],
+        "anchors": [
+          "飞行运行手册8",
+          "GulfstreamIV机型按以上计算标准满员情况下无油重量超出最大无油重 量，故偏离以上标准，机组、乘客、行季重量计算标准如下：",
+          "乘客（磅） 机组（磅）"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册8",
+          "GulfstreamIV机型按以上计算标准满员情况下无油重量超出最大无油重 量，故偏离以上标准，机组、乘客、行季重量计算标准如下：",
+          "乘客（磅） 机组（磅）"
+        ],
+        "tableAnchors": [
+          "乘客（磅） 机组（磅）",
+          "成人 儿童 婴儿 大件行李",
+          "56cmX37cmX26"
+        ],
+        "criticalTokens": [
+          "飞行运行手册8",
+          "GulfstreamIV机型按以上计算标准满员情况下无油重量超出最大无油重 量，故偏离以上标准，机组、乘客、行季重量计算标准如下：",
+          "乘客（磅） 机组（磅）"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p256",
+      "document_id": "multi-column-pdf",
+      "page_number": 256,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0256.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 8",
+          "(2) 能见度不小于 800m 或 RVR 不小于 600m；",
+          "(3) 如果外指点标或由 CAAC 批准的系列定位点不工作，无法提供下滑道/"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 8",
+          "(2) 能见度不小于 800m 或 RVR 不小于 600m；",
+          "(3) 如果外指点标或由 CAAC 批准的系列定位点不工作，无法提供下滑道/"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 8",
+          "(2) 能见度不小于 800m 或 RVR 不小于 600m；",
+          "(3) 如果外指点标或由 CAAC 批准的系列定位点不工作，无法提供下滑道/"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p319",
+      "document_id": "multi-column-pdf",
+      "page_number": 319,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0319.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 9",
+          "9.6 遇险和紧急情况下的通信",
+          "9.6.1 定义"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 9",
+          "9.6 遇险和紧急情况下的通信",
+          "9.6.1 定义"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 9",
+          "9.6 遇险和紧急情况下的通信",
+          "9.6.1 定义"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p383",
+      "document_id": "multi-column-pdf",
+      "page_number": 383,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0383.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册10",
+          "DEERJET (2)",
+          "发动机失火警告：每台发动机失火，都有相应的警铃和灯光以及信号显 示。为了驾驶舱安静处置，可以按压火警按钮，消除报警响声。 2)"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册10",
+          "DEERJET (2)",
+          "发动机失火警告：每台发动机失火，都有相应的警铃和灯光以及信号显 示。为了驾驶舱安静处置，可以按压火警按钮，消除报警响声。 2)"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册10",
+          "DEERJET (2)",
+          "发动机失火警告：每台发动机失火，都有相应的警铃和灯光以及信号显 示。为了驾驶舱安静处置，可以按压火警按钮，消除报警响声。 2)"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p447",
+      "document_id": "multi-column-pdf",
+      "page_number": 447,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0447.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 11",
+          "1) 在各种情况下使用任何类型的除冰/防冰液时，在飞机表面所形成的液",
+          "膜对升力减小的影响很小，这已为所有的飞机制造商和中国民用航空局"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 11",
+          "1) 在各种情况下使用任何类型的除冰/防冰液时，在飞机表面所形成的液",
+          "膜对升力减小的影响很小，这已为所有的飞机制造商和中国民用航空局"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 11",
+          "1) 在各种情况下使用任何类型的除冰/防冰液时，在飞机表面所形成的液",
+          "膜对升力减小的影响很小，这已为所有的飞机制造商和中国民用航空局"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p510",
+      "document_id": "multi-column-pdf",
+      "page_number": 510,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0510.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 13",
+          "（此页空白）",
+          "修订日期：2020/10/23 页码：13.4-2"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 13",
+          "（此页空白）",
+          "修订日期：2020/10/23 页码：13.4-2"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 13",
+          "（此页空白）",
+          "修订日期：2020/10/23 页码：13.4-2"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-multi-column-pdf-p574",
+      "document_id": "multi-column-pdf",
+      "page_number": 574,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/multi-column-pdf/p0574.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "飞行运行手册 16",
+          "修订日期：2020/10/23 页码：16.5-3",
+          "修订次数：0"
+        ],
+        "orderedAnchors": [
+          "飞行运行手册 16",
+          "修订日期：2020/10/23 页码：16.5-3",
+          "修订次数：0"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "飞行运行手册 16",
+          "修订日期：2020/10/23 页码：16.5-3",
+          "修订次数：0"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p1",
+      "document_id": "ordinary-pdf",
+      "page_number": 1,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0001.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "TO: Holders of CFM56-5B.",
+          "Electrical Harness CJ13, Component Maintenance Manual, 73-22-87,",
+          "CFMI-TP.CM.337."
+        ],
+        "orderedAnchors": [
+          "TO: Holders of CFM56-5B.",
+          "Electrical Harness CJ13, Component Maintenance Manual, 73-22-87,",
+          "CFMI-TP.CM.337."
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "TO: Holders of CFM56-5B.",
+          "Electrical Harness CJ13, Component Maintenance Manual, 73-22-87,",
+          "CFMI-TP.CM.337."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p34",
+      "document_id": "ordinary-pdf",
+      "page_number": 34,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0034.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "320-366-701-0",
+          "R (4) Constitution for P/N 320-401-201-0.",
+          "(a) The box assy CJ13 (2-160) gives the shielded cables coming"
+        ],
+        "orderedAnchors": [
+          "320-366-701-0",
+          "R (4) Constitution for P/N 320-401-201-0.",
+          "(a) The box assy CJ13 (2-160) gives the shielded cables coming"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "320-366-701-0",
+          "R (4) Constitution for P/N 320-401-201-0.",
+          "(a) The box assy CJ13 (2-160) gives the shielded cables coming"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p67",
+      "document_id": "ordinary-pdf",
+      "page_number": 67,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0067.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "image",
+          "paragraph"
+        ],
+        "anchors": [
+          "第 1 页图示区域",
+          "320-366-701-0",
+          "R Troubleshooting Flowchart"
+        ],
+        "orderedAnchors": [
+          "第 1 页图示区域",
+          "320-366-701-0",
+          "R Troubleshooting Flowchart"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "第 1 页图示区域",
+          "320-366-701-0",
+          "R Troubleshooting Flowchart"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p100",
+      "document_id": "ordinary-pdf",
+      "page_number": 100,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0100.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=source_page_confirmed_blank,baseline_provider_missing."
+      },
+      "expected": {
+        "blockKinds": [],
+        "anchors": [],
+        "orderedAnchors": [],
+        "tableAnchors": [],
+        "criticalTokens": [],
+        "mustNotBeHeading": [
+          "024-36d65cd6b61346e28e97dbaf829646de-pages-100-100"
+        ]
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p133",
+      "document_id": "ordinary-pdf",
+      "page_number": 133,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0133.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "320-366-701-0",
+          "Removal of Adapter Assy (4-140)",
+          "Figure 614"
+        ],
+        "orderedAnchors": [
+          "320-366-701-0",
+          "Removal of Adapter Assy (4-140)",
+          "Figure 614"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "320-366-701-0",
+          "Removal of Adapter Assy (4-140)",
+          "Figure 614"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p165",
+      "document_id": "ordinary-pdf",
+      "page_number": 165,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0165.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "table"
+        ],
+        "anchors": [
+          "COMPONENT",
+          "INSTALLATION \"B-3T\"",
+          "EVEELS )82(.A.8"
+        ],
+        "orderedAnchors": [
+          "COMPONENT",
+          "INSTALLATION \"B-3T\"",
+          "EVEELS )82(.A.8"
+        ],
+        "tableAnchors": [
+          "INSTALLATION \"B-3T\"",
+          "EVEELS )82(.A.8",
+          ".TNEDI GNITTUC"
+        ],
+        "criticalTokens": [
+          "COMPONENT",
+          "INSTALLATION \"B-3T\"",
+          "EVEELS )82(.A.8"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p198",
+      "document_id": "ordinary-pdf",
+      "page_number": 198,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0198.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "320-366-701-0",
+          "Installation of Adapter Assy (4-10)",
+          "R Figure 630"
+        ],
+        "orderedAnchors": [
+          "320-366-701-0",
+          "Installation of Adapter Assy (4-10)",
+          "R Figure 630"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "320-366-701-0",
+          "Installation of Adapter Assy (4-10)",
+          "R Figure 630"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p231",
+      "document_id": "ordinary-pdf",
+      "page_number": 231,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0231.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "320-366-701-0",
+          "R CAUTION: MAKE SURE YOU CRIMP THE ALUMEL CONTACTS (2-90) ON THE",
+          "R ALUMEL CONDUCTORS AND THE CHROMEL CONTACTS (2-80) ON"
+        ],
+        "orderedAnchors": [
+          "320-366-701-0",
+          "R CAUTION: MAKE SURE YOU CRIMP THE ALUMEL CONTACTS (2-90) ON THE",
+          "R ALUMEL CONDUCTORS AND THE CHROMEL CONTACTS (2-80) ON"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "320-366-701-0",
+          "R CAUTION: MAKE SURE YOU CRIMP THE ALUMEL CONTACTS (2-90) ON THE",
+          "R ALUMEL CONDUCTORS AND THE CHROMEL CONTACTS (2-80) ON"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p264",
+      "document_id": "ordinary-pdf",
+      "page_number": 264,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0264.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "320-366-701-0",
+          "(3) Indent.",
+          "The detailed nomenclature is presented in indented form to"
+        ],
+        "orderedAnchors": [
+          "320-366-701-0",
+          "(3) Indent.",
+          "The detailed nomenclature is presented in indented form to"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "320-366-701-0",
+          "(3) Indent.",
+          "The detailed nomenclature is presented in indented form to"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-ordinary-pdf-p297",
+      "document_id": "ordinary-pdf",
+      "page_number": 297,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/ordinary-pdf/p0297.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline,image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "image",
+          "paragraph",
+          "table"
+        ],
+        "anchors": [
+          "FIG-ITEM PART NUMBER NOMENCLATURE USAGE PER",
+          "COMPONENT",
+          "FIG-ITEM PART NUMBER NOMENCLATURE"
+        ],
+        "orderedAnchors": [
+          "FIG-ITEM PART NUMBER NOMENCLATURE USAGE PER",
+          "COMPONENT",
+          "FIG-ITEM PART NUMBER NOMENCLATURE"
+        ],
+        "tableAnchors": [
+          "FIG-ITEM PART NUMBER NOMENCLATURE",
+          "1234567 USAGE",
+          "CODE UNITS"
+        ],
+        "criticalTokens": [
+          "FIG-ITEM PART NUMBER NOMENCLATURE USAGE PER",
+          "COMPONENT",
+          "FIG-ITEM PART NUMBER NOMENCLATURE"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p1",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 1,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0001.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p25",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 25,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0025.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SSAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SSAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SSAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p49",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 49,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0049.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline,image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image",
+          "table"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [
+          "(cid:27)(cid:24)(cid:28)(cid:17)(cid:18) (cid:29)3-.$$052",
+          ".2,’&01+’",
+          "((cid:21)7!B!(cid:16)*&’ 3-.$4$+%&05&6+-2%’((cid:21)7(cid:21)(cid:21)!*+%$+/&1"
+        ],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p73",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 73,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0073.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p97",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 97,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0097.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p122",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 122,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0122.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p146",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 146,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0146.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "CAGE: F6137"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p170",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 170,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0170.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p194",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 194,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0194.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=image_or_figure_present."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "image"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "SAFRAN",
+          "第 1 页图示区域"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-scan-ocr-pdf-p218",
+      "document_id": "scan-ocr-pdf",
+      "page_number": 218,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/scan-ocr-pdf/p0218.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "table"
+        ],
+        "anchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "(cid:10)(cid:0)(cid:11)(cid:12)(cid:13) (cid:18)(cid:19)(cid:20)(cid:21)(cid:22)(cid:23)",
+          "(cid:0)(cid:0)(cid:2)(cid:0)"
+        ],
+        "orderedAnchors": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "(cid:10)(cid:0)(cid:11)(cid:12)(cid:13) (cid:18)(cid:19)(cid:20)(cid:21)(cid:22)(cid:23)",
+          "(cid:0)(cid:0)(cid:2)(cid:0)"
+        ],
+        "tableAnchors": [
+          "(cid:10)(cid:0)(cid:11)(cid:12)(cid:13) (cid:18)(cid:19)(cid:20)(cid:21)(cid:22)(cid:23)",
+          "(cid:0)(cid:0)(cid:2)(cid:0)",
+          "(cid:19)(cid:29)(cid:16)((cid:29)(cid:28)(cid:17)(cid:25)"
+        ],
+        "criticalTokens": [
+          "SAFRAN LANDING SYSTEMS SAS",
+          "(cid:10)(cid:0)(cid:11)(cid:12)(cid:13) (cid:18)(cid:19)(cid:20)(cid:21)(cid:22)(cid:23)",
+          "(cid:0)(cid:0)(cid:2)(cid:0)"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p1",
+      "document_id": "table-heavy-pdf",
+      "page_number": 1,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0001.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "INTERNATIONAL LLC 4880 WEST ROSECRANS AVE. + HAWTHORNE. CALIFORNIA 90250-6645 · USA",
+          "http://www.ancra-llc.com",
+          "Ancra International LLC proprietary rights are included in the information disclosed herein."
+        ],
+        "orderedAnchors": [
+          "INTERNATIONAL LLC 4880 WEST ROSECRANS AVE. + HAWTHORNE. CALIFORNIA 90250-6645 · USA",
+          "http://www.ancra-llc.com",
+          "Ancra International LLC proprietary rights are included in the information disclosed herein."
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "INTERNATIONAL LLC 4880 WEST ROSECRANS AVE. + HAWTHORNE. CALIFORNIA 90250-6645 · USA",
+          "http://www.ancra-llc.com",
+          "Ancra International LLC proprietary rights are included in the information disclosed herein."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p6",
+      "document_id": "table-heavy-pdf",
+      "page_number": 6,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0006.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-front- TABLE OF CONTENTS Component Maintenance Manual",
+          "PAGE"
+        ],
+        "orderedAnchors": [
+          "COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-front- TABLE OF CONTENTS Component Maintenance Manual",
+          "PAGE"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-front- TABLE OF CONTENTS Component Maintenance Manual",
+          "PAGE"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p11",
+      "document_id": "table-heavy-pdf",
+      "page_number": 11,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0011.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "TERNATIONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10 -Front-",
+          "Contact Info Name, Department Company Name Airport or City",
+          "Telephone"
+        ],
+        "orderedAnchors": [
+          "TERNATIONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10 -Front-",
+          "Contact Info Name, Department Company Name Airport or City",
+          "Telephone"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "TERNATIONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10 -Front-",
+          "Contact Info Name, Department Company Name Airport or City",
+          "Telephone"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p16",
+      "document_id": "table-heavy-pdf",
+      "page_number": 16,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0016.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "COMPONENT MAINTENANCEMANUAL PN 92002-10",
+          "DISASSEMBLY. DISASSEMBLY",
+          "General Disassemble a component if you need to identify what is incorrect with the"
+        ],
+        "orderedAnchors": [
+          "COMPONENT MAINTENANCEMANUAL PN 92002-10",
+          "DISASSEMBLY. DISASSEMBLY",
+          "General Disassemble a component if you need to identify what is incorrect with the"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "COMPONENT MAINTENANCEMANUAL PN 92002-10",
+          "DISASSEMBLY. DISASSEMBLY",
+          "General Disassemble a component if you need to identify what is incorrect with the"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p21",
+      "document_id": "table-heavy-pdf",
+      "page_number": 21,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0021.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=table_present_reviewed_against_baseline."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph",
+          "table"
+        ],
+        "anchors": [
+          "INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-CLEANING-",
+          "H. can be used."
+        ],
+        "orderedAnchors": [
+          "INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-CLEANING-",
+          "H. can be used."
+        ],
+        "tableAnchors": [
+          "D;F3;<!<=O(cid:8)I;(cid:8) <;=(cid:8)A!F;H!(cid:8)=@!(cid:8)E(cid:31)L!A(cid:8);M(cid:8)3A;=!D=J;<9",
+          "P9 (cid:7)@!(cid:8)(cid:0)(cid:3)(cid:3)(cid:8)(cid:7)(cid:31)BE!",
+          "(cid:27)+*[./’+."
+        ],
+        "criticalTokens": [
+          "INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-CLEANING-",
+          "H. can be used."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p25",
+      "document_id": "table-heavy-pdf",
+      "page_number": 25,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0025.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "ANEA INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10 -REPAIR- REPAIR",
+          "General",
+          "1. A."
+        ],
+        "orderedAnchors": [
+          "ANEA INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10 -REPAIR- REPAIR",
+          "General",
+          "1. A."
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "ANEA INTERNATIONAL LEC COMPONENT MAINTENANCE MANUAL PN 92002-10 -REPAIR- REPAIR",
+          "General",
+          "1. A."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p30",
+      "document_id": "table-heavy-pdf",
+      "page_number": 30,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0030.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "ANRA COMPONENT MAINTENANCE MANUAL PN 92002-10 ASSEMBLY- ASSEMBLY",
+          "General A.",
+          "Assemble a component after you repair or alean it. B."
+        ],
+        "orderedAnchors": [
+          "ANRA COMPONENT MAINTENANCE MANUAL PN 92002-10 ASSEMBLY- ASSEMBLY",
+          "General A.",
+          "Assemble a component after you repair or alean it. B."
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "ANRA COMPONENT MAINTENANCE MANUAL PN 92002-10 ASSEMBLY- ASSEMBLY",
+          "General A.",
+          "Assemble a component after you repair or alean it. B."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p35",
+      "document_id": "table-heavy-pdf",
+      "page_number": 35,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0035.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "ANERA COMPONENT MAINTENANCE MANUAL PN 92002-10 -ASSEMBLY-",
+          "book E.",
+          "Make sure that component operates correctly, or repairs are clearly identified. (1)"
+        ],
+        "orderedAnchors": [
+          "ANERA COMPONENT MAINTENANCE MANUAL PN 92002-10 -ASSEMBLY-",
+          "book E.",
+          "Make sure that component operates correctly, or repairs are clearly identified. (1)"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "ANERA COMPONENT MAINTENANCE MANUAL PN 92002-10 -ASSEMBLY-",
+          "book E.",
+          "Make sure that component operates correctly, or repairs are clearly identified. (1)"
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p40",
+      "document_id": "table-heavy-pdf",
+      "page_number": 40,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0040.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "AEA INTERNATIONAE LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-SPECIAL TOOLS, FIXTURES, AND EQUIPMENT- Safety Equipment",
+          "2. A."
+        ],
+        "orderedAnchors": [
+          "AEA INTERNATIONAE LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-SPECIAL TOOLS, FIXTURES, AND EQUIPMENT- Safety Equipment",
+          "2. A."
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "AEA INTERNATIONAE LEC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "-SPECIAL TOOLS, FIXTURES, AND EQUIPMENT- Safety Equipment",
+          "2. A."
+        ],
+        "mustNotBeHeading": []
+      }
+    },
+    {
+      "id": "review-table-heavy-pdf-p45",
+      "document_id": "table-heavy-pdf",
+      "page_number": 45,
+      "review_status": "approved",
+      "source": "generated-review-queue",
+      "review": {
+        "reviewer": "Codex (AI-assisted, user-authorized)",
+        "reviewed_at": "2026-07-14T18:52:09+08:00",
+        "source_screenshot": "pages/table-heavy-pdf/p0045.png",
+        "notes": "AI-assisted review authorized by user: source screenshot/text probe and pdf-text baseline evidence cross-checked; visual spot-checks recorded separately. risk=none."
+      },
+      "expected": {
+        "blockKinds": [
+          "title",
+          "paragraph"
+        ],
+        "anchors": [
+          "NTEANATONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "UNITS",
+          "AIRLINE"
+        ],
+        "orderedAnchors": [
+          "NTEANATONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "UNITS",
+          "AIRLINE"
+        ],
+        "tableAnchors": [],
+        "criticalTokens": [
+          "NTEANATONAL LLC COMPONENT MAINTENANCE MANUAL PN 92002-10",
+          "UNITS",
+          "AIRLINE"
+        ],
+        "mustNotBeHeading": []
+      }
+    }
+  ]
+}

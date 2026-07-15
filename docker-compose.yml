@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: parsecore
       POSTGRES_PASSWORD: parsecore
     ports:
-      - "5432:5432"
+      - "${PARSECORE_POSTGRES_PORT:-5432}:5432"
     volumes:
       - parsecore-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -24,6 +24,10 @@ services:
     environment:
       PARSECORE_API_KEY: ${PARSECORE_API_KEY:-}
       PARSECORE_UPLOAD_BRIDGE_API_KEY: ${PARSECORE_UPLOAD_BRIDGE_API_KEY:-}
+      PARSECORE_DATABASE_URL: ${PARSECORE_DATABASE_URL:-}
+      PARSECORE_EMBEDDING_API_KEY: ${PARSECORE_EMBEDDING_API_KEY:-}
+      PARSECORE_RERANK_API_KEY: ${PARSECORE_RERANK_API_KEY:-}
+      PARSECORE_ALIYUN_API_KEY: ${PARSECORE_ALIYUN_API_KEY:-}
     command:
       [
         "python",
@@ -38,7 +42,7 @@ services:
         "8090",
       ]
     ports:
-      - "8090:8090"
+      - "${PARSECORE_API_PORT:-8090}:8090"
     volumes:
       - ./var:/app/var
       - ${PARSECORE_RUNTIME_CONFIG:-./parsecore.queue.toml}:/app/parsecore.runtime.toml:ro
@@ -46,6 +50,11 @@ services:
   parsecore-worker:
     build:
       context: .
+    environment:
+      PARSECORE_DATABASE_URL: ${PARSECORE_DATABASE_URL:-}
+      PARSECORE_EMBEDDING_API_KEY: ${PARSECORE_EMBEDDING_API_KEY:-}
+      PARSECORE_RERANK_API_KEY: ${PARSECORE_RERANK_API_KEY:-}
+      PARSECORE_ALIYUN_API_KEY: ${PARSECORE_ALIYUN_API_KEY:-}
     command:
       [
         "python",

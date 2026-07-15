@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import mimetypes
 import os
@@ -31,6 +32,7 @@ from parsecore.config import (  # noqa: E402
 from parsecore.models import Block, BlockType, ParseJob, ParseJobState, ParseRequest  # noqa: E402
 from parsecore.parsers import build_parser  # noqa: E402
 from parsecore.pdf_parts import create_pdf_part_file  # noqa: E402
+from parsecore.provider_failures import classify_provider_failure  # noqa: E402
 from parsecore.stubs import FakeEmbeddingProvider, ParagraphChunkBuilder  # noqa: E402
 
 
@@ -83,11 +85,83 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write per-sample progress messages to stderr without changing JSON stdout",
     )
+    parser.add_argument(
+        "--track-python-memory",
+        action="store_true",
+        help="Opt in to tracemalloc peak memory tracking; it can materially slow native PDF providers",
+    )
+    parser.add_argument(
+        "--reuse-parser-instances",
+        action="store_true",
+        help="Reuse one parser instance per provider across samples for candidate warm-state measurement",
+    )
     return parser
 
 
 def _round(value: float, digits: int = 3) -> float:
     return round(float(value), digits)
+
+
+def _provider_failure_category(error: BaseException) -> str:
+    """Keep the historical helper while sharing runtime classification rules."""
+    return classify_provider_failure(error)
+
+
+def _converter_runtime_observation(blocks: Sequence[Block]) -> dict[str, Any]:
+    """Extract optional converter warm/cold telemetry from the first block."""
+    if not blocks:
+        return {}
+    metadata = blocks[0].metadata if isinstance(blocks[0].metadata, Mapping) else {}
+    reuse_enabled = metadata.get("converter_reuse_enabled")
+    cache_hit = metadata.get("converter_cache_hit")
+    if not isinstance(reuse_enabled, bool) or not isinstance(cache_hit, bool):
+        return {}
+    return {
+        "converter_reuse_enabled": reuse_enabled,
+        "converter_cache_hit": cache_hit,
+        "converter_cache_state": "warm" if cache_hit else "cold",
+    }
+
+
+def _parse_cache_runtime_observation(blocks: Sequence[Block]) -> dict[str, Any]:
+    """Extract optional pdf-text parse-cache warm/cold telemetry."""
+    if not blocks:
+        return {}
+    metadata = blocks[0].metadata if isinstance(blocks[0].metadata, Mapping) else {}
+    cache_enabled = metadata.get("parse_cache_enabled")
+    cache_hit = metadata.get("parse_cache_hit")
+    if not isinstance(cache_enabled, bool) or not isinstance(cache_hit, bool):
+        return {}
+    return {
+        "parse_cache_enabled": cache_enabled,
+        "parse_cache_hit": cache_hit,
+        "parse_cache_state": "warm" if cache_hit else "cold",
+    }
+
+
+def _rank_completed_providers(
+    providers: Sequence[Mapping[str, Any]],
+    *,
+    route_primary_provider_id: str,
+) -> list[Mapping[str, Any]]:
+    """Rank provider evidence without turning a timing tie into a route promotion.
+
+    Per-provider quality projections are intentionally isolated so each adapter
+    can be diagnosed independently.  Consequently, equal scores are common.
+    A sub-second elapsed difference in that case is not sufficient evidence to
+    override the configured route primary; elapsed time remains visible in the
+    report and is used after the stable route-primary tiebreaker.
+    """
+    primary = str(route_primary_provider_id or "").strip()
+    return sorted(
+        providers,
+        key=lambda item: (
+            -float(item.get("provider_score") if item.get("provider_score") is not None else 0.0),
+            0 if primary and str(item.get("provider_id") or "") == primary else 1,
+            float(item.get("elapsed_s") or 0.0),
+            str(item.get("provider_id") or ""),
+        ),
+    )
 
 
 def _media_type_for(path: Path) -> str | None:
@@ -643,6 +717,14 @@ def _gold_evidence(blocks: Sequence[Block]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for position, block in enumerate(blocks, start=1):
         metadata = dict(block.metadata or {})
+        provider_id = str(metadata.get("provider_id") or metadata.get("parser_name") or "").strip()
+        source_kind = str(metadata.get("source_kind") or "").strip()
+        # Some native providers expose provider identity but do not attach a
+        # source_kind to every block (for example title/paragraph blocks). The
+        # gold evaluator only needs a non-empty, deterministic provenance value
+        # so those blocks remain traceable without inventing semantic labels.
+        if not source_kind:
+            source_kind = f"{provider_id or 'provider'}:{block.type.value}"
         try:
             page_number = int(metadata.get("page") or 1)
         except (TypeError, ValueError):
@@ -655,9 +737,9 @@ def _gold_evidence(blocks: Sequence[Block]) -> list[dict[str, Any]]:
                 "kind": block.type.value,
                 "text": str(block.content or ""),
                 "semantic_role": str(metadata.get("semantic_role") or ""),
-                "provider_id": str(metadata.get("provider_id") or metadata.get("parser_name") or ""),
+                "provider_id": provider_id,
                 "provider_version": str(metadata.get("provider_version") or "") or None,
-                "source_kind": str(metadata.get("source_kind") or ""),
+                "source_kind": source_kind,
                 "table_cells": metadata.get("cells") if isinstance(metadata.get("cells"), list) else [],
             }
         )
@@ -675,6 +757,8 @@ def _run_provider(
     profile: str,
     sample_index: int,
     page_range: tuple[int, int] | None,
+    track_python_memory: bool,
+    parser_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parser_config = parser_settings.get(provider_id)
     if parser_config is None:
@@ -682,19 +766,25 @@ def _run_provider(
             "provider_id": provider_id,
             "status": "skipped",
             "reason": "parser_not_configured",
+            "skip_category": "provider_unavailable",
         }
-    parser = build_parser(
-        parser_config.name,
-        media_types=parser_config.media_types,
-        extensions=parser_config.extensions,
-        options=parser_config.options,
-        ocr_provider_settings=_local_ocr_settings(settings),
-    )
+    parser = parser_cache.get(provider_id) if parser_cache is not None else None
+    if parser is None:
+        parser = build_parser(
+            parser_config.name,
+            media_types=parser_config.media_types,
+            extensions=parser_config.extensions,
+            options=parser_config.options,
+            ocr_provider_settings=_local_ocr_settings(settings),
+        )
+        if parser_cache is not None:
+            parser_cache[provider_id] = parser
     if not parser.supports(media_type=media_type, suffix=path.suffix):
         return {
             "provider_id": provider_id,
             "status": "skipped",
             "reason": "unsupported_media_type_or_extension",
+            "skip_category": "unsupported",
             "media_type": media_type,
             "suffix": path.suffix.lower(),
         }
@@ -709,24 +799,35 @@ def _run_provider(
         quota_key="compare",
     )
     started = time.perf_counter()
-    tracemalloc.start()
+    # tracemalloc instruments Python allocations and can materially slow
+    # native PDF engines (notably pymupdf4llm). Keep it opt-in so elapsed_s is
+    # a useful parser timing; callers that need Python peak memory can request
+    # the diagnostic mode explicitly.
+    tracemalloc_started_here = bool(track_python_memory and not tracemalloc.is_tracing())
+    if tracemalloc_started_here:
+        tracemalloc.start()
     try:
         raw_blocks = tuple(parser.parse(request))
-        _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        _current_bytes, peak_bytes = tracemalloc.get_traced_memory() if track_python_memory else (0, 0)
     except Exception as exc:
-        _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        _current_bytes, peak_bytes = tracemalloc.get_traced_memory() if track_python_memory else (0, 0)
         elapsed_s = _round(time.perf_counter() - started)
-        tracemalloc.stop()
+        if tracemalloc_started_here:
+            tracemalloc.stop()
         return {
             "provider_id": provider_id,
             "status": "failed",
             "elapsed_s": elapsed_s,
-            "peak_kb": _round(peak_bytes / 1024),
+            "peak_kb": _round(peak_bytes / 1024) if track_python_memory else None,
+            "failure_category": _provider_failure_category(exc),
             "error": str(exc),
         }
     elapsed_s = _round(time.perf_counter() - started)
-    tracemalloc.stop()
-    peak_kb = _round(peak_bytes / 1024)
+    if tracemalloc_started_here:
+        tracemalloc.stop()
+    peak_kb = _round(peak_bytes / 1024) if track_python_memory else None
+    converter_observation = _converter_runtime_observation(raw_blocks)
+    parse_cache_observation = _parse_cache_runtime_observation(raw_blocks)
     normalized_blocks = raw_blocks
     if page_range is not None:
         normalized_blocks = _normalize_page_range_blocks(
@@ -764,6 +865,8 @@ def _run_provider(
         "status": "done",
         "elapsed_s": elapsed_s,
         "peak_kb": peak_kb,
+        **converter_observation,
+        **parse_cache_observation,
         "blocks": len(blocks),
         "chunks": len(chunks),
         "tables": len(table_blocks),
@@ -793,6 +896,8 @@ def _sample_report(
     providers: Sequence[str] | None,
     page_range: tuple[int, int] | None,
     temp_dir: Path,
+    track_python_memory: bool,
+    parser_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     selection_mode = "explicit" if providers else "route_plan"
     media_type = _media_type_for(path)
@@ -827,17 +932,19 @@ def _sample_report(
             profile=profile,
             sample_index=sample_index,
             page_range=page_range,
+            track_python_memory=track_python_memory,
+            parser_cache=parser_cache,
         )
         for provider_id in provider_ids
     ]
     completed = [item for item in results if item.get("status") == "done"]
-    rankings = sorted(
+    route_selection = (
+        route_plan.get("selection") if isinstance(route_plan.get("selection"), Mapping) else {}
+    )
+    route_primary_provider_id = str(route_selection.get("primary_provider_id") or "")
+    rankings = _rank_completed_providers(
         completed,
-        key=lambda item: (
-            -float(item.get("provider_score") if item.get("provider_score") is not None else 0.0),
-            float(item.get("elapsed_s") or 0.0),
-            str(item.get("provider_id") or ""),
-        ),
+        route_primary_provider_id=route_primary_provider_id,
     )
     return {
         "sample_name": sample_name or path.name,
@@ -849,8 +956,9 @@ def _sample_report(
         "profile": profile,
         "route_plan": route_plan,
         "routing_policy": route_plan.get("routing_policy"),
-        "route_selection": route_plan.get("selection") or {},
+        "route_selection": route_selection,
         "provider_selection_mode": selection_mode,
+        "ranking_policy": "provider_score_desc_then_route_primary_then_elapsed_s_then_id",
         "requested_provider_ids": provider_ids,
         "providers": results,
         "ranking": [
@@ -1470,6 +1578,7 @@ def _comparison_gate_summary(
     samples_best_provider_differs_from_route_primary = 0
     failed_provider_runs = 0
     skipped_provider_runs = 0
+    failure_categories: Counter[str] = Counter()
     provider_quality_warning_runs = 0
     provider_reading_order_warning_runs = 0
     normalized_gate_policy = _gate_policy(gate_policy)
@@ -1495,6 +1604,9 @@ def _comparison_gate_summary(
         skipped = [provider for provider in providers if provider.get("status") == "skipped"]
         failed_provider_runs += len(failed)
         skipped_provider_runs += len(skipped)
+        for provider in failed:
+            category = str(provider.get("failure_category") or "provider_failed").strip() or "provider_failed"
+            failure_categories[category] += 1
 
         route_selection = sample.get("route_selection") if isinstance(sample.get("route_selection"), dict) else {}
         route_primary = str(route_selection.get("primary_provider_id") or "")
@@ -1545,6 +1657,7 @@ def _comparison_gate_summary(
                     "severity": "error",
                     "code": "provider_run_failed",
                     "provider_id": str(provider.get("provider_id") or ""),
+                    "failure_category": str(provider.get("failure_category") or "provider_failed"),
                     "message": str(provider.get("error") or "Provider run failed"),
                 }
                 for provider in failed
@@ -1737,6 +1850,7 @@ def _comparison_gate_summary(
         "samples_best_provider_differs_from_route_primary": samples_best_provider_differs_from_route_primary,
         "failed_provider_runs": failed_provider_runs,
         "skipped_provider_runs": skipped_provider_runs,
+        "failure_categories": dict(sorted(failure_categories.items())),
         "provider_quality_warning_runs": provider_quality_warning_runs,
         "provider_reading_order_warning_runs": provider_reading_order_warning_runs,
         "providers_with_multiple_provider_versions": providers_with_multiple_provider_versions,
@@ -1787,6 +1901,8 @@ def build_report(
     page_start: int | None = None,
     page_end: int | None = None,
     progress: bool = False,
+    track_python_memory: bool = False,
+    reuse_parser_instances: bool = False,
 ) -> dict[str, Any]:
     settings = load_settings(config)
     parser_settings = _parser_settings_by_name(settings)
@@ -1815,8 +1931,16 @@ def build_report(
             file=sys.stderr,
             flush=True,
         )
-    with TemporaryDirectory(prefix="parsecore-provider-compare-") as temp_root:
+    # PyMuPDF/third-party parser handles may release a page file one event
+    # loop later on Windows.  Do not turn an otherwise complete comparison
+    # into a failed gate solely because the best-effort temp cleanup raced a
+    # delayed close; TemporaryDirectory still retries normal cleanup first.
+    with TemporaryDirectory(
+        prefix="parsecore-provider-compare-",
+        ignore_cleanup_errors=True,
+    ) as temp_root:
         temp_dir = Path(temp_root)
+        parser_cache: dict[str, Any] | None = {} if reuse_parser_instances else None
         sample_reports: list[dict[str, Any]] = []
         for index, sample in enumerate(sample_specs, start=1):
             if progress:
@@ -1853,6 +1977,8 @@ def build_report(
                     ),
                 ),
                 temp_dir=temp_dir,
+                track_python_memory=track_python_memory,
+                parser_cache=parser_cache,
             )
             sample_reports.append(sample_report)
             if progress:
@@ -1874,6 +2000,26 @@ def build_report(
         for provider in sample.get("providers", [])
         if isinstance(provider, dict)
     ]
+    converter_runs = [
+        provider
+        for provider in provider_runs
+        if provider.get("converter_reuse_enabled") is True
+    ]
+    converter_cache_summary = {
+        "observations": len(converter_runs),
+        "hits": sum(1 for provider in converter_runs if provider.get("converter_cache_hit") is True),
+        "misses": sum(1 for provider in converter_runs if provider.get("converter_cache_hit") is False),
+    }
+    parse_cache_runs = [
+        provider
+        for provider in provider_runs
+        if provider.get("parse_cache_enabled") is True
+    ]
+    parse_cache_summary = {
+        "observations": len(parse_cache_runs),
+        "hits": sum(1 for provider in parse_cache_runs if provider.get("parse_cache_hit") is True),
+        "misses": sum(1 for provider in parse_cache_runs if provider.get("parse_cache_hit") is False),
+    }
     provider_identity_summary = _provider_identity_summary(sample_reports)
     base_gate_summary = _comparison_gate_summary(sample_reports, gate_policy=gate_policy)
     provider_admission_summary = _provider_admission_summary(
@@ -1899,6 +2045,14 @@ def build_report(
         "suite": str(Path(suite).resolve()) if suite is not None else None,
         "fixture_root": str(resolved_fixture_root) if resolved_fixture_root is not None else None,
         "profile": profile,
+        "measurement": {
+            "elapsed_scope": "parser.parse_only",
+            "track_python_memory": bool(track_python_memory),
+            "parser_lifecycle": (
+                "provider_instance_reused" if reuse_parser_instances else "new_per_run"
+            ),
+            "reuse_parser_instances": bool(reuse_parser_instances),
+        },
         "gate_policy": gate_policy,
         "summary": {
             "sample_count": len(sample_reports),
@@ -1906,6 +2060,9 @@ def build_report(
             "completed_provider_runs": len([item for item in provider_runs if item.get("status") == "done"]),
             "failed_provider_runs": len([item for item in provider_runs if item.get("status") == "failed"]),
             "skipped_provider_runs": len([item for item in provider_runs if item.get("status") == "skipped"]),
+            "failure_categories": dict((gate_summary.get("failure_categories") or {})),
+            "converter_cache": converter_cache_summary,
+            "parse_cache": parse_cache_summary,
         },
         "provider_identity_summary": provider_identity_summary,
         "gate_summary": gate_summary,
@@ -1921,12 +2078,18 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- schema_version: `{payload.get('schema_version')}`",
         f"- profile: `{payload.get('profile')}`",
+        f"- elapsed_scope: `{(payload.get('measurement') or {}).get('elapsed_scope', 'unknown')}`",
+        f"- track_python_memory: `{bool((payload.get('measurement') or {}).get('track_python_memory', False))}`",
+        f"- parser_lifecycle: `{(payload.get('measurement') or {}).get('parser_lifecycle', 'unknown')}`",
         f"- suite: `{payload.get('suite')}`",
         f"- gate_policy: `{json.dumps(payload.get('gate_policy') or {}, ensure_ascii=False)}`",
         f"- samples: {summary.get('sample_count', 0)}",
         f"- completed_provider_runs: {summary.get('completed_provider_runs', 0)}",
         f"- failed_provider_runs: {summary.get('failed_provider_runs', 0)}",
         f"- skipped_provider_runs: {summary.get('skipped_provider_runs', 0)}",
+        f"- failure_categories: `{json.dumps(summary.get('failure_categories') or {}, ensure_ascii=False)}`",
+        f"- converter_cache: `{json.dumps(summary.get('converter_cache') or {}, ensure_ascii=False)}`",
+        f"- parse_cache: `{json.dumps(summary.get('parse_cache') or {}, ensure_ascii=False)}`",
         f"- provider_quality_warning_runs: {(payload.get('gate_summary') or {}).get('provider_quality_warning_runs', 0)}",
         f"- reading_order_warning_runs: {(payload.get('gate_summary') or {}).get('provider_reading_order_warning_runs', 0)}",
         f"- best_provider_route_mismatches: {(payload.get('gate_summary') or {}).get('samples_best_provider_differs_from_route_primary', 0)}",
@@ -2035,19 +2198,22 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Provider Runs",
             "",
-            "| sample | provider | version | adapter | status | score | elapsed_s | blocks | chunks | tables | recommendation |",
-            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| sample | provider | version | adapter | status | failure_category | converter_cache_state | parse_cache_state | score | elapsed_s | blocks | chunks | tables | recommendation |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in payload.get("samples") or []:
         for provider in sample.get("providers") or []:
             lines.append(
-                "| {sample} | {provider} | {version} | {adapter} | {status} | {score} | {elapsed_s} | {blocks} | {chunks} | {tables} | {recommendation} |".format(
+                "| {sample} | {provider} | {version} | {adapter} | {status} | {failure_category} | {converter_cache_state} | {parse_cache_state} | {score} | {elapsed_s} | {blocks} | {chunks} | {tables} | {recommendation} |".format(
                     sample=sample.get("sample_name") or sample.get("file_name", ""),
                     provider=provider.get("provider_id", ""),
                     version=provider.get("provider_version", "") or "-",
                     adapter=provider.get("adapter_version", "") or "-",
                     status=provider.get("status", ""),
+                    failure_category=provider.get("failure_category", "") or "-",
+                    converter_cache_state=provider.get("converter_cache_state", "") or "-",
+                    parse_cache_state=provider.get("parse_cache_state", "") or "-",
                     score=provider.get("provider_score", ""),
                     elapsed_s=provider.get("elapsed_s", ""),
                     blocks=provider.get("blocks", ""),
@@ -2060,7 +2226,21 @@ def render_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _configure_utf8_stdout() -> None:
+    """Keep JSON stdout portable on Windows consoles using a legacy code page."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if not callable(reconfigure):
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (AttributeError, TypeError, ValueError):
+        # Test harnesses may provide a StringIO-like stream without a mutable
+        # encoding; the caller can still capture the already-Unicode payload.
+        return
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdout()
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not args.sample and not args.suite:
@@ -2076,6 +2256,8 @@ def main(argv: list[str] | None = None) -> int:
         page_start=args.page_start,
         page_end=args.page_end,
         progress=args.progress,
+        track_python_memory=bool(args.track_python_memory),
+        reuse_parser_instances=bool(args.reuse_parser_instances),
     )
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.out_json:

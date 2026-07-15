@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -31,6 +32,7 @@ class RuntimeSettings:
     staged_upload_retention_seconds: int = 86400
     part_artifact_retention_seconds: int = 604800
     export_artifact_retention_seconds: int = 2592000
+    provider_comparison_artifact_retention_seconds: int = 2592000
     quota_enforce: bool = False
     quota_window_hours: float = 24.0
     quota_default_limit_units: int = 0
@@ -78,6 +80,26 @@ class EmbeddingProviderSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class RerankProviderSettings:
+    """Optional second-stage retrieval reranker configuration.
+
+    The defaults keep reranking disabled, so an existing embedded ParseCore
+    deployment never acquires a remote model dependency until it explicitly
+    opts in through ``[providers.rerank]``.
+    """
+
+    enabled: bool = False
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+    api_key_env: str = "PARSECORE_RERANK_API_KEY"
+    timeout_seconds: float = 30.0
+    max_retries: int = 2
+    candidate_limit: int = 30
+    options: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_MAPPING)
+
+
+@dataclass(slots=True, frozen=True)
 class OcrProviderSettings:
     enabled: bool
     provider: str
@@ -115,6 +137,7 @@ class ProviderSettings:
     llm: LlmProviderSettings
     embedding: EmbeddingProviderSettings
     ocr: OcrProviderSettings
+    rerank: RerankProviderSettings = field(default_factory=RerankProviderSettings)
     local_parsers: tuple[LocalParserProviderSettings, ...] = ()
     local_parser_routing: LocalParserRoutingSettings = field(default_factory=LocalParserRoutingSettings)
 
@@ -143,6 +166,7 @@ class ParseCoreSettings:
     runtime: RuntimeSettings
     parsers: tuple[ParserSettings, ...]
     providers: ProviderSettings
+    index_embedding_dimension: int = 1536
     quality_gate: QualityGateSettings = field(default_factory=QualityGateSettings)
 
 
@@ -488,6 +512,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
     providers_raw = data.get("providers", {}) or {}
     llm_raw = providers_raw.get("llm", {}) or {}
     embedding_raw = providers_raw.get("embedding", {}) or {}
+    rerank_raw = providers_raw.get("rerank", {}) or {}
     ocr_raw = providers_raw.get("ocr", {}) or {}
     local_parser_routing_raw = providers_raw.get("local_parser_routing", {}) or {}
     local_parsers_raw = providers_raw.get("local_parsers", ()) or ()
@@ -523,6 +548,30 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         batch_size=int(embedding_raw.get("batch_size", 16)),
         options=_freeze_mapping(embedding_raw.get("options")),
     )
+    raw_rerank_candidate_limit = rerank_raw.get("candidate_limit", 30)
+    if isinstance(raw_rerank_candidate_limit, bool) or isinstance(
+        raw_rerank_candidate_limit, float
+    ):
+        raise ValueError("providers.rerank.candidate_limit must be a positive integer")
+    try:
+        rerank_candidate_limit = int(raw_rerank_candidate_limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "providers.rerank.candidate_limit must be a positive integer"
+        ) from exc
+    rerank_settings = RerankProviderSettings(
+        enabled=bool(rerank_raw.get("enabled", False)),
+        provider=str(rerank_raw.get("provider", "")),
+        model=str(rerank_raw.get("model", "")),
+        base_url=str(rerank_raw.get("base_url", "")),
+        api_key_env=str(rerank_raw.get("api_key_env", "PARSECORE_RERANK_API_KEY")),
+        timeout_seconds=float(rerank_raw.get("timeout_seconds", 30.0)),
+        max_retries=int(rerank_raw.get("max_retries", 2)),
+        candidate_limit=rerank_candidate_limit,
+        options=_freeze_mapping(rerank_raw.get("options")),
+    )
+    if rerank_settings.candidate_limit <= 0:
+        raise ValueError("providers.rerank.candidate_limit must be a positive integer")
     ocr_settings = OcrProviderSettings(
         enabled=bool(ocr_raw.get("enabled", True)),
         provider=str(ocr_raw.get("provider", "rapidocr")),
@@ -550,12 +599,25 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         if isinstance(item, dict) and str(item.get("id") or item.get("name") or "").strip()
     )
 
+    index_embedding_dimension = int(index.get("embedding_dimension", 1536))
+    if index_embedding_dimension <= 0:
+        raise ValueError("index.embedding_dimension must be a positive integer")
+
+    configured_database_url = str(
+        storage.get("database_url", "sqlite:///./var/parsecore.db")
+    )
+    database_url = (
+        os.environ.get("PARSECORE_DATABASE_URL", "").strip()
+        or configured_database_url
+    )
+
     return ParseCoreSettings(
         project_name=str(project.get("name", "parsecore")),
         mode=str(project.get("mode", "embedded-sdk")),
-        database_url=str(storage.get("database_url", "sqlite:///./var/parsecore.db")),
+        database_url=database_url,
         object_store=str(storage.get("object_store", "local://./var/uploads")),
         index_mode=str(index.get("mode", "hybrid")),
+        index_embedding_dimension=index_embedding_dimension,
         translation_enabled=bool(translation.get("enabled", True)),
         translation_strategy=str(translation.get("strategy", "lazy")),
         product_adapter=_normalize_product_adapter(product.get("adapter", "embedded")),
@@ -571,6 +633,9 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             staged_upload_retention_seconds=int(runtime.get("staged_upload_retention_seconds", 86400)),
             part_artifact_retention_seconds=int(runtime.get("part_artifact_retention_seconds", 604800)),
             export_artifact_retention_seconds=int(runtime.get("export_artifact_retention_seconds", 2592000)),
+            provider_comparison_artifact_retention_seconds=int(
+                runtime.get("provider_comparison_artifact_retention_seconds", 2592000)
+            ),
             quota_enforce=bool(runtime.get("quota_enforce", False)),
             quota_window_hours=float(runtime.get("quota_window_hours", 24.0)),
             quota_default_limit_units=int(runtime.get("quota_default_limit_units", 0)),
@@ -589,6 +654,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             llm=llm_settings,
             embedding=embedding_settings,
             ocr=ocr_settings,
+            rerank=rerank_settings,
             local_parsers=local_parser_settings,
             local_parser_routing=LocalParserRoutingSettings(
                 enabled=bool(local_parser_routing_raw.get("enabled", False)),

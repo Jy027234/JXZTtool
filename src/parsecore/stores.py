@@ -2375,8 +2375,8 @@ class PgVectorIndex(IndexAdapter):
 
     The index keeps one row per chunk. Chunks without a populated embedding
     are skipped so the table only contains real vectors. The vector column
-    width is set on first write per `(doc_id)` and validated on subsequent
-    upserts to fail loudly on dimension drift.
+    width is configured when the index is constructed and every upsert is
+    validated to fail loudly on dimension drift.
     """
 
     def __init__(self, database_url: str, *, dim: int = 1536) -> None:

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from parsecore.bootstrap import _build_index, _build_job_store
+from parsecore.bootstrap import _build_index, _build_job_store, build_runtime
 from parsecore.stores import SQLiteJobStore
-from parsecore.stubs import InMemoryJobStore, NullIndex
+from parsecore.stubs import FakeRerankProvider, InMemoryJobStore, NullIndex, NullRerankProvider
+
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class BootstrapRoutingTests(unittest.TestCase):
@@ -125,6 +130,59 @@ class BootstrapRoutingTests(unittest.TestCase):
         self.assertIsInstance(idx, NullIndex)
         idx_null = _build_index("postgresql://localhost/db", "null")
         self.assertIsInstance(idx_null, NullIndex)
+
+    def test_postgres_index_uses_configured_embedding_dimension(self) -> None:
+        with patch("parsecore.bootstrap.PgVectorIndex") as pgvector_index:
+            expected = object()
+            pgvector_index.return_value = expected
+
+            actual = _build_index(
+                "postgresql://localhost/parsecore",
+                "pgvector",
+                embedding_dimension=384,
+            )
+
+        self.assertIs(actual, expected)
+        pgvector_index.assert_called_once_with(
+            "postgresql://localhost/parsecore",
+            dim=384,
+        )
+
+    def test_build_runtime_wires_enabled_fake_reranker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "parsecore.toml"
+            config_path.write_text(
+                (ROOT / "parsecore.toml")
+                .read_text(encoding="utf-8")
+                .replace('database_url = "sqlite:///./var/parsecore.db"', 'database_url = "memory://"')
+                .replace(
+                    '[providers.rerank]\nenabled = false\nprovider = "dashscope-compatible"',
+                    '[providers.rerank]\nenabled = true\nprovider = "fake"',
+                ),
+                encoding="utf-8",
+            )
+
+            runtime = build_runtime(config_path)
+
+        self.assertIsInstance(runtime.rerank_provider, FakeRerankProvider)
+
+    def test_build_runtime_falls_back_when_enabled_remote_reranker_has_no_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "parsecore.toml"
+            config_path.write_text(
+                (ROOT / "parsecore.toml")
+                .read_text(encoding="utf-8")
+                .replace('database_url = "sqlite:///./var/parsecore.db"', 'database_url = "memory://"')
+                .replace(
+                    'enabled = false\nprovider = "dashscope-compatible"\nmodel = "qwen/qwen3-vl-rerank"\nbase_url = ""',
+                    'enabled = true\nprovider = "dashscope-compatible"\nmodel = "qwen/qwen3-vl-rerank"\nbase_url = "https://example.invalid/v1"',
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"PARSECORE_RERANK_API_KEY": ""}, clear=False):
+                runtime = build_runtime(config_path)
+
+        self.assertIsInstance(runtime.rerank_provider, NullRerankProvider)
 
 
 if __name__ == "__main__":

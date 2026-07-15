@@ -83,6 +83,21 @@ max_retries = 2
 batch_size = 16
 # options.dimensions = 1536
 
+# Optional second-stage document retrieval reranker.  It is disabled by
+# default and does not alter parser routing or baseline search results until
+# a deployment explicitly provides a compatible endpoint and credential.
+[providers.rerank]
+enabled = false
+provider = "dashscope-compatible"
+model = "qwen/qwen3-vl-rerank"
+base_url = ""
+api_key_env = "PARSECORE_RERANK_API_KEY"
+timeout_seconds = 30.0
+max_retries = 2
+# Candidates are collected by the existing hybrid retrieval before reranking.
+candidate_limit = 30
+# options = { enable_truncation = true }
+
 # OCR provider abstraction used by image-ocr parser and PDF bad-page fallback.
 # Set enabled = false to keep the image-ocr parser registered but report OCR
 # unavailable and skip PDF OCR fallback recovery.
@@ -204,6 +219,18 @@ extensions = [".pdf"]
 [parsers.options.post_process]
 dual_channel = true
 layout_reading_order = true
+# A3+.1 自适应版面解析：仅对含表格/图示/多列/OCR 信号的页面运行
+# pdfplumber，其余页面保留 pypdf 原生文本路径。显式请求 dual_channel 或
+# layout_reading_order 时仍会回退到全量高保真解析。
+adaptive_dual_channel = true
+adaptive_dual_channel_max_page_ratio = 0.85
+adaptive_dual_channel_min_pages = 8
+adaptive_ocr_cache_fast_path = true
+# Reuse immutable parser blocks for same-file retries/reparses in this worker.
+# The cache key includes source fingerprint, tenant/document identity, and
+# request options; the small LRU bound keeps memory predictable.
+parse_cache = true
+parse_cache_max_entries = 2
 dual_table_min_rows = 2
 dual_table_min_cols = 2
 ocr_bad_pages = true
@@ -226,7 +253,9 @@ options = { page_chunks = true, detect_tables = true }
 name = "docling-local"
 media_types = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
 extensions = [".pdf", ".docx"]
-options = { detect_tables = true }
+# Candidate-only warm profile: reuse the converter across part retries in a
+# long-lived worker.  The provider remains disabled/evaluate above.
+options = { detect_tables = true, reuse_converter = true }
 
 [[parsers]]
 name = "image-ocr"

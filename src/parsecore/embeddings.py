@@ -96,14 +96,110 @@ class OpenAiCompatibleEmbeddingProvider(EmbeddingProvider):
         )
 
 
+class LocalTransformerEmbeddingProvider(EmbeddingProvider):
+    """Optional local Transformer mean-pooling embedding provider.
+
+    This provider is intentionally opt-in.  It keeps the base package free of
+    heavyweight ML dependencies and never changes the default OpenAI-compatible
+    route.  ``settings.model`` may be a Hugging Face model id or a local model
+    directory; ``options.local_files_only`` can be used for air-gapped runs.
+    """
+
+    def __init__(self, settings: EmbeddingProviderSettings) -> None:
+        if not settings.enabled:
+            raise EmbeddingConfigurationError(
+                "Embedding provider is disabled; set providers.embedding.enabled = true"
+            )
+        model_name = str(settings.model or settings.options.get("model_path") or "").strip()
+        if not model_name:
+            raise EmbeddingConfigurationError(
+                "local transformer embedding requires providers.embedding.model or options.model_path"
+            )
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - optional dependency path
+            raise EmbeddingConfigurationError(
+                "local transformer embedding requires the optional 'local-embedding' dependencies"
+            ) from exc
+
+        options = dict(settings.options or {})
+        local_files_only = bool(options.get("local_files_only", False))
+        device_name = str(options.get("device", "cpu") or "cpu").strip().lower()
+        if device_name == "auto":
+            device_name = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            self._device = torch.device(device_name)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                local_files_only=local_files_only,
+            )
+            self._model = AutoModel.from_pretrained(
+                model_name,
+                local_files_only=local_files_only,
+            )
+            self._model.to(self._device)
+            self._model.eval()
+        except Exception as exc:
+            raise EmbeddingConfigurationError(
+                f"failed to load local transformer embedding model {model_name!r}: {exc}"
+            ) from exc
+        self._torch = torch
+        self._model_name = model_name
+        self._batch_size = max(1, int(settings.batch_size))
+        self._max_length = max(8, int(options.get("max_length", 256)))
+        self._normalize = bool(options.get("normalize", True))
+
+    @staticmethod
+    def _mean_pool(last_hidden_state: Any, attention_mask: Any) -> Any:
+        mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+        summed = (last_hidden_state * mask).sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1e-9)
+        return summed / counts
+
+    def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]:
+        if not chunks:
+            return tuple(chunks)
+        embedded: list[Chunk] = []
+        for start in range(0, len(chunks), self._batch_size):
+            batch = list(chunks[start : start + self._batch_size])
+            encoded = self._tokenizer(
+                [chunk.text for chunk in batch],
+                padding=True,
+                truncation=True,
+                max_length=self._max_length,
+                return_tensors="pt",
+            )
+            encoded = {key: value.to(self._device) for key, value in encoded.items()}
+            with self._torch.no_grad():
+                outputs = self._model(**encoded)
+                vectors = self._mean_pool(outputs.last_hidden_state, encoded["attention_mask"])
+                if self._normalize:
+                    vectors = self._torch.nn.functional.normalize(vectors, p=2, dim=1)
+            rows = vectors.detach().cpu().tolist()
+            for chunk, vector in zip(batch, rows, strict=False):
+                embedded.append(replace(chunk, embedding=tuple(float(value) for value in vector)))
+        return tuple(embedded)
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
 def build_embedding_provider(
     settings: EmbeddingProviderSettings,
-) -> OpenAiCompatibleEmbeddingProvider | None:
+) -> OpenAiCompatibleEmbeddingProvider | LocalTransformerEmbeddingProvider | None:
     if not settings.enabled:
         return None
     provider = (settings.provider or "").lower()
     if provider in {"fake", "test", "stub"}:
         return FakeEmbeddingProvider()
+    if provider in {
+        "sentence-transformers-local",
+        "transformers-local",
+        "local-transformer",
+        "huggingface-local",
+    }:
+        return LocalTransformerEmbeddingProvider(settings)
     if provider in {"", "openai-compatible", "openai", "dashscope", "qwen"}:
         return OpenAiCompatibleEmbeddingProvider(settings)
     raise EmbeddingConfigurationError(
@@ -114,6 +210,7 @@ def build_embedding_provider(
 __all__ = [
     "EmbeddingConfigurationError",
     "EmbeddingRequestError",
+    "LocalTransformerEmbeddingProvider",
     "OpenAiCompatibleEmbeddingProvider",
     "build_embedding_provider",
 ]

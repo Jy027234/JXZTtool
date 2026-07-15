@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 from uuid import uuid4
 
-from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, TranslationAdapter
-from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest, SemanticRole
+from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, RerankProvider, TranslationAdapter
+from .models import Block, BlockType, Chunk, ParseJob, ParseJobState, ParseOutcome, ParseRequest, RerankScore, SemanticRole
 from .record_filters import collect_record_query
 
 
@@ -207,6 +207,24 @@ class FakeEmbeddingProvider(EmbeddingProvider):
                 replace(chunk, embedding=tuple(base))
             )
         return tuple(embedded)
+
+
+class NullRerankProvider(RerankProvider):
+    """Explicit no-op used when reranking is disabled or unavailable."""
+
+    def rerank(self, *, query: str, documents: Sequence[str]) -> Sequence[RerankScore]:
+        return ()
+
+
+class FakeRerankProvider(RerankProvider):
+    """Deterministic local reranker that preserves the candidate order."""
+
+    def rerank(self, *, query: str, documents: Sequence[str]) -> Sequence[RerankScore]:
+        count = len(documents)
+        return tuple(
+            RerankScore(index=index, score=round(1.0 - index / (count + 1), 6))
+            for index in range(count)
+        )
 
 
 class NullIndex(IndexAdapter):
@@ -766,4 +784,3 @@ class InMemoryJobStore(JobStore):
             "jobs": {job_id: asdict(job) for job_id, job in self.jobs.items()},
             "documents": sorted(self.blocks_by_doc.keys()),
         }
-

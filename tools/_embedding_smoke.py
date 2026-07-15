@@ -11,8 +11,9 @@ Behavior:
     - runs full runtime submit -> chunk -> embedding
     - prints a JSON summary including embedding coverage and a sample search result
 
-If the API key is missing, the script prints a SKIPPED summary and exits 0.
-Use ``--require-live`` to fail instead when live credentials are unavailable.
+If a remote API key is missing, the script prints a SKIPPED summary and exits
+0.  Local Transformer providers do not require an API key.  Use
+``--require-live`` to fail instead when live credentials are unavailable.
 """
 
 from __future__ import annotations
@@ -49,7 +50,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ParseCore live embedding smoke test")
     parser.add_argument("--config", default=str(ROOT / "parsecore.toml"))
     parser.add_argument("--require-live", action="store_true")
+    parser.add_argument("--out-json")
     return parser
+
+
+def _emit(payload: dict[str, object], *, out_json: str | None) -> None:
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    if out_json:
+        output_path = Path(out_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
 
 
 def _docx_paragraph(text: str) -> str:
@@ -81,28 +92,32 @@ def main(argv: list[str] | None = None) -> int:
     runtime = build_runtime(args.config)
     provider_settings = dataclasses.replace(runtime.settings.providers.embedding, enabled=True)
     api_key_env = provider_settings.api_key_env
-    if not os.environ.get(api_key_env, "").strip():
+    remote_provider = str(provider_settings.provider or "").strip().lower() in {
+        "",
+        "openai-compatible",
+        "openai",
+        "dashscope",
+        "qwen",
+    }
+    if remote_provider and not os.environ.get(api_key_env, "").strip():
         payload = {
             "status": "skipped",
             "reason": f"missing env var {api_key_env}",
             "config": str(args.config),
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        _emit(payload, out_json=args.out_json)
         return 2 if args.require_live else 0
 
     try:
         runtime.embedding_provider = build_embedding_provider(provider_settings)
     except EmbeddingConfigurationError as exc:
-        print(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "reason": str(exc),
-                    "config": str(args.config),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        _emit(
+            {
+                "status": "failed",
+                "reason": str(exc),
+                "config": str(args.config),
+            },
+            out_json=args.out_json,
         )
         return 1
 
@@ -117,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         embedding_quality = evaluate_chunk_embeddings(outcome.chunks)
-        hits = runtime.search_document(
+        hits, retrieval_mode = runtime.search_document_with_mode(
             doc_id="embedding-smoke",
             query="hydraulic pressure warning",
             limit=3,
@@ -132,9 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         "embedded_chunk_ratio": round(embedding_quality.embedded_chunk_ratio, 4),
         "mean_embedding_dim_norm": round(embedding_quality.mean_embedding_dim_norm, 4),
         "embedding_dim": len(outcome.chunks[0].embedding or ()),
+        "retrieval_mode": retrieval_mode,
         "search_hits": [dataclasses.asdict(hit) for hit in hits],
     }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    _emit(payload, out_json=args.out_json)
     return 0
 
 

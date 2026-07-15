@@ -3287,28 +3287,218 @@ def _document_view_rows(
     if all(view_type in persisted for view_type in requested):
         return {view_type: persisted[view_type] for view_type in requested}
 
-    structured = _document_projection(snapshot, projection="structured")
+    # Persisted views only need the page/line/record rows.  Building the full
+    # structured projection here also constructs coverage, IR, parse units and
+    # quality-gate payloads that are not stored in ``document_views``.  Keep
+    # this path deliberately narrow so cache-hit reruns do not pay for the
+    # complete read-model projection a second time.
+    blocks = tuple(snapshot.get("blocks") or ())
+    job = snapshot.get("job")
+    doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", "") or "")
+    parse_run_id = str(getattr(job, "job_id", "") or "")
+    projected_pages = _project_pages(blocks)
+    tables = _structured_tables(blocks, doc_id=doc_id)
+    quality_gate_config = _quality_gate_config(snapshot.get("quality_gate"))
+    quality_signals = _quality_signals(
+        pages=projected_pages,
+        tables=tables,
+        blocks=blocks,
+        reading_order_confidence_threshold=float(
+            quality_gate_config["thresholds"]["min_reading_order_confidence"]
+        ),
+    )
+    profile_resolution = _profile_resolution_for_document(
+        job=job,
+        pages=projected_pages,
+        tables=tables,
+    )
+    computed_records = _records_from_snapshot(
+        snapshot,
+        pages=projected_pages,
+        tables=tables,
+        profile_resolution=profile_resolution,
+        quality_signals=quality_signals,
+    )
+    quality_signals.extend(_record_quality_signals(computed_records))
+    chunks = tuple(snapshot.get("chunks") or ())
+    if not chunks and snapshot.get("index_manifest") is None:
+        # The runtime persistence snapshot intentionally contains no chunks or
+        # index manifest.  In that case coverage can only be missing-chunk /
+        # missing-unit signals, which are derived directly from the blocks and
+        # tables without constructing the complete IR coverage payload.
+        quality_signals.extend(
+            _lightweight_view_coverage_signals(
+                pages=projected_pages,
+                tables=tables,
+                blocks=blocks,
+            )
+        )
+    else:
+        coverage_payload = build_coverage_projection(
+            snapshot=snapshot,
+            doc_id=doc_id,
+            parse_run_id=parse_run_id,
+            profile=str(profile_resolution["resolved_profile"]),
+            state=_state_value(getattr(job, "state", None)),
+            blocks=blocks,
+            chunks=chunks,
+            pages=projected_pages,
+            tables=tables,
+            quality_signals=quality_signals,
+        )
+        quality_signals.extend(
+            dict(signal)
+            for signal in coverage_payload.get("quality_signals", [])
+            if isinstance(signal, Mapping)
+        )
+    # ``_structured_pages`` is intentionally built after coverage signals are
+    # merged: persisted page rows expose the same quality codes as the
+    # structured API projection.
+    structured_pages = _structured_pages(
+        pages=projected_pages,
+        tables=tables,
+        quality_signals=quality_signals,
+    )
     result: dict[str, list[dict[str, Any]]] = {}
     if "pages" in requested:
-        pages = persisted.get("pages")
-        if pages is None:
-            pages = [dict(page) for page in structured.get("pages", []) if isinstance(page, dict)]
-        result["pages"] = pages
+        page_rows = persisted.get("pages")
+        if page_rows is None:
+            page_rows = [dict(page) for page in structured_pages if isinstance(page, dict)]
+        result["pages"] = page_rows
     if "lines" in requested:
         lines = persisted.get("lines")
         if lines is None:
             lines = _structured_lines_from_blocks(
-                tuple(snapshot.get("blocks") or ()),
-                doc_id=str(structured.get("doc_id") or snapshot.get("doc_id") or ""),
-                parse_run_id=str(structured.get("parse_run_id") or ""),
+                blocks,
+                doc_id=doc_id,
+                parse_run_id=parse_run_id,
             )
         result["lines"] = lines
     if "records" in requested:
         records = persisted.get("records")
         if records is None:
-            records = [dict(record) for record in _records_from_snapshot(snapshot)]
+            records = [
+                dict(record)
+                for record in computed_records
+            ]
         result["records"] = records
     return result
+
+
+def _lightweight_view_coverage_signals(
+    *,
+    pages: Sequence[Mapping[str, Any]],
+    tables: Sequence[Mapping[str, Any]],
+    blocks: Sequence[Block],
+) -> list[dict[str, Any]]:
+    """Derive persisted-page coverage flags without rebuilding the full IR.
+
+    This is intentionally limited to the no-chunks/no-manifest persistence
+    snapshot.  API fallbacks with real chunks continue through the canonical
+    coverage projection above.
+    """
+    blocks_by_page: dict[int, list[Block]] = {}
+    blocks_by_id: dict[str, Block] = {}
+    for block in blocks:
+        page_number = _safe_int((block.metadata or {}).get("page"), default=1)
+        blocks_by_page.setdefault(page_number, []).append(block)
+        blocks_by_id[str(block.block_id)] = block
+
+    indexable_table_ids: set[str] = set()
+    for table in tables:
+        block_id = str(table.get("block_id") or "")
+        block = blocks_by_id.get(block_id)
+        if block is not None and _view_block_is_indexable(block):
+            table_id = str(table.get("table_id") or "")
+            if table_id:
+                indexable_table_ids.add(table_id)
+
+    missing_table_ids_by_page: dict[int, list[str]] = {}
+    for table in tables:
+        table_id = str(table.get("table_id") or "")
+        if not table_id or table_id in indexable_table_ids:
+            continue
+        page_number = _safe_int(table.get("page_number"), default=1)
+        missing_table_ids_by_page.setdefault(page_number, []).append(table_id)
+
+    missing_figure_pages: set[int] = set()
+    for block in blocks:
+        metadata = block.metadata or {}
+        role = str(metadata.get("semantic_role") or "").strip().lower()
+        if block.type != BlockType.IMAGE and role != "image":
+            continue
+        if not str(block.content or "").strip() and not str(metadata.get("alt_text") or "").strip():
+            missing_figure_pages.add(_safe_int(metadata.get("page"), default=1))
+
+    signals: list[dict[str, Any]] = []
+    page_numbers = sorted(
+        {
+            _safe_int(page.get("page_number"), default=1)
+            for page in pages
+            if isinstance(page, Mapping)
+        }
+        | set(blocks_by_page)
+    )
+    for page_number in page_numbers:
+        page_blocks = blocks_by_page.get(page_number, [])
+        parsed_text_chars = sum(
+            len(str(block.content or "").strip())
+            for block in page_blocks
+            if _view_block_is_indexable(block)
+        )
+        indexable_unit_count = sum(1 for block in page_blocks if _view_block_is_indexable(block))
+        if parsed_text_chars > 0 and indexable_unit_count == 0:
+            signals.append(
+                {
+                    "code": "rag_empty_text_page",
+                    "severity": "warning",
+                    "message": "Page has parsed text but no indexable RAG unit",
+                    "page_number": page_number,
+                }
+            )
+        elif indexable_unit_count > 0:
+            signals.append(
+                {
+                    "code": "rag_units_without_chunks",
+                    "severity": "warning",
+                    "message": "Page has indexable RAG units but no chunks",
+                    "page_number": page_number,
+                }
+            )
+        table_ids = missing_table_ids_by_page.get(page_number, [])
+        if table_ids:
+            signals.append(
+                {
+                    "code": "rag_table_without_unit",
+                    "severity": "warning",
+                    "message": "Page has structured tables without indexable RAG units",
+                    "page_number": page_number,
+                    "detail": {"table_ids": table_ids},
+                }
+            )
+        if page_number in missing_figure_pages:
+            signals.append(
+                {
+                    "code": "rag_figure_caption_missing",
+                    "severity": "warning",
+                    "message": "Page has figures without captions for RAG",
+                    "page_number": page_number,
+                }
+            )
+    return signals
+
+
+def _view_block_is_indexable(block: Block) -> bool:
+    metadata = block.metadata or {}
+    role = str(metadata.get("semantic_role") or "").strip().lower()
+    text = str(block.content or "").strip()
+    if role in {"header_footer", "parse_artifact", "version_cell", "page_ref_cell"}:
+        return False
+    if block.type == BlockType.TABLE:
+        return bool(text or metadata.get("cells"))
+    if block.type == BlockType.IMAGE or role == "image":
+        return bool(text or str(metadata.get("alt_text") or "").strip())
+    return bool(text)
 
 
 def _requested_document_view_types(view_types: Iterable[str] | None) -> tuple[str, ...]:
@@ -3603,14 +3793,29 @@ def _structured_records(
     return records
 
 
-def _records_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def _records_from_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    pages: list[dict[str, Any]] | None = None,
+    tables: list[dict[str, Any]] | None = None,
+    profile_resolution: Mapping[str, Any] | None = None,
+    quality_signals: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     blocks = tuple(snapshot.get("blocks") or ())
     job = snapshot.get("job")
     doc_id = str(snapshot.get("doc_id") or getattr(job, "doc_id", ""))
-    pages = _project_pages(blocks)
-    tables = _structured_tables(blocks, doc_id=doc_id)
-    profile_resolution = _profile_resolution_for_document(job=job, pages=pages, tables=tables)
-    quality_signals = _quality_signals(pages=pages, tables=tables, blocks=blocks)
+    pages = pages if pages is not None else _project_pages(blocks)
+    tables = tables if tables is not None else _structured_tables(blocks, doc_id=doc_id)
+    profile_resolution = (
+        profile_resolution
+        if profile_resolution is not None
+        else _profile_resolution_for_document(job=job, pages=pages, tables=tables)
+    )
+    quality_signals = (
+        quality_signals
+        if quality_signals is not None
+        else _quality_signals(pages=pages, tables=tables, blocks=blocks)
+    )
     records = _structured_records(
         blocks=blocks,
         tables=tables,

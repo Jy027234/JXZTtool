@@ -9,13 +9,18 @@ import unittest
 from unittest.mock import patch
 
 from tests.support import TemporaryWorkspace
+from tools import provider_comparison_report
 from tools.provider_comparison_report import (
     _comparison_gate_summary,
+    _gold_evidence,
+    _provider_failure_category,
     _provider_admission_summary,
+    _rank_completed_providers,
     build_report,
     main as provider_comparison_main,
     render_markdown,
 )
+from parsecore.models import Block, BlockType
 
 
 PROVIDER_COMPARE_CONFIG = """
@@ -83,6 +88,7 @@ capabilities = ["native-text", "layout", "tables", "local-ocr-fallback"]
 name = "pdf-text"
 media_types = ["application/pdf"]
 extensions = [".pdf"]
+options = { post_process = { parse_cache = true, parse_cache_max_entries = 2 } }
 """.rstrip()
 )
 
@@ -103,7 +109,7 @@ capabilities = ["layout", "tables", "reading-order"]
 name = "docling-local"
 media_types = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
 extensions = [".pdf", ".docx"]
-options = { detect_tables = true }
+options = { detect_tables = true, reuse_converter = true }
 """.rstrip()
 )
 
@@ -121,6 +127,47 @@ def _install_fake_docling(converter_cls: type[object]) -> dict[str, ModuleType]:
 
 
 class ProviderComparisonReportTests(unittest.TestCase):
+    def test_provider_failure_category_separates_environment_and_runtime_failures(self) -> None:
+        self.assertEqual(_provider_failure_category(ImportError("docling is required")), "provider_unavailable")
+        self.assertEqual(_provider_failure_category(TimeoutError("conversion timed out")), "timeout")
+        self.assertEqual(_provider_failure_category(FileNotFoundError("missing.pdf")), "invalid_input")
+        self.assertEqual(_provider_failure_category(PermissionError("access is denied")), "permission_denied")
+        self.assertEqual(_provider_failure_category(RuntimeError("parser crashed")), "provider_failed")
+
+    def test_gold_evidence_falls_back_to_deterministic_source_kind(self) -> None:
+        block = Block(
+            block_id="block-1",
+            doc_id="doc-1",
+            type=BlockType.PARAGRAPH,
+            content="hello",
+            metadata={"provider_id": "pdf-text", "page": 3},
+        )
+
+        evidence = _gold_evidence((block,))
+
+        self.assertEqual(evidence[0]["provider_id"], "pdf-text")
+        self.assertEqual(evidence[0]["source_kind"], "pdf-text:paragraph")
+
+    def test_equal_provider_scores_keep_route_primary_ahead_of_elapsed_tie(self) -> None:
+        ranked = _rank_completed_providers(
+            [
+                {"provider_id": "pdf-text", "provider_score": 1.0, "elapsed_s": 0.3},
+                {"provider_id": "pymupdf4llm-local", "provider_score": 1.0, "elapsed_s": 0.1},
+            ],
+            route_primary_provider_id="pdf-text",
+        )
+
+        self.assertEqual([item["provider_id"] for item in ranked], ["pdf-text", "pymupdf4llm-local"])
+
+        higher_quality_candidate = _rank_completed_providers(
+            [
+                {"provider_id": "pdf-text", "provider_score": 0.9, "elapsed_s": 0.1},
+                {"provider_id": "pymupdf4llm-local", "provider_score": 1.0, "elapsed_s": 0.3},
+            ],
+            route_primary_provider_id="pdf-text",
+        )
+        self.assertEqual(higher_quality_candidate[0]["provider_id"], "pymupdf4llm-local")
+
     def test_gate_summary_warns_on_low_reading_order_confidence(self) -> None:
         gate_summary = _comparison_gate_summary(
             [
@@ -432,6 +479,7 @@ class ProviderComparisonReportTests(unittest.TestCase):
             }
         ]
         gate_summary = _comparison_gate_summary(sample_reports)
+        self.assertEqual(gate_summary["failure_categories"], {"provider_failed": 1})
 
         summary = _provider_admission_summary(
             settings=settings,
@@ -572,6 +620,28 @@ class ProviderComparisonReportTests(unittest.TestCase):
         markdown = render_markdown(payload)
         self.assertIn("pages=`2-3`", markdown)
 
+    def test_build_report_defaults_to_real_elapsed_and_allows_memory_tracking_opt_in(self) -> None:
+        with TemporaryWorkspace(PROVIDER_COMPARE_CONFIG) as workspace:
+            sample = workspace.create_text_file("manual.txt", "Heading\n\nInspect pump.")
+            assert workspace.config_path is not None
+
+            payload = build_report(
+                config=workspace.config_path,
+                samples=[sample],
+                providers=["text-native"],
+            )
+            tracked_payload = build_report(
+                config=workspace.config_path,
+                samples=[sample],
+                providers=["text-native"],
+                track_python_memory=True,
+            )
+
+        self.assertFalse(payload["measurement"]["track_python_memory"])
+        self.assertIsNone(payload["samples"][0]["providers"][0]["peak_kb"])
+        self.assertTrue(tracked_payload["measurement"]["track_python_memory"])
+        self.assertGreater(tracked_payload["samples"][0]["providers"][0]["peak_kb"], 0.0)
+
     def test_build_report_can_execute_docling_local_provider(self) -> None:
         class FakeDocumentConverter:
             def convert(self, _file_path: str, **_kwargs: object) -> object:
@@ -596,6 +666,10 @@ class ProviderComparisonReportTests(unittest.TestCase):
         self.assertEqual(provider["provider_version"], "2.test")
         self.assertEqual(provider["adapter_version"], "2026-06-local-provider-adapter")
         self.assertEqual(provider["status"], "done")
+        self.assertTrue(provider["converter_reuse_enabled"])
+        self.assertFalse(provider["converter_cache_hit"])
+        self.assertEqual(provider["converter_cache_state"], "cold")
+        self.assertEqual(payload["summary"]["converter_cache"], {"observations": 1, "hits": 0, "misses": 1})
         self.assertEqual(provider["provider_report"]["schema_version"], "2026-06-provider-usage")
         self.assertEqual(provider["coverage_summary"]["total_pages"], 1)
         self.assertEqual(provider["provider_report"]["providers"][0]["provider_id"], "docling-local")
@@ -611,6 +685,78 @@ class ProviderComparisonReportTests(unittest.TestCase):
         self.assertIn("## Provider Identities", markdown)
         self.assertIn("2.test", markdown)
         self.assertIn("2026-06-local-provider-adapter", markdown)
+        self.assertIn("converter_cache_state", markdown)
+
+    def test_build_report_can_reuse_parser_instances_for_candidate_warm_state(self) -> None:
+        class FakeDocumentConverter:
+            def convert(self, _file_path: str, **_kwargs: object) -> object:
+                page = SimpleNamespace(
+                    page_no=1,
+                    export_to_markdown=lambda: "# Manual\n\nDocling paragraph.",
+                )
+                return SimpleNamespace(document=SimpleNamespace(pages=[page]))
+
+        fake_modules = _install_fake_docling(FakeDocumentConverter)
+        with TemporaryWorkspace(DOCLING_PROVIDER_COMPARE_CONFIG) as workspace, patch.dict(
+            sys.modules,
+            fake_modules,
+        ):
+            first = workspace.create_docx("first.docx", ["Placeholder"])
+            second = workspace.create_docx("second.docx", ["Placeholder"])
+            assert workspace.config_path is not None
+
+            with patch(
+                "tools.provider_comparison_report.build_parser",
+                wraps=provider_comparison_report.build_parser,
+            ) as reused_builder:
+                reused = build_report(
+                    config=workspace.config_path,
+                    samples=[first, second],
+                    providers=["docling-local"],
+                    reuse_parser_instances=True,
+                )
+
+            self.assertEqual(reused_builder.call_count, 1)
+            self.assertEqual(reused["measurement"]["parser_lifecycle"], "provider_instance_reused")
+            self.assertTrue(reused["measurement"]["reuse_parser_instances"])
+            self.assertEqual(reused["summary"]["sample_count"], 2)
+            self.assertEqual(reused["summary"]["converter_cache"], {"observations": 2, "hits": 1, "misses": 1})
+            self.assertEqual(
+                [sample["providers"][0]["converter_cache_state"] for sample in reused["samples"]],
+                ["cold", "warm"],
+            )
+
+            with patch(
+                "tools.provider_comparison_report.build_parser",
+                wraps=provider_comparison_report.build_parser,
+            ) as cold_builder:
+                cold = build_report(
+                    config=workspace.config_path,
+                    samples=[first, second],
+                    providers=["docling-local"],
+                )
+
+            self.assertEqual(cold_builder.call_count, 2)
+            self.assertEqual(cold["measurement"]["parser_lifecycle"], "new_per_run")
+            self.assertFalse(cold["measurement"]["reuse_parser_instances"])
+            self.assertEqual(cold["summary"]["converter_cache"], {"observations": 2, "hits": 0, "misses": 2})
+
+    def test_build_report_reports_pdf_parse_cache_cold_and_warm_states(self) -> None:
+        with TemporaryWorkspace(PDF_PROVIDER_COMPARE_CONFIG) as workspace:
+            sample = workspace.create_pdf("manual.pdf", [["Page one"]])
+            assert workspace.config_path is not None
+
+            payload = build_report(
+                config=workspace.config_path,
+                samples=[sample, sample],
+                providers=["pdf-text"],
+                reuse_parser_instances=True,
+            )
+
+        providers = [sample_report["providers"][0] for sample_report in payload["samples"]]
+        self.assertEqual([provider["parse_cache_state"] for provider in providers], ["cold", "warm"])
+        self.assertEqual(payload["summary"]["parse_cache"], {"observations": 2, "hits": 1, "misses": 1})
+        self.assertIn("parse_cache_state", render_markdown(payload))
 
     def test_build_report_compares_configured_and_missing_providers(self) -> None:
         with TemporaryWorkspace(PROVIDER_COMPARE_CONFIG) as workspace:
@@ -663,6 +809,7 @@ class ProviderComparisonReportTests(unittest.TestCase):
         self.assertEqual(providers["text-native"]["coverage_summary"]["pages_with_coverage_gaps"], 0)
         self.assertEqual(providers["pymupdf4llm-local"]["status"], "skipped")
         self.assertEqual(providers["pymupdf4llm-local"]["reason"], "parser_not_configured")
+        self.assertEqual(providers["pymupdf4llm-local"]["skip_category"], "provider_unavailable")
         self.assertEqual(sample_report["ranking"][0]["provider_id"], "text-native")
 
         markdown = render_markdown(payload)

@@ -1,14 +1,14 @@
 {
   "schema_version": "2026-07-provider-gold-corpus-v1",
-  "description": "P2 gold-corpus intake. Imported P0 labels are seed records until a named reviewer confirms the source screenshot, block order, table cells and critical tokens. Seed records are useful for shadow diagnostics but cannot promote a provider.",
+  "description": "P2 gold-corpus intake. The checked-in review queue contains 50 user-authorized AI-assisted approvals cross-checked against source evidence and the trusted pdf-text baseline. This is not independent human gold; pending records remain useful for shadow diagnostics but cannot promote a provider.",
   "minimum_approved_pages": 50,
   "minimum_stable_runs": 3,
   "minimum_score_improvement": 5,
   "approved_provider_ids": ["pdf-text"],
   "imports": [
     {
-      "path": "../../../../backend/fixtures/reader-projection/p0-samples.json",
-      "review_status": "seed"
+      "path": "gold-review-queue-v1.json",
+      "review_status": "approved"
     }
   ],
   "pages": []

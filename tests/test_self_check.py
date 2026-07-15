@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from parsecore.cli import main as cli_main
 from tools import self_check
@@ -26,6 +27,7 @@ class SelfCheckTests(unittest.TestCase):
         self.assertFalse(args.skip_payload_contracts)
         self.assertFalse(args.skip_provider_comparison)
         self.assertIsNone(args.provider_comparison_timeout_seconds)
+        self.assertFalse(args.reuse_parser_instances)
         self.assertIsNone(args.large_pdf_benchmark)
 
     def test_default_out_for_profile_uses_separate_full_snapshot(self) -> None:
@@ -109,6 +111,241 @@ class SelfCheckTests(unittest.TestCase):
                 "fixtures",
             ],
         )
+
+    def test_build_provider_comparison_args_can_enable_candidate_parser_reuse(self) -> None:
+        args = self_check._build_provider_comparison_args(
+            config="parsecore.toml",
+            suite="provider-suite.json",
+            profile="perf",
+            reuse_parser_instances=True,
+        )
+
+        self.assertEqual(args[-1], "--reuse-parser-instances")
+
+    def test_fast_provider_suite_preflight_records_declared_page_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = root / "large.pdf"
+            fixture.write_bytes(b"%PDF-1.4")
+            suite = root / "provider-suite.fast.json"
+            suite.write_text(
+                json.dumps(
+                    {
+                        "fast_page_budget": {
+                            "max_pages_per_sample": 3,
+                            "max_total_pages": 3,
+                            "large_pdf_min_page_count": 32,
+                        },
+                        "entries": [
+                            {
+                                "name": "representative-window",
+                                "path": str(fixture),
+                                "page_range": {"start": 10, "end": 12},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("tools.self_check.detect_pdf_page_count", return_value=297) as page_count:
+                allowed, details = self_check._default_provider_suite_preflight(
+                    str(suite),
+                    fixture_root=None,
+                    profile=self_check.FAST_PROFILE,
+                )
+
+        self.assertTrue(allowed)
+        page_count.assert_called_once_with(str(fixture))
+        self.assertEqual(details["page_budget"]["selected_pdf_pages"], 3)
+        self.assertEqual(details["page_budget"]["max_total_pages"], 3)
+        self.assertEqual(details["page_budget"]["samples"][0]["page_range"], {"start": 10, "end": 12})
+
+    def test_fast_provider_suite_preflight_rejects_large_pdf_without_page_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = root / "large.pdf"
+            fixture.write_bytes(b"%PDF-1.4")
+            suite = root / "provider-suite.fast.json"
+            suite.write_text(
+                json.dumps(
+                    {
+                        "fast_page_budget": {
+                            "max_pages_per_sample": 3,
+                            "max_total_pages": 3,
+                            "large_pdf_min_page_count": 32,
+                        },
+                        "entries": [{"path": str(fixture)}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("tools.self_check.detect_pdf_page_count", return_value=297):
+                allowed, details = self_check._default_provider_suite_preflight(
+                    str(suite),
+                    fixture_root=None,
+                    profile=self_check.FAST_PROFILE,
+                )
+
+        self.assertFalse(allowed)
+        self.assertEqual(details["reason"], "fast_page_budget_violation")
+        self.assertEqual(details["violations"][0]["code"], "large_pdf_requires_page_range")
+        self.assertIn("sample_page_budget_exceeded", [item["code"] for item in details["violations"]])
+
+    def test_fast_provider_suite_preflight_rejects_total_page_budget_overrun(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first.pdf"
+            second = root / "second.pdf"
+            first.write_bytes(b"%PDF-1.4")
+            second.write_bytes(b"%PDF-1.4")
+            suite = root / "provider-suite.fast.json"
+            suite.write_text(
+                json.dumps(
+                    {
+                        "fast_page_budget": {
+                            "max_pages_per_sample": 3,
+                            "max_total_pages": 5,
+                            "large_pdf_min_page_count": 32,
+                        },
+                        "entries": [
+                            {"path": str(first), "page_range": {"start": 1, "end": 3}},
+                            {"path": str(second), "page_range": {"start": 1, "end": 3}},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("tools.self_check.detect_pdf_page_count", return_value=297):
+                allowed, details = self_check._default_provider_suite_preflight(
+                    str(suite),
+                    fixture_root=None,
+                    profile=self_check.FAST_PROFILE,
+                )
+
+        self.assertFalse(allowed)
+        self.assertEqual(details["page_budget"]["selected_pdf_pages"], 6)
+        self.assertEqual(details["violations"][-1]["code"], "total_page_budget_exceeded")
+
+    def test_main_rejects_explicit_fast_provider_suite_that_fails_page_preflight(self) -> None:
+        passed_unit_tests = self_check.CheckResult(
+            name="unit_tests",
+            status="passed",
+            exit_code=0,
+            elapsed_s=0.1,
+            summary="unit tests passed",
+            details={},
+            tail=[],
+        )
+        passed_runtime = self_check.CheckResult(
+            name="runtime_describe",
+            status="passed",
+            exit_code=0,
+            elapsed_s=0.1,
+            summary="runtime describe passed",
+            details={},
+            tail=[],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "self-check.json"
+            with patch(
+                "tools.self_check._run_unit_tests",
+                return_value=passed_unit_tests,
+            ), patch(
+                "tools.self_check._run_runtime_describe",
+                return_value=passed_runtime,
+            ), patch(
+                "tools.self_check._default_provider_suite_preflight",
+                return_value=(
+                    False,
+                    {
+                        "reason": "fast_page_budget_violation",
+                        "message": "fast provider suite page budget rejected",
+                    },
+                ),
+            ), patch("tools.self_check._run_provider_comparison_suite") as run_provider_suite:
+                exit_code = self_check.main(
+                    [
+                        "--profile",
+                        "fast",
+                        "--provider-suite",
+                        "invalid-fast-suite.json",
+                        "--skip-regression",
+                        "--skip-payload-contracts",
+                        "--out",
+                        str(out_path),
+                    ]
+                )
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        run_provider_suite.assert_not_called()
+        provider_check = next(item for item in payload["checks"] if item["name"] == "provider_comparison_suite")
+        self.assertEqual(provider_check["status"], "failed")
+        self.assertEqual(provider_check["details"]["reason"], "fast_page_budget_violation")
+
+    @patch("tools.self_check.subprocess.run")
+    @patch("tools.self_check.subprocess.Popen")
+    def test_run_subprocess_timeout_uses_taskkill_tree_on_windows(self, popen: MagicMock, run: MagicMock) -> None:
+        process = MagicMock()
+        process.pid = 4242
+        process.returncode = -9
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["child"], 1, output=b"partial output", stderr=b"partial error"),
+            ("final output", "final error"),
+        ]
+        popen.return_value = process
+        run.return_value = subprocess.CompletedProcess(
+            ["taskkill.exe", "/PID", "4242", "/T", "/F"],
+            0,
+            stdout="SUCCESS: tree terminated",
+            stderr="",
+        )
+
+        with patch.object(self_check.os, "name", "nt"):
+            result, output = self_check._run_subprocess("provider_comparison_suite", ["child"], timeout_seconds=1)
+
+        self.assertEqual(result.status, "timeout")
+        self.assertIn("final output", output)
+        self.assertEqual(result.details["timeout_cleanup"]["strategy"], "taskkill_tree")
+        self.assertTrue(result.details["timeout_cleanup"]["succeeded"])
+        self.assertEqual(result.details["timeout_output_drain"]["drain_status"], "completed")
+        self.assertEqual(
+            popen.call_args.kwargs["creationflags"],
+            int(getattr(self_check.subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+        )
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["taskkill.exe", "/PID", "4242", "/T", "/F"])
+        process.kill.assert_not_called()
+
+    @patch("tools.self_check.subprocess.run")
+    @patch("tools.self_check.subprocess.Popen")
+    def test_run_subprocess_timeout_falls_back_to_root_kill_when_taskkill_fails(
+        self,
+        popen: MagicMock,
+        run: MagicMock,
+    ) -> None:
+        process = MagicMock()
+        process.pid = 4242
+        process.returncode = -9
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["child"], 1),
+            ("", ""),
+        ]
+        popen.return_value = process
+        run.return_value = subprocess.CompletedProcess(
+            ["taskkill.exe", "/PID", "4242", "/T", "/F"],
+            1,
+            stdout="",
+            stderr="ERROR: process not found",
+        )
+
+        with patch.object(self_check.os, "name", "nt"):
+            result, _output = self_check._run_subprocess("provider_comparison_suite", ["child"], timeout_seconds=1)
+
+        self.assertEqual(result.status, "timeout")
+        self.assertFalse(result.details["timeout_cleanup"]["succeeded"])
+        self.assertEqual(result.details["timeout_cleanup"]["fallback_root_kill"], "sent")
+        process.kill.assert_called_once()
 
     def test_extract_structure_metrics_from_regression_output(self) -> None:
         lines = [
@@ -259,6 +496,7 @@ class SelfCheckTests(unittest.TestCase):
             "schema_version": "2026-06-provider-comparison-report",
             "suite": "resolved-provider-suite.json",
             "fixture_root": "resolved-fixtures",
+            "measurement": {"parser_lifecycle": "provider_instance_reused"},
             "summary": {
                 "sample_count": 2,
                 "completed_provider_runs": 3,
@@ -324,6 +562,7 @@ class SelfCheckTests(unittest.TestCase):
                 fixture_root="fixtures",
                 profile="fallback",
                 timeout_seconds=120,
+                reuse_parser_instances=True,
             )
 
         self.assertEqual(
@@ -340,6 +579,7 @@ class SelfCheckTests(unittest.TestCase):
                 "--progress",
                 "--fixture-root",
                 "fixtures",
+                "--reuse-parser-instances",
             ],
         )
         self.assertEqual(result.status, "passed")
@@ -347,6 +587,7 @@ class SelfCheckTests(unittest.TestCase):
         self.assertEqual(result.details["gate_summary"]["gate"], "accept_with_warning")
         self.assertEqual(result.details["provider_identity_summary"]["provider_count"], 2)
         self.assertEqual(result.details["provider_admission_summary"]["summary"]["route_ready_count"], 1)
+        self.assertTrue(result.details["reuse_parser_instances"])
         self.assertEqual(result.details["resolved_suite"], "resolved-provider-suite.json")
         self.assertIn("gate=accept_with_warning", result.summary)
         self.assertIn("quality_warn=3", result.summary)
@@ -356,6 +597,7 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIn("identity_drift=1", result.summary)
         self.assertIn("admission_ready=1", result.summary)
         self.assertIn("admission_update=1", result.summary)
+        self.assertIn("parser_lifecycle=provider_instance_reused", result.summary)
 
     def test_run_payload_contract_check_extracts_summary(self) -> None:
         contract_payload = {

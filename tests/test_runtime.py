@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 import io
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from parsecore.api_payloads import _document_projection
+from parsecore.api_payloads import _document_projection, _document_view_rows, _records_from_snapshot
 from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
-from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, SemanticRole
+from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, RerankScore, SemanticRole
 from parsecore.runtime import QuotaExceededError
 from parsecore.stubs import FakeEmbeddingProvider, ParagraphChunkBuilder
 from tests.support import TemporaryWorkspace
@@ -306,6 +307,7 @@ class ParseRuntimeTests(unittest.TestCase):
             description = runtime.describe()
 
         self.assertEqual(description["project"], "test-parsecore")
+        self.assertEqual(description["index_embedding_dimension"], 1536)
         self.assertEqual(description["parsers"], ["docx-native"])
         self.assertEqual(
             description["provider_registry"]["summary"],
@@ -743,6 +745,68 @@ gate_status = "pending"
             self.assertIsNotNone(records_payload)
             self.assertEqual(records_payload["total"], 1)
             self.assertEqual(records_payload["items"][0]["record_id"], views["records"][0]["record_id"])
+
+    def test_document_view_rows_lightweight_path_matches_structured_projection(self) -> None:
+        blocks = (
+            Block(
+                block_id="view-fast-title",
+                doc_id="view-fast",
+                type=BlockType.TITLE,
+                content="Catalog",
+                metadata={"page": 1, "semantic_role": "title", "parser": "pdf-text"},
+            ),
+            Block(
+                block_id="view-fast-p1",
+                doc_id="view-fast",
+                type=BlockType.PARAGRAPH,
+                content="No Certificate Holder LatestDate\n1 TC001A ACME 2025-01-10",
+                metadata={"page": 1, "semantic_role": "paragraph", "parser": "pdf-text"},
+            ),
+        )
+        snapshot = {"doc_id": "view-fast", "blocks": blocks}
+
+        lightweight = _document_view_rows(snapshot)
+        structured = _document_projection(snapshot, projection="structured")
+
+        self.assertEqual(lightweight["pages"], structured["pages"])
+        self.assertEqual(lightweight["records"], _records_from_snapshot(snapshot))
+        self.assertEqual(
+            lightweight["lines"],
+            [
+                {
+                    "line_id": "view-fast-p1:line:1",
+                    "doc_id": "view-fast",
+                    "parse_run_id": "",
+                    "block_id": "view-fast-p1",
+                    "block_type": "paragraph",
+                    "block_index": 2,
+                    "line_index": 1,
+                    "page_number": 1,
+                    "page_start": 1,
+                    "page_end": 1,
+                    "semantic_role": "paragraph",
+                    "source_parser": "pdf-text",
+                    "text": "No Certificate Holder LatestDate",
+                    "normalized_text": "No Certificate Holder LatestDate",
+                },
+                {
+                    "line_id": "view-fast-p1:line:2",
+                    "doc_id": "view-fast",
+                    "parse_run_id": "",
+                    "block_id": "view-fast-p1",
+                    "block_type": "paragraph",
+                    "block_index": 2,
+                    "line_index": 2,
+                    "page_number": 1,
+                    "page_start": 1,
+                    "page_end": 1,
+                    "semantic_role": "paragraph",
+                    "source_parser": "pdf-text",
+                    "text": "1 TC001A ACME 2025-01-10",
+                    "normalized_text": "1 TC001A ACME 2025-01-10",
+                },
+            ],
+        )
 
     def test_pipeline_observability_reports_cache_hit_after_repeated_resolution(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1302,6 +1366,41 @@ gate_status = "pending"
         self.assertGreaterEqual(dashboard["metrics"]["done_jobs"], 2)
         self.assertLessEqual(len(dashboard["recent_jobs"]), 2)
 
+    def test_completed_parse_records_sanitized_document_quality_observation(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx("quality-observation.docx", ["quality content"])
+            runtime = build_runtime(workspace.config_path)
+            with patch(
+                "parsecore.api_payloads._document_quality_projection",
+                side_effect=AssertionError("full quality projection must not run in execute telemetry"),
+            ):
+                outcome = runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-quality-observation",
+                        file_path=str(document_path),
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        tenant_id="quality-tenant",
+                        quota_key="quality-plan",
+                    )
+                )
+            events = runtime.event_aggregator.get_events(
+                event_type_filter="document_quality",
+                tenant_id_filter="quality-tenant",
+            )
+            prometheus = runtime.event_aggregator.get_prometheus_metrics()
+
+        self.assertEqual(outcome.job.state, ParseJobState.DONE)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["doc_id"], "doc-quality-observation")
+        self.assertEqual(event["job_id"], outcome.job.job_id)
+        self.assertIn(event["quality_gate"], {"accept", "accept_with_warning"})
+        self.assertGreaterEqual(event["quality_score"], 0.0)
+        self.assertLessEqual(event["quality_score"], 1.0)
+        self.assertNotIn("text", event)
+        self.assertIn("parse_document_quality_total", prometheus)
+        self.assertIn("parse_document_unit_chunk_coverage_ratio_count 1", prometheus)
+
     def test_since_hours_filter_can_exclude_old_jobs(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
@@ -1468,6 +1567,7 @@ gate_status = "pending"
                         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     )
                 )
+                document = runtime.get_document(doc_id="doc-embed")
 
         self.assertTrue(all(chunk.embedding is not None for chunk in outcome.chunks))
         self.assertEqual(len(outcome.chunks[0].embedding), 1536)
@@ -1475,6 +1575,10 @@ gate_status = "pending"
             outcome.chunks[0].embedding[:2],
             (1.0, float(len(outcome.chunks[0].text))),
         )
+        rag_coverage = document["index_manifest"]["rag_coverage"]
+        self.assertEqual(rag_coverage["embedded_chunk_count"], len(outcome.chunks))
+        self.assertEqual(rag_coverage["embedded_unit_count"], rag_coverage["indexable_unit_count"])
+        self.assertEqual(rag_coverage["unembedded_unit_count"], 0)
 
     def test_embed_chunks_retries_per_batch_and_degrades_partially(self) -> None:
         class SelectiveFailureEmbeddingProvider:
@@ -1511,6 +1615,10 @@ gate_status = "pending"
                         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     )
                 )
+                document = runtime.get_document(doc_id="doc-embed-partial")
+                provider_failures = runtime.event_aggregator.get_events(
+                    event_type_filter="provider_failure"
+                )
 
         self.assertEqual(outcome.job.state, ParseJobState.DONE)
         embedded_count = sum(1 for chunk in outcome.chunks if chunk.embedding is not None)
@@ -1518,6 +1626,20 @@ gate_status = "pending"
         self.assertGreaterEqual(embedded_count, 1)
         self.assertGreaterEqual(skipped_count, 1)
         self.assertGreaterEqual(provider.fail_calls, 2)
+        self.assertEqual(len(provider_failures), 1)
+        self.assertEqual(provider_failures[0]["provider_type"], "embedding")
+        self.assertEqual(provider_failures[0]["failure_category"], "provider_unavailable")
+        self.assertEqual(provider_failures[0]["operation"], "embed_batch")
+        rag_coverage = document["index_manifest"]["rag_coverage"]
+        self.assertEqual(rag_coverage["embedded_chunk_count"], embedded_count)
+        self.assertGreaterEqual(rag_coverage["embedded_unit_count"], 1)
+        self.assertGreaterEqual(rag_coverage["unembedded_unit_count"], 1)
+        self.assertEqual(
+            rag_coverage["embedded_unit_count"]
+            + rag_coverage["unembedded_unit_count"]
+            + rag_coverage["unchunked_unit_count"],
+            rag_coverage["indexable_unit_count"],
+        )
 
     def test_submit_rerun_chunks_only_reuses_saved_blocks(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -1967,6 +2089,105 @@ gate_status = "pending"
         self.assertEqual(mode, "hybrid")
         self.assertEqual(hits_with_mode[0].chunk_id, "vector-strong")
 
+    def test_search_document_applies_configured_reranker_and_safely_falls_back(self) -> None:
+        class QueryEmbeddingProvider:
+            def embed(self, *, doc_id: str, chunks):
+                from dataclasses import replace
+
+                return tuple(
+                    replace(chunk, embedding=(1.0, 0.0)) for chunk in chunks
+                )
+
+        class RecordingRerankProvider:
+            def __init__(self) -> None:
+                self.documents: tuple[str, ...] = ()
+
+            def rerank(self, *, query: str, documents):
+                self.documents = tuple(documents)
+                return (
+                    RerankScore(index=1, score=0.98),
+                    RerankScore(index=0, score=0.11),
+                )
+
+        class FailingRerankProvider:
+            def rerank(self, *, query: str, documents):
+                raise RuntimeError("gateway unavailable")
+
+        config = SAMPLE_CONFIG.replace(
+            "\n[[parsers]]",
+            """
+[providers.rerank]
+enabled = true
+provider = "dashscope-compatible"
+model = "qwen/qwen3-vl-rerank"
+base_url = "https://example.invalid/v1"
+api_key_env = "PARSECORE_RERANK_API_KEY"
+candidate_limit = 2
+
+[[parsers]]""",
+            1,
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_docx("search-rerank.docx", ["base"])
+            runtime = build_runtime(workspace.config_path)
+            runtime.embedding_provider = QueryEmbeddingProvider()
+            runtime.submit(
+                ParseRequest(
+                    doc_id="doc-rerank",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            runtime.job_store.save_chunks(
+                doc_id="doc-rerank",
+                chunks=[
+                    Chunk(
+                        chunk_id="keyword-strong",
+                        doc_id="doc-rerank",
+                        block_ids=("blk-1",),
+                        text="Hydraulic pressure warning procedures and checklist",
+                        semantic_role=SemanticRole.PARAGRAPH.value,
+                        embedding=(0.0, 1.0),
+                    ),
+                    Chunk(
+                        chunk_id="vector-strong",
+                        doc_id="doc-rerank",
+                        block_ids=("blk-2",),
+                        text="Safety bulletin summary",
+                        semantic_role=SemanticRole.PARAGRAPH.value,
+                        embedding=(1.0, 0.0),
+                    ),
+                ],
+            )
+            reranker = RecordingRerankProvider()
+            runtime.rerank_provider = reranker
+            hits, mode = runtime.search_document_with_mode(
+                doc_id="doc-rerank",
+                query="hydraulic pressure warning",
+                limit=1,
+            )
+            runtime.rerank_provider = FailingRerankProvider()
+            fallback_hits, fallback_mode = runtime.search_document_with_mode(
+                doc_id="doc-rerank",
+                query="hydraulic pressure warning",
+                limit=1,
+            )
+            provider_failures = runtime.event_aggregator.get_events(
+                event_type_filter="provider_failure"
+            )
+
+        self.assertEqual(mode, "hybrid+rerank")
+        self.assertEqual(hits[0].chunk_id, "keyword-strong")
+        self.assertEqual(hits[0].rerank_score, 0.98)
+        self.assertIsNotNone(hits[0].retrieval_score)
+        self.assertEqual(len(reranker.documents), 2)
+        self.assertEqual(fallback_mode, "hybrid")
+        self.assertEqual(fallback_hits[0].chunk_id, "vector-strong")
+        self.assertEqual(len(provider_failures), 1)
+        self.assertEqual(provider_failures[0]["provider_type"], "rerank")
+        self.assertEqual(provider_failures[0]["failure_category"], "provider_unavailable")
+        self.assertEqual(provider_failures[0]["operation"], "rerank")
+
     def test_search_document_reports_keyword_fallback_mode_when_query_embedding_unavailable(self) -> None:
         class FailingQueryEmbeddingProvider:
             def embed(self, *, doc_id: str, chunks):
@@ -1975,7 +2196,6 @@ gate_status = "pending"
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("search-fallback.docx", ["base"])
             runtime = build_runtime(workspace.config_path)
-            runtime.embedding_provider = FailingQueryEmbeddingProvider()
             runtime.submit(
                 ParseRequest(
                     doc_id="doc-fallback",
@@ -1983,12 +2203,20 @@ gate_status = "pending"
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             )
+            runtime.embedding_provider = FailingQueryEmbeddingProvider()
             hits_with_mode, mode = runtime.search_document_with_mode(
                 doc_id="doc-fallback",
                 query="base",
             )
+            provider_failures = runtime.event_aggregator.get_events(
+                event_type_filter="provider_failure"
+            )
 
         self.assertEqual(mode, "keyword-fallback")
+        self.assertEqual(len(provider_failures), 1)
+        self.assertEqual(provider_failures[0]["provider_type"], "embedding")
+        self.assertEqual(provider_failures[0]["failure_category"], "provider_unavailable")
+        self.assertEqual(provider_failures[0]["operation"], "embed_query")
         self.assertTrue(hits_with_mode)
 
     def test_partitioned_pdf_jobs_merge_parent_document_and_parts(self) -> None:
@@ -2020,7 +2248,16 @@ gate_status = "pending"
                 runtime.execute(job_id=job.job_id)
 
             snapshot = runtime.get_document(doc_id="doc-partitioned")
+            parent_quality_events = [
+                event
+                for event in runtime.event_aggregator.get_events(
+                    limit=100,
+                    event_type_filter="document_quality",
+                )
+                if event.get("doc_id") == "doc-partitioned"
+            ]
             self.assertEqual(snapshot["job"].state, ParseJobState.DONE)
+            self.assertEqual(len(parent_quality_events), 1)
             self.assertEqual(len(snapshot["partition_parts"]), 2)
             self.assertTrue(all(part["state"] == "done" for part in snapshot["partition_parts"]))
             manifest = snapshot["index_manifest"]
@@ -2055,6 +2292,33 @@ gate_status = "pending"
             views = runtime.job_store.get_document_views(doc_id="doc-partitioned")
             self.assertEqual([page["text"] for page in views["pages"]], ["one", "two", "three"])
             self.assertEqual(len(views["lines"]), 3)
+
+    def test_partitioned_pdf_jobs_can_defer_part_file_materialization_until_execute(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("deferred-parts.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-deferred-parts",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+
+            planned = runtime.start_pdf_part_jobs(
+                doc_id="doc-deferred-parts",
+                target_pages_per_part=1,
+                materialize_part_files=False,
+            )
+            first_job = planned["part_jobs"][0]
+            first_part_path = Path(first_job.file_path)
+            self.assertFalse(first_part_path.exists())
+
+            outcome = runtime.execute(job_id=first_job.job_id)
+
+            self.assertEqual(outcome.job.state, ParseJobState.DONE)
+            self.assertTrue(first_part_path.exists())
 
     def test_execute_refuses_partition_parent_job(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

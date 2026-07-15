@@ -119,6 +119,24 @@ class OpenAiCompatibleEmbeddingProviderTests(unittest.TestCase):
         self.assertEqual(embedded[0].embedding[:2], (1.0, 5.0))
         self.assertTrue(all(value == 0.0 for value in embedded[0].embedding[2:]))
 
+    def test_build_embedding_provider_supports_local_transformer_route(self) -> None:
+        settings = EmbeddingProviderSettings(
+            enabled=True,
+            provider="sentence-transformers-local",
+            model="local-model",
+            base_url="",
+            api_key_env="",
+            timeout_seconds=5.0,
+            max_retries=0,
+            batch_size=2,
+            options={"local_files_only": True},
+        )
+        with patch("parsecore.embeddings.LocalTransformerEmbeddingProvider") as provider_cls:
+            provider = build_embedding_provider(settings)
+
+        provider_cls.assert_called_once_with(settings)
+        self.assertIs(provider, provider_cls.return_value)
+
 
 if __name__ == "__main__":
     unittest.main()

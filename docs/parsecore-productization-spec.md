@@ -114,7 +114,7 @@
 | P4 | 阅读页排版与诊断 | 后端契约完成 | 高 | 可按后端契约验收，宿主前端需补视觉验收 |
 | P5 | 大文件与 part 运维 | 主链完成 | 中高 | 可按功能主链验收，真实大样本与清理策略继续压测 |
 | P6 | 发布门禁与质量趋势 | 基础门禁完成 | 中高 | 可按基础门禁验收，长任务进度/超时体验继续增强 |
-| P7 | 可观测安全运维 | 部分完成 | 中 | 不按生产完成验收，作为 hardening 专项推进 |
+| P7 | 可观测安全运维 | 已完成 | 高 | P7-T01 至 P7-T10 已按 hardening 口径闭环，进入真实灰度持续观测 |
 
 ### 3.2 跨阶段依赖关系
 
@@ -138,7 +138,7 @@ P6 (门禁)          ──> P7 (运维指标依赖门禁定义)
 | 任务 | 状态 | 证据 |
 | --- | --- | --- |
 | P1-T01 六类 schema 冻结 | ✅ | `payload_schemas.py:1828 _SCHEMAS` 字典含 6 项：document-coverage/ir/parts/providers/quality/reader |
-| P1-T02 最小/复杂/异常样例 | ✅ | `payload_contract_samples.py` 已有 4 个快照：`build_sample_snapshot`、`build_complex_sample_snapshot`、`build_anomaly_sample_snapshot`、`build_part_rerun_sample_snapshot`，24 个 payload 全部通过 schema 验证 |
+| P1-T02 最小/复杂/异常样例 | ✅ | `payload_contract_samples.py` 已有 4 个快照：`build_sample_snapshot`、`build_complex_sample_snapshot`、`build_anomaly_sample_snapshot`、`build_part_rerun_sample_snapshot`；`tools/p1_contract_acceptance.py` 实际验证 24 个 payload 全部通过 schema |
 | P1-T03 动作合同规范 | ✅ | `payload_schemas.py:1045 _action_suggestion_schema` 含 action_id/label/method/endpoint/scope/reason_codes/auto_execute/payload/params/context；`user-guide.md` 新增动作合同四阶段文档化（inspect→compare→execute→verify） |
 | P1-T04 part rerun monitor/verify contract | ✅ | `api_routes.py:1632 _part_rerun_contracts` 完整实现 monitor_requests/verify_requests/preferred_verify_request/workflow |
 | P1-T05 provider comparison 产品字段 | ✅ | `payload_schemas.py:1186 _provider_comparison_schema` 含 schema_version/primary_provider_id/best_provider_id/summary/rankings；`user-guide.md` 新增 provider comparison 产品字段说明 |
@@ -213,6 +213,7 @@ $env:PYTHONPATH='src'
 py -m pytest tests/test_payload_schemas.py tests/test_payload_contract_check.py tests/test_schema_snapshot.py -q
 py -m pytest tests/test_api_payloads.py tests/test_asgi.py -q
 py -m parsecore.cli payload-contract-check
+py -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-YYYYMMDD.json
 ```
 
 ### 4.6 退出条件
@@ -222,6 +223,19 @@ P1 完成后，宿主产品不需要阅读 ParseCore 源码即可完成第一版
 - `payload-contract-check` 在本地通过，覆盖 reader、coverage、quality、providers、parts。
 - schema snapshot 测试通过，字段重命名会被捕获。
 - `user-guide.md` 包含接入顺序、字段清单、错误码表。
+
+### 4.7 2026-07-15 P1 执行证据
+
+本轮执行新增 `p1-contract-acceptance` 门禁，并修正 part-rerun 样例使用运行时真实边界 `partition_parts`，确保 `previous_part_observation`、`rerun_comparison` 和 monitor/verify 诊断不会被通用 fallback 丢弃。
+
+- 结果：8/8 检查通过，6 个冻结 schema、4 组样例、24 个 payload。
+- 兼容性：复杂/异常样例的 `compat / structured / full` 共 6 个旧 projection 通过。
+- IR/Reader：3 页、10 blocks、2 tables、1 figure、10 KnowledgeUnit；8 个 reader blocks 均可回溯到 IR source block。
+- Coverage：10 units、8 个可入库 units，页/单元计数一致，coverage gap=0。
+- Action contract：`inspect → compare → execute → verify` 四阶段全部 ready。
+- Part rerun：1/1 part 暴露 previous observation + comparison，状态为 `improved`。
+
+机器可读报告：`var/self-check/p1-contract-acceptance-20260715.json`；可读报告：[p1-acceptance-20260715.md](p1-acceptance-20260715.md)。
 
 ---
 
@@ -564,7 +578,7 @@ P4 完成后，阅读页排版问题的主修复路径回到 IR/reader/provider�
 | P6-T04 coverage 指标趋势 | ✅ | `tools/coverage_trend_report.py` 新增 coverage 趋势门禁（text_page_coverage_ratio/table_unit_coverage_ratio/unit_chunk_coverage_ratio） |
 | P6-T05 reader 指标趋势 | ✅ | `tools/coverage_trend_report.py` 新增 reader 趋势门禁（visible/hidden/table block count/reading_order_confidence） |
 | P6-T06 provider 指标趋势 | ✅ | 十类 gate_policy 已实现（identity_drift/best_provider_mismatch/admission_drift/reading_order_warning/quality_warning 等），证据：`tests/test_provider_comparison_report.py:848 test_build_report_exposes_suite_gate_policy` |
-| P6-T07 性能趋势 | ✅ | `tools/perf_trend_report.py` PERF_COLUMNS 扩展至 9 项（新增 peak_memory_mb/throughput_mb_s/part_throughput_s）；新增 `build_trend_summary` 支持 2+ 份报告跨版本趋势分析；`render_markdown` 支持 Multi-Version Trend 章节；CLI 支持 `--trend-reports`；5 个新测试覆盖趋势方向判定 |
+| P6-T07 性能趋势 | ✅ | `tools/perf_trend_report.py` 支持整体耗时、进程遥测和阶段 P50 的跨版本趋势；阶段/RSS 只在严格同通道时比较并保持 observation-only，缺失阶段显式列出 |
 | P6-T08 gate policy 按样本/provider/profile | ✅ | provider 维度已有十类预算；样本/profile 维度需扩展 |
 | P6-T09 release notes 质量指标 | ✅ | `docs/release-notes.md` 新增“质量指标变化记录”章节，含记录格式/采集方法/变化判定规则 |
 | P6-T10 回滚触发条件 | ✅ | `docs/go-live-readiness.md:85` 新增“回滚条件量化阈值”表（7 项指标）和“回滚判定流程”（4 步） |
@@ -602,12 +616,12 @@ P4 完成后，阅读页排版问题的主修复路径回到 IR/reader/provider�
 | --- | --- | --- |
 | P7-T01 request/job/doc/part/tenant id 关联 | ✅ | `src/parsecore/events.py` 的 `JobEventLogger / ParseStageTimer` 已支持 `job_id / doc_id / part_id / tenant_id` |
 | P7-T02 解析阶段耗时指标 | ✅ | `events.py` 新增 `ParseStageTimer`，`api_responses.py` 新增 `PARSE_STAGES` 元组（upload/parse/normalize/chunk/embed/export/rerun） |
-| P7-T03 质量指标 | ⚠️ | quality gate/coverage ratio/provider warning 有输出，系统化需完善 |
-| P7-T04 provider 指标 | ⚠️ | provider_id/route status/fallback reason/elapsed/memory 有输出（`payload_schemas.py:_provider_usage_entry_schema`），failure category 需补齐 |
+| P7-T03 质量指标 | ✅ | 完成态解析从当前 blocks/index manifest 写入轻量脱敏 `document_quality` 事件；固定 gate/flag 计数及 quality/coverage/embedding/provider warning 全局摘要由 Prometheus 暴露，分片父文档只在 DONE 后观测 |
+| P7-T04 provider 指标 | ✅ | `provider_failures.py` 统一固定失败类别；embedding 入库、查询向量化与 rerank 终态失败写入脱敏事件，并由 `parse_provider_failure_total{provider_type,provider_id,failure_category}` 聚合；Provider comparison 复用同一分类器 |
 | P7-T05 错误分类 | ✅ | `api_responses.py` 新增 `ERROR_CATEGORIES`（9 类）和 `error_category_for_code()` 映射函数 |
 | P7-T06 API key/日志脱敏 | ✅ | `src/parsecore/events.py` 写入事件前会脱敏 api_key/token/authorization/secret/password 等敏感字段 |
-| P7-T07 文件路径校验/临时目录隔离 | ⚠️ | `api_routes.py:1961 _resolve_api_file_path` 有路径校验，临时目录隔离需强化 |
-| P7-T08 工件保留期 | ⚠️ | `config.py` 已有 staged/part/export retention 配置，`parts.py cleanup_artifacts()` 支持 dry-run；provider comparison 工件保留调度仍需接入 |
+| P7-T07 文件路径校验/临时目录隔离 | ✅ | `private_files.py` 统一根目录边界、独占写入、安全扩展名和 POSIX 0700/0600；同步上传、桥接暂存、导出与 PDF part 已接入，路径逃逸和清理有回归覆盖 |
+| P7-T08 工件保留期 | ✅ | `config.py` 已有 staged/part/export retention 配置；`parsecore cleanup-provider-comparison-artifacts` 使用 `provider_comparison_artifact_retention_seconds`，默认 dry-run 且仅清理 self-check 生成的 Provider comparison 报告 |
 | P7-T09 运维面板字段说明 | ✅ | `docs/configuration.md` 已补最小运维面板字段说明 |
 | P7-T10 灰度回滚手册 | ✅ | `docs/gray-deployment.md` 已补 local parser routing、provider 配置、候选 profile、reader 降级专项回滚口径 |
 
@@ -617,10 +631,12 @@ P4 完成后，阅读页排版问题的主修复路径回到 IR/reader/provider�
 | --- | --- | --- | --- |
 | P7-T01 | id 关联完善 | `events.py`、`runtime.py` | part_id/tenant_id 在日志和事件中关联 ✅ |
 | P7-T02 | 解析阶段耗时指标 | `runtime.py`、`events.py` | upload→parse→normalize→chunk→embed→export→rerun 各阶段耗时采集 ✅ |
+| P7-T03 | 质量指标系统化 | `runtime.py`、`api_routes.py` | 完成态 `document_quality` 事件、固定 gate/flag 计数、质量与 coverage 全局摘要；report-only 语义和既有阈值保持不变 ✅ |
+| P7-T04 | Provider 失败类别与聚合 | `provider_failures.py`、`runtime.py`、`provider_comparison_report.py` | 固定低基数类别、终态失败事件、Prometheus 聚合、fallback 语义不变 ✅ |
 | P7-T05 | 错误分类系统化 | `api_responses.py`、`runtime.py` | 定义错误类别枚举，稳定错误码 ✅ |
 | P7-T06 | 日志脱敏强化 | `events.py`、`api_support.py` | API key/token/authorization/secret/password 不进事件日志 ✅ |
-| P7-T07 | 临时目录隔离强化 | `api_routes.py`、`config.py` | 上传文件名净化、临时目录权限隔离 |
-| P7-T08 | 工件保留期 | `runtime.py`、`config.py` | part 文件/export 包/comparison 工件保留期和清理策略，支持 dry-run |
+| P7-T07 | 临时目录隔离强化 | `private_files.py`、`api_routes.py`、`export_jobs.py`、`pdf_parts.py` | 上传文件名/扩展名净化、受控根目录、独占创建、私有权限与同步清理 ✅ |
+| P7-T08 | 工件保留期 | `parts.py`、`config.py`、`cli.py` | part 文件/export 包/comparison 工件保留期和清理策略，支持 dry-run；comparison 仅匹配 self-check 输出 ✅ |
 | P7-T09 | 运维面板字段 | `docs/configuration.md` | 最小运维面板字段说明 ✅ |
 | P7-T10 | 专项回滚手册 | `docs/gray-deployment.md` | local parser routing 关闭/provider 配置回退/候选 profile 关闭/reader 降级接入 ✅ |
 
@@ -708,7 +724,7 @@ P4 完成后，阅读页排版问题的主修复路径回到 IR/reader/provider�
 | P4 | 高（reader block 与渲染协议已补齐） | 宿主前端截图级视觉验收 |
 | P5 | 中高（part 核心与清理基础已完成） | 真实大样本 benchmark 和容量清理演练 |
 | P6 | 中高（self-check/趋势/进度输出已补齐） | 长任务超时上下文和 PR 级 smoke 门禁 |
-| P7 | 中高（阶段耗时、错误分类、事件脱敏、回滚文档已补齐） | provider failure category、工件保留调度和真实运维看板演练 |
+| P7 | 高（P7-T01 至 P7-T10 已闭环：阶段耗时、质量与 Provider 指标、API 运维演练、错误分类、事件脱敏、临时目录隔离、保留期与回滚文档均已补齐） | 真实灰度持续抓取与趋势观察；不新增无依据阈值 |
 
 ### 14.2 下一批次建议
 

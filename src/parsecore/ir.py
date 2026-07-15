@@ -149,14 +149,18 @@ def build_coverage_payload(
     quality_signals: Sequence[Mapping[str, Any]],
     index_manifest: Any,
 ) -> dict[str, Any]:
-    page_numbers = sorted(
-        {
-            _safe_int(page.get("page_number"), default=1)
-            for page in pages
-            if isinstance(page, Mapping)
-        }
-        | {_page_number(block.metadata) for block in blocks}
-    )
+    page_numbers_set = {
+        _safe_int(page.get("page_number"), default=1)
+        for page in pages
+        if isinstance(page, Mapping)
+    }
+    for block in ir_blocks:
+        start, end = _page_span_tuple(
+            block.get("page_span"),
+            fallback_page=_safe_int(block.get("page_number"), default=1),
+        )
+        page_numbers_set.update(range(start, end + 1))
+    page_numbers = sorted(page_numbers_set)
     pages_by_number = {
         _safe_int(page.get("page_number"), default=1): page
         for page in pages
@@ -178,8 +182,12 @@ def build_coverage_payload(
 
     ir_blocks_by_page: dict[int, list[Mapping[str, Any]]] = {}
     for block in ir_blocks:
-        page_number = _safe_int(block.get("page_number"), default=1)
-        ir_blocks_by_page.setdefault(page_number, []).append(block)
+        start, end = _page_span_tuple(
+            block.get("page_span"),
+            fallback_page=_safe_int(block.get("page_number"), default=1),
+        )
+        for page_number in range(start, end + 1):
+            ir_blocks_by_page.setdefault(page_number, []).append(block)
 
     units_by_page: dict[int, list[Mapping[str, Any]]] = {}
     embedded_chunk_ids = {chunk.chunk_id for chunk in chunks if chunk.embedding is not None}
@@ -359,14 +367,24 @@ def build_coverage_payload(
 def _ir_pages(*, pages: Sequence[Mapping[str, Any]], ir_blocks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     blocks_by_page: dict[int, list[str]] = {}
     for block in ir_blocks:
-        page_number = _safe_int(block.get("page_number"), default=1)
-        blocks_by_page.setdefault(page_number, []).append(str(block.get("block_id") or ""))
+        start, end = _page_span_tuple(
+            block.get("page_span"),
+            fallback_page=_safe_int(block.get("page_number"), default=1),
+        )
+        for page_number in range(start, end + 1):
+            blocks_by_page.setdefault(page_number, []).append(str(block.get("block_id") or ""))
 
     ir_pages: list[dict[str, Any]] = []
-    for page in pages:
+    pages_by_number = {
+        _safe_int(page.get("page_number"), default=1): page
+        for page in pages
+        if isinstance(page, Mapping)
+    }
+    page_numbers = sorted(set(pages_by_number) | set(blocks_by_page))
+    for page_number in page_numbers:
+        page = pages_by_number.get(page_number, {})
         if not isinstance(page, Mapping):
             continue
-        page_number = _safe_int(page.get("page_number"), default=1)
         ir_pages.append(
             {
                 "page_id": f"p{page_number:04d}",
@@ -444,10 +462,16 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
         ),
         clamp=(0.0, 1.0),
     )
+    page_span = metadata.get("page_span")
+    if page_span is None and metadata.get("page_end") is not None:
+        page_span = {
+            "start": page_number,
+            "end": metadata.get("page_end"),
+        }
     return {
         "block_id": block.block_id,
         "page_number": page_number,
-        "page_span": list(_page_span_tuple(metadata.get("page_span"), fallback_page=page_number)),
+        "page_span": list(_page_span_tuple(page_span, fallback_page=page_number)),
         "type": block.type.value,
         "semantic_role": role,
         "text": block.content,
@@ -935,6 +959,12 @@ def _index_manifest_with_rag_coverage(
     indexable_units = [unit for unit in coverage_units if bool(unit.get("should_index_for_rag"))]
     chunked_units = [unit for unit in indexable_units if _string_list(unit.get("chunk_ids"))]
     skipped_units = [unit for unit in coverage_units if not bool(unit.get("should_index_for_rag"))]
+    embedded_units = [unit for unit in indexable_units if bool(unit.get("embedded"))]
+    unembedded_units = [
+        unit
+        for unit in indexable_units
+        if _string_list(unit.get("chunk_ids")) and not bool(unit.get("embedded"))
+    ]
     rag_units = [
         {
             "unit_id": str(unit.get("unit_id") or ""),
@@ -965,6 +995,8 @@ def _index_manifest_with_rag_coverage(
         "unchunked_unit_count": len(indexable_units) - len(chunked_units),
         "chunk_count": len(all_chunk_ids),
         "embedded_chunk_count": len(embedded_chunk_ids),
+        "embedded_unit_count": len(embedded_units),
+        "unembedded_unit_count": len(unembedded_units),
         "coverage_score": _optional_float(summary.get("unit_chunk_coverage_ratio"), default=1.0),
         "text_page_coverage_ratio": _optional_float(summary.get("text_page_coverage_ratio"), default=1.0),
         "table_unit_coverage_ratio": _optional_float(summary.get("table_unit_coverage_ratio"), default=1.0),
@@ -1080,8 +1112,13 @@ def _coverage_summary(
     )
     pages_table_without_units = sum(1 for page in pages if page.get("table_ids_without_units"))
     pages_figure_caption_missing = sum(1 for page in pages if page.get("figure_ids_missing_caption"))
-    total_indexable_units = sum(_safe_int(page.get("indexable_unit_count"), default=0) for page in pages)
-    total_chunked_units = sum(_safe_int(page.get("chunked_unit_count"), default=0) for page in pages)
+    # A unit can span multiple pages.  Page projections intentionally repeat
+    # that unit for page-local navigation, but document-level unit totals must
+    # remain unique rather than growing with the span length.
+    indexable_units = [unit for unit in units if bool(unit.get("should_index_for_rag"))]
+    skipped_units = [unit for unit in units if not bool(unit.get("should_index_for_rag"))]
+    total_indexable_units = len(indexable_units)
+    total_chunked_units = sum(1 for unit in indexable_units if _string_list(unit.get("chunk_ids")))
     table_pages = sum(1 for page in pages if _safe_int(page.get("table_count"), default=0) > 0)
     table_pages_with_units = sum(
         1
@@ -1106,8 +1143,6 @@ def _coverage_summary(
         or _string_list(page.get("table_ids_without_units"))
         or _string_list(page.get("figure_ids_missing_caption"))
     ]
-    indexable_units = [unit for unit in units if bool(unit.get("should_index_for_rag"))]
-    skipped_units = [unit for unit in units if not bool(unit.get("should_index_for_rag"))]
     embedded_units = [unit for unit in indexable_units if bool(unit.get("embedded"))]
     unembedded_units = [
         unit

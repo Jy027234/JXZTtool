@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from concurrent.futures import Future
+from dataclasses import dataclass, replace
+import hashlib
 import importlib
+import importlib.util
+import inspect
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from threading import RLock
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -112,6 +123,36 @@ _DOCX_HEADER_FOOTER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _OCR_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+# Pages with explicit table/figure markers are the most useful targets for
+# the expensive pdfplumber pass.  The adaptive route keeps those pages (and
+# pages that need OCR) on the full-fidelity path while leaving ordinary
+# native-text pages on the pypdf path.
+_PDF_LAYOUT_HINT_PATTERN = re.compile(
+    r"\b(?:tables?|removal\s+table|installation\s+table|part\s+number|"
+    r"fig[-\s]?item|figures?|units\s+per\s+ass(?:y|embly)|"
+    r"illustrated\s+parts\s+list)\b|图\s*\d",
+    re.IGNORECASE,
+)
+_PDF_STRONG_TABLE_LAYOUT_HINT_PATTERN = re.compile(
+    r"\b(?:removal\s+table|installation\s+table|fig[-\s]?item)\b",
+    re.IGNORECASE,
+)
+_PDF_PROCEDURE_TABLE_LINE_PATTERN = re.compile(
+    r"\b(?:removal|installation)\s+procedures?\s+tables?\s+of\s+the\s+"
+    r"harness\s+components\.",
+    re.IGNORECASE,
+)
+_PDF_PART_NUMBER_TABLE_HEADER_PATTERN = re.compile(
+    r"^\s*part\s+number\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PDF_FIGURE_LAYOUT_HINT_PATTERN = re.compile(
+    r"\b(?:fig[-\s]?item|figures?|illustrated\s+parts\s+list|"
+    r"image|photo|chart|diagram|part\s+number)\b|图\s*\d",
+    re.IGNORECASE,
+)
+_PDF_LAYOUT_COLUMN_SPLIT_PATTERN = re.compile(r"\s{2,}|\t|\|")
 
 
 @dataclass(slots=True)
@@ -1165,7 +1206,9 @@ def _build_markdown_provider_blocks(
     page_chunks: Sequence[tuple[int, str]],
     detect_tables: bool,
     source_kind: str,
+    provider_runtime_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Block, ...]:
+    runtime_metadata = dict(provider_runtime_metadata or {})
     blocks: list[Block] = [
         Block(
             block_id=f"{request.doc_id}-title",
@@ -1180,6 +1223,8 @@ def _build_markdown_provider_blocks(
             }, parser_name=provider_name, provider_id=provider_name, provider_version=provider_version),
         )
     ]
+    if runtime_metadata:
+        blocks[0].metadata.update(runtime_metadata)
     position = 1
     table_index_by_page: dict[int, int] = {}
     for page_number, markdown in page_chunks:
@@ -1229,8 +1274,53 @@ def _build_markdown_provider_blocks(
     return tuple(blocks)
 
 
+# Keep provider-specific tuning opt-in and explicit.  The default adapter
+# behavior remains unchanged; these knobs are exposed so offline comparison
+# can test page-level fallback candidates without smuggling arbitrary config
+# keys into the third-party call.
+_PYMUPDF4LLM_OPTION_KEYS = {
+    "write_images",
+    "embed_images",
+    "ignore_images",
+    "ignore_graphics",
+    "detect_bg_color",
+    "image_path",
+    "image_format",
+    "image_size_limit",
+    "force_text",
+    "page_separators",
+    "margins",
+    "dpi",
+    "page_width",
+    "page_height",
+    "table_strategy",
+    "graphics_limit",
+    "fontsize_limit",
+    "ignore_code",
+    "extract_words",
+    "show_progress",
+    "use_glyphs",
+    "ignore_alpha",
+}
+
+
 class DoclingParser(ParserAdapter):
     name = "docling-local"
+
+    _PIPELINE_OPTION_KEYS = {
+        "document_timeout",
+        "do_ocr",
+        "do_table_structure",
+        "force_backend_text",
+        "generate_page_images",
+        "generate_picture_images",
+        "generate_parsed_pages",
+        "images_scale",
+        "ocr_batch_size",
+        "layout_batch_size",
+        "table_batch_size",
+        "queue_max_size",
+    }
 
     def __init__(
         self,
@@ -1243,6 +1333,22 @@ class DoclingParser(ParserAdapter):
         self._extensions = {item.lower() for item in extensions}
         opts = dict(options or {})
         self._detect_tables = bool(opts.get("detect_tables", True))
+        # Constructing a Docling converter can load sizeable layout/parse
+        # resources.  Reuse is deliberately opt-in because third-party
+        # converter thread-safety is version-dependent; the production route
+        # and existing default behavior continue to create an instance per
+        # parse.  Candidate profiles that run many page-part retries can turn
+        # this on after a bounded warm/cold comparison.
+        self._reuse_converter = bool(opts.get("reuse_converter", False))
+        self._converter_lock = RLock()
+        self._converter: Any | None = None
+        self._converter_cls: Any | None = None
+        self._converter_provider_version: str | None = None
+        self._pipeline_options = {
+            key: opts[key]
+            for key in self._PIPELINE_OPTION_KEYS
+            if key in opts
+        }
         self._page_range = _normalize_docling_page_range(opts.get("page_range"))
         self._max_num_pages = _positive_int_or_none(opts.get("max_num_pages"))
         self._max_file_size = _positive_int_or_none(opts.get("max_file_size"))
@@ -1253,9 +1359,36 @@ class DoclingParser(ParserAdapter):
         normalized_suffix = suffix.lower()
         return normalized_type in self._media_types or normalized_suffix in self._extensions
 
-    def parse(self, request: ParseRequest) -> Sequence[Block]:
+    def _get_converter(self) -> tuple[Any, str | None, bool]:
         converter_cls, provider_version = _load_docling_document_converter()
-        converter = converter_cls()
+        if not self._reuse_converter:
+            return (
+                _build_docling_converter(
+                    converter_cls,
+                    pipeline_options=self._pipeline_options,
+                ),
+                provider_version,
+                False,
+            )
+        with self._converter_lock:
+            cache_hit = (
+                self._converter is not None
+                and self._converter_cls is converter_cls
+                and self._converter_provider_version == provider_version
+            )
+            if (
+                not cache_hit
+            ):
+                self._converter = _build_docling_converter(
+                    converter_cls,
+                    pipeline_options=self._pipeline_options,
+                )
+                self._converter_cls = converter_cls
+                self._converter_provider_version = provider_version
+            return self._converter, self._converter_provider_version, cache_hit
+
+    def parse(self, request: ParseRequest) -> Sequence[Block]:
+        converter, provider_version, converter_cache_hit = self._get_converter()
         conversion_result = _docling_convert(
             converter,
             request.file_path,
@@ -1272,6 +1405,10 @@ class DoclingParser(ParserAdapter):
             page_chunks=page_chunks,
             detect_tables=self._detect_tables,
             source_kind="docling_markdown",
+            provider_runtime_metadata={
+                "converter_reuse_enabled": self._reuse_converter,
+                "converter_cache_hit": converter_cache_hit,
+            },
         )
 
 
@@ -1290,6 +1427,11 @@ class PyMuPdf4LlmParser(ParserAdapter):
         opts = dict(options or {})
         self._page_chunks = bool(opts.get("page_chunks", True))
         self._detect_tables = bool(opts.get("detect_tables", True))
+        self._markdown_options = {
+            key: opts[key]
+            for key in _PYMUPDF4LLM_OPTION_KEYS
+            if key in opts
+        }
 
     def supports(self, *, media_type: str | None, suffix: str) -> bool:
         normalized_type = (media_type or "").lower()
@@ -1303,6 +1445,7 @@ class PyMuPdf4LlmParser(ParserAdapter):
             module,
             request.file_path,
             page_chunks=self._page_chunks,
+            options=self._markdown_options,
         )
         page_chunks = _normalize_pymupdf4llm_pages(markdown_result)
         return _build_markdown_provider_blocks(
@@ -1391,6 +1534,40 @@ class PdfTextParser(ParserAdapter):
         self._layout_reading_order_enabled = bool(
             post_process.get("layout_reading_order", self._dual_channel_enabled)
         )
+        # A3+.1: run the expensive layout/table/figure pass only on pages
+        # that show layout evidence.  This stays opt-in at the library level;
+        # the product config enables it for the default PDF route.  Explicit
+        # request-level layout/dual-channel overrides force the full pass.
+        self._adaptive_dual_channel_enabled = bool(
+            post_process.get("adaptive_dual_channel", False)
+        )
+        self._adaptive_dual_channel_max_page_ratio = float(
+            post_process.get("adaptive_dual_channel_max_page_ratio", 0.85)
+        )
+        self._adaptive_dual_channel_min_pages = int(
+            post_process.get("adaptive_dual_channel_min_pages", 8)
+        )
+        self._adaptive_ocr_cache_fast_path = bool(
+            post_process.get("adaptive_ocr_cache_fast_path", True)
+        )
+        # Small in-process cache for retries/reparses of the same immutable
+        # source.  The key includes the tenant, source file fingerprint and
+        # all request options (but not the document ID), so duplicate uploads
+        # can reuse work safely.  Cache hits rebind block IDs to the current
+        # request. Concurrent misses for the same key are coalesced through a
+        # single-flight Future. Disabled at library level; enabled in product
+        # config.
+        self._parse_cache_enabled = bool(post_process.get("parse_cache", False))
+        self._parse_cache_max_entries = max(
+            0, int(post_process.get("parse_cache_max_entries", 2))
+        )
+        self._parse_cache: OrderedDict[tuple[Any, ...], tuple[Block, ...]] = OrderedDict()
+        self._parse_inflight: dict[tuple[Any, ...], Future[tuple[Block, ...]]] = {}
+        self._parse_cache_lock = RLock()
+        self._source_fingerprint_cache: OrderedDict[tuple[str, int, int], str] = OrderedDict()
+        self._source_fingerprint_cache_max_entries = max(
+            4, self._parse_cache_max_entries * 4
+        )
         self._dual_table_min_rows = int(
             post_process.get("dual_table_min_rows", 2)
         )
@@ -1443,10 +1620,15 @@ class PdfTextParser(ParserAdapter):
         # active; can be opted out via ``ocr_cache = false`` in post_process.
         _ocr_cache_enabled = bool(post_process.get("ocr_cache", self._ocr_bad_pages_enabled))
         _ocr_cache_ttl = int(post_process.get("ocr_cache_ttl_days", 7)) * 86400
+        # ``PageOcrCache(cache_dir=None)`` selects its default on-disk cache;
+        # use an explicitly disabled instance for a configured opt-out.  Keep
+        # it on the parser so a request can also bypass OCR cache reads and
+        # writes without mutating the shared/default cache.
+        self._disabled_ocr_cache = PageOcrCache(cache_dir="", ttl_seconds=0)
         self._ocr_cache: PageOcrCache = (
             get_default_cache()
             if _ocr_cache_enabled
-            else PageOcrCache(cache_dir=None)
+            else self._disabled_ocr_cache
         )
         # B3 override: apply fidelity_profile coarse flags after all individual
         # flag reads so it acts as a final override when explicitly set.
@@ -1468,6 +1650,206 @@ class PdfTextParser(ParserAdapter):
         normalized_type = (media_type or "").lower()
         normalized_suffix = suffix.lower()
         return normalized_type in self._media_types or normalized_suffix in self._extensions
+
+    def _source_file_fingerprint(
+        self,
+        source_path: str,
+        stat: Any,
+    ) -> str | None:
+        """Return a cached content digest for one immutable file snapshot."""
+        fingerprint_key = (
+            source_path,
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        )
+        with self._parse_cache_lock:
+            cached = self._source_fingerprint_cache.pop(fingerprint_key, None)
+            if cached is not None:
+                self._source_fingerprint_cache[fingerprint_key] = cached
+                return cached
+        try:
+            digest = hashlib.sha256()
+            with Path(source_path).open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            fingerprint = digest.hexdigest()
+        except OSError:
+            return None
+        with self._parse_cache_lock:
+            self._source_fingerprint_cache[fingerprint_key] = fingerprint
+            self._source_fingerprint_cache.move_to_end(fingerprint_key)
+            while len(self._source_fingerprint_cache) > self._source_fingerprint_cache_max_entries:
+                self._source_fingerprint_cache.popitem(last=False)
+        return fingerprint
+
+    def _parse_cache_key(self, request: ParseRequest) -> tuple[Any, ...] | None:
+        if (
+            not self._parse_cache_enabled
+            or self._parse_cache_max_entries <= 0
+            or _resolve_request_parse_cache(request) is False
+        ):
+            return None
+        try:
+            source_path = str(Path(request.file_path).resolve())
+            stat = Path(source_path).stat()
+        except OSError:
+            return None
+        source_fingerprint = self._source_file_fingerprint(source_path, stat)
+        if source_fingerprint is None:
+            return None
+        options_repr = repr(
+            sorted(
+                ((str(key), repr(value)) for key, value in request.options.items()),
+                key=lambda item: item[0],
+            )
+        )
+        return (
+            str(request.tenant_id or ""),
+            source_fingerprint,
+            int(stat.st_size),
+            options_repr,
+        )
+
+    @staticmethod
+    def _rebind_cached_blocks(
+        blocks: Sequence[Block],
+        request: ParseRequest,
+    ) -> tuple[Block, ...]:
+        """Bind source-derived cached blocks to the current document request.
+
+        The parser's block IDs are deterministic descendants of the document
+        ID (for example ``<doc>-p-12``).  Cache entries intentionally omit the
+        document ID so an identical source can be reparsed under a new task;
+        clone metadata as well so callers cannot mutate the cached template.
+        """
+        if not blocks:
+            return tuple()
+        source_doc_ids = {
+            str(block.doc_id)
+            for block in blocks
+            if str(block.doc_id)
+        }
+        source_doc_id = next(iter(source_doc_ids), "")
+        current_doc_id = str(request.doc_id)
+        source_prefix = f"{source_doc_id}-" if source_doc_id else ""
+        id_mapping: dict[str, str] = {}
+        for block in blocks:
+            old_block_id = str(block.block_id)
+            new_block_id = old_block_id
+            if source_prefix and old_block_id.startswith(source_prefix):
+                new_block_id = f"{current_doc_id}{old_block_id[len(source_doc_id):]}"
+            id_mapping[old_block_id] = new_block_id
+
+        def _rebind_block_id(value: Any) -> str:
+            normalized = str(value)
+            if source_prefix and normalized.startswith(source_prefix):
+                return f"{current_doc_id}{normalized[len(source_doc_id):]}"
+            return id_mapping.get(normalized, normalized)
+
+        rebound: list[Block] = []
+        for block in blocks:
+            block_id = _rebind_block_id(block.block_id)
+            metadata = dict(block.metadata or {})
+            merged_block_ids = metadata.get("merged_block_ids")
+            if isinstance(merged_block_ids, (list, tuple)):
+                metadata["merged_block_ids"] = [
+                    _rebind_block_id(item) for item in merged_block_ids
+                ]
+            rebound.append(
+                Block(
+                    block_id=block_id,
+                    doc_id=current_doc_id,
+                    type=block.type,
+                    content=block.content,
+                    metadata=metadata,
+                )
+            )
+        return tuple(rebound)
+
+    def _get_cached_blocks(self, request: ParseRequest) -> tuple[Block, ...] | None:
+        key = self._parse_cache_key(request)
+        if key is None:
+            return None
+        with self._parse_cache_lock:
+            blocks = self._parse_cache.pop(key, None)
+            if blocks is not None:
+                self._parse_cache[key] = blocks
+            return blocks
+
+    def _store_cached_blocks(
+        self,
+        request: ParseRequest,
+        blocks: Sequence[Block],
+    ) -> None:
+        key = self._parse_cache_key(request)
+        if key is None:
+            return
+        cached = tuple(blocks)
+        with self._parse_cache_lock:
+            self._parse_cache[key] = cached
+            self._parse_cache.move_to_end(key)
+            while len(self._parse_cache) > self._parse_cache_max_entries:
+                self._parse_cache.popitem(last=False)
+
+    def _acquire_parse_flight(
+        self,
+        key: tuple[Any, ...],
+    ) -> tuple[Future[tuple[Block, ...]], bool]:
+        """Return a shared future and whether this caller owns the parse."""
+        with self._parse_cache_lock:
+            flight = self._parse_inflight.get(key)
+            if flight is not None:
+                return flight, False
+            flight = Future()
+            self._parse_inflight[key] = flight
+            return flight, True
+
+    def _finish_parse_flight(
+        self,
+        key: tuple[Any, ...],
+        flight: Future[tuple[Block, ...]],
+        *,
+        result: Sequence[Block] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Publish one parse result/error and release the source flight."""
+        with self._parse_cache_lock:
+            if self._parse_inflight.get(key) is not flight:
+                return
+            if error is not None:
+                flight.set_exception(error)
+            else:
+                flight.set_result(tuple(result or ()))
+            self._parse_inflight.pop(key, None)
+
+    @staticmethod
+    def _annotate_parse_cache_state(
+        blocks: Sequence[Block],
+        *,
+        hit: bool,
+        enabled: bool = True,
+    ) -> tuple[Block, ...]:
+        """Attach cold/warm parse-cache telemetry without polluting the cache.
+
+        Cached templates are deliberately kept request-agnostic.  The
+        annotation is added only to the blocks returned to the current caller,
+        so a later request can receive its own ``cold``/``warm`` observation
+        while block IDs and document IDs remain safely rebound.
+        """
+        if not blocks:
+            return tuple()
+        result = list(blocks)
+        first = result[0]
+        metadata = dict(first.metadata or {})
+        metadata.update(
+            {
+                "parse_cache_enabled": bool(enabled),
+                "parse_cache_hit": bool(enabled and hit),
+                "parse_cache_state": "warm" if enabled and hit else "cold" if enabled else "disabled",
+            }
+        )
+        result[0] = replace(first, metadata=metadata)
+        return tuple(result)
 
     def _ensure_pdf_ocr_engine(self) -> tuple[Any | None, str | None, float]:
         started = time.monotonic()
@@ -1496,6 +1878,23 @@ class PdfTextParser(ParserAdapter):
             min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
             min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
         )
+        # A pure image page has no CID/garble tokens for the normal detector
+        # to match.  When pdfplumber confirms that the page carries an image,
+        # treat empty native text as an explicit OCR candidate instead of
+        # failing the whole document with ``No extractable text found``.
+        if reason in {None, "empty_text"} and not str(extracted_text or "").strip():
+            try:
+                has_page_image = bool(getattr(page, "images", ()) or ())
+            except Exception:
+                has_page_image = False
+            if has_page_image:
+                reason = "native_text_empty"
+            else:
+                # A truly blank/vector-only page has nothing for the image
+                # OCR engine to read.  Avoid paying the OCR startup/render
+                # cost for those pages while preserving the explicit
+                # ``native_text_empty`` path for image-only scans.
+                return None, None, None, timings
         if reason is None:
             return None, None, None, timings
         attempt_started = time.monotonic()
@@ -1534,10 +1933,58 @@ class PdfTextParser(ParserAdapter):
         return text, reason, None, timings
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
+        cached_blocks = self._get_cached_blocks(request)
+        if cached_blocks is not None:
+            return self._annotate_parse_cache_state(
+                self._rebind_cached_blocks(cached_blocks, request),
+                hit=True,
+            )
+
+        cache_key = self._parse_cache_key(request)
+        if cache_key is None:
+            result = self._parse_uncached(request)
+            if _resolve_request_parse_cache(request) is False:
+                return self._annotate_parse_cache_state(result, hit=False, enabled=False)
+            return result
+        flight, is_owner = self._acquire_parse_flight(cache_key)
+        if not is_owner:
+            return self._annotate_parse_cache_state(
+                self._rebind_cached_blocks(flight.result(), request),
+                hit=True,
+            )
+        try:
+            # Another owner may have completed between the initial cache
+            # lookup and flight acquisition. Recheck before heavy work.
+            cached_blocks = self._get_cached_blocks(request)
+            if cached_blocks is not None:
+                self._finish_parse_flight(cache_key, flight, result=cached_blocks)
+                return self._annotate_parse_cache_state(
+                    self._rebind_cached_blocks(cached_blocks, request),
+                    hit=True,
+                )
+            result = tuple(self._parse_uncached(request))
+        except BaseException as exc:
+            self._finish_parse_flight(cache_key, flight, error=exc)
+            raise
+        self._finish_parse_flight(cache_key, flight, result=result)
+        return self._annotate_parse_cache_state(result, hit=False)
+
+    def _parse_uncached(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
         request_enable_ocr = _resolve_request_enable_ocr(request)
         request_dual_channel = _resolve_request_dual_channel(request)
         request_layout_reading_order = _resolve_request_layout_reading_order(request)
+        request_ocr_cache = _resolve_request_ocr_cache(request)
+        effective_ocr_cache = (
+            self._disabled_ocr_cache
+            if request_ocr_cache is False
+            else get_default_cache()
+            if request_ocr_cache is True
+            else self._ocr_cache
+        )
+        effective_ocr_cache_fast_path = bool(
+            self._adaptive_ocr_cache_fast_path and effective_ocr_cache.enabled
+        )
         fast_text_profile = _uses_pdf_fast_text_profile(request)
         effective_ocr_bad_pages_enabled = (
             self._ocr_bad_pages_enabled
@@ -1584,6 +2031,54 @@ class PdfTextParser(ParserAdapter):
         reader = PdfReader(request.file_path)
         page_texts = [page.extract_text() or "" for page in reader.pages]
         layout_pages: list[_PageLayout] = []
+        layout_strategy = "full"
+        layout_candidate_page_count: int | None = None
+        adaptive_layout_page_numbers: set[int] | None = None
+        adaptive_table_page_numbers: set[int] | None = None
+        adaptive_figure_page_numbers: set[int] | None = None
+        adaptive_word_page_numbers: set[int] | None = None
+        adaptive_profile = str(request.options.get("profile") or "").strip().lower()
+        adaptive_allowed = (
+            self._adaptive_dual_channel_enabled
+            and effective_dual_channel_enabled
+            and request_dual_channel is not True
+            and request_layout_reading_order is not True
+            and request_enable_ocr is not True
+            and not fast_text_profile
+            and adaptive_profile
+            not in {"table-heavy", "scan-pdf", "large-pdf-ledger"}
+        )
+        if adaptive_allowed:
+            adaptive_layout_work = _select_pdf_layout_work(
+                page_texts,
+                reader.pages,
+                min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
+                min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
+                max_page_ratio=self._adaptive_dual_channel_max_page_ratio,
+                min_pages=self._adaptive_dual_channel_min_pages,
+            )
+            if adaptive_layout_work is None:
+                layout_strategy = "full-fallback"
+            else:
+                (
+                    adaptive_layout_page_numbers,
+                    adaptive_table_page_numbers,
+                    adaptive_figure_page_numbers,
+                ) = adaptive_layout_work
+                adaptive_word_page_numbers = set(adaptive_layout_page_numbers)
+                adaptive_word_page_numbers.difference_update(
+                    set(adaptive_table_page_numbers)
+                    - set(adaptive_figure_page_numbers)
+                )
+            if adaptive_layout_work is not None and not adaptive_layout_page_numbers:
+                # No page has layout/OCR evidence.  pypdf already supplied
+                # the native text, so avoid opening pdfplumber altogether.
+                effective_dual_channel_enabled = False
+                layout_strategy = "adaptive-native-text"
+                layout_candidate_page_count = 0
+            elif adaptive_layout_work is not None:
+                layout_strategy = "adaptive-selective"
+                layout_candidate_page_count = len(adaptive_layout_page_numbers)
         if effective_dual_channel_enabled:
             ocr_page_text_fn = self._maybe_recover_page_with_ocr if effective_ocr_bad_pages_enabled else None
             layout_pages = _extract_pdfplumber_layout(
@@ -1592,7 +2087,12 @@ class PdfTextParser(ParserAdapter):
                 min_cols=self._dual_table_min_cols,
                 layout_reading_order_enabled=effective_layout_reading_order_enabled,
                 ocr_page_text_fn=ocr_page_text_fn,
-                ocr_cache=self._ocr_cache,
+                ocr_cache=effective_ocr_cache,
+                ocr_cache_fast_path=effective_ocr_cache_fast_path,
+                page_numbers=adaptive_layout_page_numbers,
+                table_page_numbers=adaptive_table_page_numbers,
+                figure_page_numbers=adaptive_figure_page_numbers,
+                word_page_numbers=adaptive_word_page_numbers,
             )
             # Replace per-page text with the table-stripped pdfplumber text so
             # the existing splitters do not see table contents twice.
@@ -1626,9 +2126,17 @@ class PdfTextParser(ParserAdapter):
                     "page_type": "body",
                     "semantic_role": SemanticRole.TITLE.value,
                     "ocr_strategy": ocr_strategy,
+                    "pdf_layout_strategy": layout_strategy,
                 }, parser_name=self.name),
             )
         ]
+        if layout_candidate_page_count is not None:
+            blocks[0].metadata["pdf_layout_candidate_page_count"] = layout_candidate_page_count
+            blocks[0].metadata["pdf_layout_total_page_count"] = len(page_texts)
+            if adaptive_word_page_numbers is not None:
+                blocks[0].metadata["pdf_layout_word_page_count"] = len(
+                    adaptive_word_page_numbers
+                )
         if fast_text_profile:
             blocks[0].metadata["profile_fast_text_path"] = True
         position = 1
@@ -1689,6 +2197,46 @@ class PdfTextParser(ParserAdapter):
             )
             sequence = _build_page_content_sequence(paragraphs, page_layout=page_layout)
             if not sequence:
+                # Keep an explicit, non-indexable page artifact for every
+                # page that has no usable text.  OCR failures use a dedicated
+                # reason; genuinely blank/vector-only pages use
+                # ``page_without_extractable_content``.  Previously both
+                # paths could silently drop the page and raise a document-
+                # level ``No extractable text`` error, losing page evidence.
+                ocr_empty = page_layout is not None and bool(page_layout.ocr_attempt_reason)
+                placeholder_metadata = _provider_metadata(
+                    {
+                        "page": page_number,
+                        "page_type": page_type,
+                        "position": position,
+                        "kind": "ocr_placeholder" if ocr_empty else "empty_page",
+                        "semantic_role": SemanticRole.PARSE_ARTIFACT.value,
+                        "index_policy": "skip",
+                        "quality_flags": ["ocr_empty_text" if ocr_empty else "empty_page"],
+                        "missing_reason": "ocr_empty_text" if ocr_empty else "page_without_extractable_content",
+                    },
+                    parser_name=self.name,
+                )
+                if ocr_empty:
+                    placeholder_metadata.update(
+                        {
+                            "ocr_attempted": True,
+                            "ocr_attempt_reason": page_layout.ocr_attempt_reason,
+                            "ocr_error_reason": page_layout.ocr_error_reason or "empty_ocr_text",
+                        }
+                    )
+                if page_layout is not None:
+                    _attach_page_layout_metadata(placeholder_metadata, page_layout)
+                blocks.append(
+                    Block(
+                        block_id=f"{request.doc_id}-ocr-{position}" if ocr_empty else f"{request.doc_id}-empty-{position}",
+                        doc_id=request.doc_id,
+                        type=BlockType.PARAGRAPH,
+                        content="",
+                        metadata=placeholder_metadata,
+                    )
+                )
+                position += 1
                 continue
             for kind, item_index in sequence:
                 if kind == "table":
@@ -1782,7 +2330,9 @@ class PdfTextParser(ParserAdapter):
             blocks = _merge_cross_page_paragraph_blocks(blocks)
         if len(blocks) == 1:
             raise RuntimeError("No extractable text found in PDF")
-        return tuple(blocks)
+        result = tuple(blocks)
+        self._store_cached_blocks(request, result)
+        return result
 
 
 def _split_pdf_page_text(text: str) -> list[str]:
@@ -1829,6 +2379,12 @@ def _merge_cross_page_paragraph_blocks(blocks: Sequence[Block]) -> list[Block]:
             current_page = _block_page(block)
             metadata = dict(previous.metadata)
             metadata["page_end"] = current_page
+            # Preserve the complete physical page span when a paragraph is
+            # merged across a page boundary.  Downstream IR/coverage views
+            # use this span to keep every source page auditable even though
+            # the semantic unit is represented as one paragraph block.
+            previous_start_page = _block_page(previous) or current_page
+            metadata["page_span"] = [previous_start_page, current_page]
             metadata["cross_page_continuation"] = True
             block_ids = list(metadata.get("merged_block_ids") or [previous.block_id])
             block_ids.append(block.block_id)
@@ -2027,6 +2583,7 @@ def _extract_pdf_figure_regions(
     *,
     page_number: int,
     table_bboxes: Sequence[tuple[float, float, float, float]],
+    words: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[_FigureRegion]:
     page_width = float(page.width or 0.0)
     page_height = float(page.height or 0.0)
@@ -2040,7 +2597,7 @@ def _extract_pdf_figure_regions(
     if not raw_images:
         return []
 
-    text_lines = _extract_pdf_text_lines(page)
+    text_lines = _extract_pdf_text_lines(page, words=words)
     figure_regions: list[_FigureRegion] = []
     for raw_image in raw_images:
         bbox = _extract_pdf_object_bbox(raw_image, page_height=page_height)
@@ -2197,11 +2754,16 @@ def _bbox_overlap_ratio(
     return _bbox_intersection_area(bbox, other) / bbox_area
 
 
-def _extract_pdf_text_lines(page: Any) -> list[_PdfTextLine]:
-    try:
-        words = page.extract_words() or []
-    except Exception:
-        return []
+def _extract_pdf_text_lines(
+    page: Any,
+    *,
+    words: Sequence[Mapping[str, Any]] | None = None,
+) -> list[_PdfTextLine]:
+    if words is None:
+        try:
+            words = page.extract_words() or []
+        except Exception:
+            return []
     if not words:
         return []
 
@@ -2638,6 +3200,36 @@ def _resolve_request_enable_ocr(request: ParseRequest) -> bool | None:
     return bool(value)
 
 
+def _resolve_request_parse_cache(request: ParseRequest) -> bool | None:
+    """Return a request-scoped in-process parse-cache override.
+
+    The direct option is intentionally accepted for tooling callers; the
+    nested ``post_process`` form aligns with the parser configuration shape.
+    ``False`` bypasses both cache reads and writes for this request.
+    """
+    if "parse_cache" in request.options:
+        return _coerce_optional_bool(request.options.get("parse_cache"))
+    post_process = request.options.get("post_process")
+    if isinstance(post_process, Mapping) and "parse_cache" in post_process:
+        return _coerce_optional_bool(post_process.get("parse_cache"))
+    return None
+
+
+def _resolve_request_ocr_cache(request: ParseRequest) -> bool | None:
+    """Return a request-scoped page OCR-cache override.
+
+    ``False`` keeps OCR behavior intact while bypassing the persistent cache;
+    ``True`` enables the default persistent cache for this request.  Both
+    forms are useful to distinguish cold and OCR-warm performance lanes.
+    """
+    if "ocr_cache" in request.options:
+        return _coerce_optional_bool(request.options.get("ocr_cache"))
+    post_process = request.options.get("post_process")
+    if isinstance(post_process, Mapping) and "ocr_cache" in post_process:
+        return _coerce_optional_bool(post_process.get("ocr_cache"))
+    return None
+
+
 def _resolve_request_dual_channel(request: ParseRequest) -> bool | None:
     post_process = request.options.get("post_process")
     if isinstance(post_process, Mapping) and "dual_channel" in post_process:
@@ -3058,19 +3650,38 @@ def _load_pymupdf4llm():
         raise RuntimeError("pymupdf4llm is required for pymupdf4llm-local parser") from exc
 
 
-def _pymupdf4llm_to_markdown(module: Any, file_path: str, *, page_chunks: bool) -> Any:
+def _pymupdf4llm_to_markdown(
+    module: Any,
+    file_path: str,
+    *,
+    page_chunks: bool,
+    options: Mapping[str, Any] | None = None,
+) -> Any:
     to_markdown = getattr(module, "to_markdown", None)
     if not callable(to_markdown):
         raise RuntimeError("pymupdf4llm.to_markdown is required for pymupdf4llm-local parser")
-    if page_chunks:
-        try:
-            return to_markdown(file_path, page_chunks=True)
-        except TypeError:
-            return to_markdown(file_path)
-    return to_markdown(file_path)
+    kwargs = dict(options or {})
+    kwargs["page_chunks"] = bool(page_chunks)
+    try:
+        signature = inspect.signature(to_markdown)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in signature.parameters
+            }
+    return to_markdown(file_path, **kwargs)
 
 
 def _load_docling_document_converter() -> tuple[Any, str | None]:
+    _prepare_docling_parse_import_path()
     try:
         docling_module = importlib.import_module("docling")
         converter_module = importlib.import_module("docling.document_converter")
@@ -3080,6 +3691,172 @@ def _load_docling_document_converter() -> tuple[Any, str | None]:
     if converter_cls is None:
         raise RuntimeError("docling.document_converter.DocumentConverter is required for docling-local parser")
     return converter_cls, getattr(docling_module, "__version__", None)
+
+
+def _build_docling_converter(
+    converter_cls: Any,
+    *,
+    pipeline_options: Mapping[str, Any] | None = None,
+) -> Any:
+    """Build a Docling converter with optional PDF pipeline tuning.
+
+    The default adapter path intentionally calls ``DocumentConverter()`` with
+    no arguments.  Candidate-only performance experiments can opt into the
+    documented PDF pipeline switches without affecting DOCX conversion or the
+    production route.  Unknown keys are filtered by ``DoclingParser`` before
+    this helper is reached, while Pydantic validates values supported by the
+    installed Docling release.
+    """
+    options = dict(pipeline_options or {})
+    if not options:
+        return converter_cls()
+    try:
+        from docling.datamodel.base_models import InputFormat
+        try:
+            from docling.datamodel.pipeline_options import ThreadedPdfPipelineOptions
+        except ImportError:
+            # Older supported Docling releases expose the same core switches
+            # on PdfPipelineOptions but do not yet ship the threaded subclass.
+            from docling.datamodel.pipeline_options import (
+                PdfPipelineOptions as ThreadedPdfPipelineOptions,
+            )
+        from docling.document_converter import PdfFormatOption
+
+        declared_fields = getattr(ThreadedPdfPipelineOptions, "model_fields", None)
+        if isinstance(declared_fields, Mapping):
+            options = {
+                key: value
+                for key, value in options.items()
+                if key in declared_fields
+            }
+        pdf_options = ThreadedPdfPipelineOptions(**options)
+        return converter_cls(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+            }
+        )
+    except (ImportError, TypeError, ValueError) as exc:
+        raise RuntimeError("invalid docling PDF pipeline options") from exc
+
+
+_DOCLING_PARSE_RUNTIME_DIR: Path | None = None
+
+
+def _path_is_ascii(value: str | Path) -> bool:
+    try:
+        str(value).encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _module_path(module: Any) -> Path | None:
+    raw_path = getattr(module, "__file__", None)
+    if not raw_path:
+        return None
+    try:
+        # Do not call ``resolve`` here: resolving a Windows junction would
+        # turn the intentionally ASCII import path back into the original
+        # Unicode target and cause needless module purges on every parse.
+        return Path(os.path.abspath(str(raw_path)))
+    except (OSError, TypeError, ValueError):
+        return Path(str(raw_path))
+
+
+def _purge_docling_parse_modules() -> None:
+    """Drop a previously imported Unicode-path extension before re-importing it.
+
+    ``docling-parse`` discovers its native resource directory from the loaded
+    extension module path.  If it was imported before the ASCII junction below
+    was installed, retaining that module would keep the broken resource path.
+    """
+    for name in tuple(sys.modules):
+        if name == "docling_parse" or name.startswith("docling_parse."):
+            sys.modules.pop(name, None)
+
+
+def _purge_docling_modules() -> None:
+    """Drop Docling modules that may retain references to the old extension."""
+    for name in tuple(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+
+
+def _prepare_docling_parse_import_path() -> None:
+    """Make docling-parse resources reachable on Windows Unicode workspaces.
+
+    The Windows ``docling-parse`` extension used by the optional Docling
+    provider currently opens bundled glyph resources through a narrow path.  A
+    project installed beneath a non-ASCII directory can therefore fail with a
+    misleading ``additional.dat does not exist`` error even though the file is
+    present.  Importing the package through an ASCII directory junction keeps
+    the native extension path ASCII while preserving the original install.
+
+    This is deliberately lazy and only runs when the installed package path is
+    non-ASCII.  Linux/macOS and already-ASCII environments take the no-op path.
+    """
+    global _DOCLING_PARSE_RUNTIME_DIR
+    if os.name != "nt":
+        return
+
+    loaded = sys.modules.get("docling_parse")
+    loaded_path = _module_path(loaded) if loaded is not None else None
+    if loaded_path is not None and _path_is_ascii(loaded_path):
+        return
+
+    try:
+        spec = importlib.util.find_spec("docling_parse")
+    except (ImportError, AttributeError, ValueError):
+        return
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    if not locations:
+        return
+    package_path = Path(next(iter(locations)))
+    if _path_is_ascii(package_path):
+        return
+
+    if _DOCLING_PARSE_RUNTIME_DIR is None:
+        temp_root = Path(tempfile.gettempdir())
+        if not _path_is_ascii(temp_root):
+            temp_root = Path(os.environ.get("SystemDrive", "C:")) / "parsecore-runtime"
+        digest = hashlib.sha256(str(package_path).encode("utf-8")).hexdigest()[:12]
+        runtime_dir = temp_root / f"parsecore-docling-{digest}"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        junction_path = runtime_dir / "docling_parse"
+        if not junction_path.exists() and not junction_path.is_symlink():
+            try:
+                result = subprocess.run(
+                    [
+                        "cmd",
+                        "/d",
+                        "/c",
+                        f'mklink /J "{junction_path}" "{package_path}"',
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                if result.returncode != 0:
+                    raise OSError(result.stderr.strip() or "mklink_failed")
+            except (OSError, subprocess.SubprocessError):
+                # Junction creation is privilege-free on normal Windows
+                # volumes, but a hardened environment may reject it.  A
+                # one-time copy is slower and larger, yet keeps the provider
+                # usable without weakening the default route safety.
+                shutil.copytree(package_path, junction_path, dirs_exist_ok=True)
+        _DOCLING_PARSE_RUNTIME_DIR = runtime_dir
+
+    # ``docling.document_converter`` may already have imported and retained a
+    # reference to the Unicode-path extension.  Purge both namespaces before
+    # the next import so the converter binds to the ASCII junction as well.
+    if loaded_path is not None:
+        _purge_docling_modules()
+    _purge_docling_parse_modules()
+    runtime_path = str(_DOCLING_PARSE_RUNTIME_DIR)
+    if runtime_path not in sys.path:
+        sys.path.insert(0, runtime_path)
 
 
 def _docling_convert(
@@ -3579,6 +4356,173 @@ def _estimate_token_count(text: str | None) -> int:
     return len(_OCR_TOKEN_RE.findall(str(text or "")))
 
 
+def _select_pdf_layout_work(
+    page_texts: Sequence[str],
+    pages: Sequence[Any],
+    *,
+    min_cid_tokens: int,
+    min_cid_char_ratio: float,
+    max_page_ratio: float,
+    min_pages: int,
+) -> tuple[set[int], set[int], set[int]] | None:
+    """Select layout pages and the expensive work required on each page.
+
+    ``None`` means that the document is too small or too layout-heavy for a
+    selective pass, so callers should retain the historical full-document
+    behaviour.  The tuple contains ``(layout_pages, table_pages,
+    figure_pages)``.  An empty first set is a deliberate fast path: no page
+    has evidence of tables, figures, columns, or OCR-worthy text.
+
+    The detector intentionally uses only the native text already extracted by
+    pypdf plus a cheap image-count hint.  It is conservative around common
+    aviation/manual markers (tables, part numbers, FIG-ITEM) and retains all
+    pages with OCR/empty-text signals.  Product profiles that require strict
+    fidelity bypass this helper before it is called.
+    """
+
+    total_pages = len(page_texts)
+    if total_pages < max(1, int(min_pages)):
+        return None
+
+    selected: set[int] = set()
+    table_pages: set[int] = set()
+    figure_pages: set[int] = set()
+    for page_number, text in enumerate(page_texts, start=1):
+        raw_text = str(text or "")
+        stripped = raw_text.strip()
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        image_count = 0
+        if page_number - 1 < len(pages):
+            page = pages[page_number - 1]
+            try:
+                image_count = _pdf_page_image_count_hint(page)
+            except Exception:
+                image_count = 0
+
+        ocr_reason = _ocr_fallback_reason_for_page(
+            raw_text,
+            min_cid_tokens=min_cid_tokens,
+            min_cid_char_ratio=min_cid_char_ratio,
+        )
+        column_like_lines = sum(
+            1
+            for line in lines
+            if len(_PDF_LAYOUT_COLUMN_SPLIT_PATTERN.split(line)) >= 3
+        )
+        normalized_lines = [line.casefold() for line in lines]
+        has_units_per_assy_header = any(
+            line in {"units per assy", "units per assembly"}
+            or (
+                line == "units"
+                and index + 2 < len(normalized_lines)
+                and normalized_lines[index + 1] == "per"
+                and normalized_lines[index + 2] in {"assy", "assembly"}
+            )
+            for index, line in enumerate(normalized_lines)
+        )
+        has_layout_marker = _PDF_LAYOUT_HINT_PATTERN.search(raw_text) is not None
+        has_strong_table_marker = (
+            _PDF_STRONG_TABLE_LAYOUT_HINT_PATTERN.search(raw_text) is not None
+            or _PDF_PROCEDURE_TABLE_LINE_PATTERN.search(raw_text) is not None
+            or has_units_per_assy_header
+            or (
+                column_like_lines >= 2
+                and _PDF_PART_NUMBER_TABLE_HEADER_PATTERN.search(raw_text) is not None
+            )
+        )
+        has_figure_marker = _PDF_FIGURE_LAYOUT_HINT_PATTERN.search(raw_text) is not None
+
+        # Empty pages with an embedded image can be scanned/image-only pages,
+        # so they stay on the layout route.  Truly empty pages without an
+        # image do not need OCR/layout work and should remain on the fast path.
+        if (
+            (not stripped and image_count > 0)
+            or (ocr_reason is not None and ocr_reason != "empty_text")
+            or has_layout_marker
+            or image_count >= 5
+            or column_like_lines >= 2
+        ):
+            selected.add(page_number)
+        # Generic words such as ``Table 602`` occur throughout narrative
+        # prose and caused expensive table detection on 169 pages in the
+        # representative manual.  Keep those pages on the layout/text route,
+        # but invoke ``find_tables`` only for stronger table markers or clear
+        # multi-column evidence.  The latter remains conservative for ruled
+        # tables whose native text has weak marker vocabulary.
+        if has_strong_table_marker or column_like_lines >= 4:
+            table_pages.add(page_number)
+        if has_figure_marker or image_count >= 5 or (not stripped and image_count > 0):
+            figure_pages.add(page_number)
+
+    ratio = len(selected) / total_pages
+    bounded_max_ratio = max(0.0, min(1.0, float(max_page_ratio)))
+    if ratio > bounded_max_ratio:
+        return None
+    return selected, table_pages & selected, figure_pages & selected
+
+
+def _pdf_page_image_count_hint(page: Any) -> int:
+    """Count top-level PDF image XObjects without materializing image bytes.
+
+    ``pypdf.PageObject.images`` resolves and decodes every image, which is
+    unnecessary for the adaptive selector that only needs a count.  Resource
+    dictionaries are cheap to inspect.  Form XObjects and pages without an
+    inspectable XObject dictionary fall back to the historical property so
+    nested/inline images remain conservative rather than being skipped.
+    """
+
+    try:
+        resources = page.get("/Resources")
+        if resources is None:
+            return len(getattr(page, "images", ()) or ())
+        if hasattr(resources, "get_object"):
+            resources = resources.get_object()
+        xobjects = resources.get("/XObject") if hasattr(resources, "get") else None
+        if xobjects is None:
+            return len(getattr(page, "images", ()) or ())
+        if hasattr(xobjects, "get_object"):
+            xobjects = xobjects.get_object()
+        count = 0
+        has_form = False
+        for reference in xobjects.values():
+            try:
+                image_object = reference.get_object() if hasattr(reference, "get_object") else reference
+                subtype = str(image_object.get("/Subtype") or "")
+            except Exception:
+                return len(getattr(page, "images", ()) or ())
+            if subtype == "/Image":
+                count += 1
+            elif subtype == "/Form":
+                has_form = True
+        if has_form:
+            return len(getattr(page, "images", ()) or ())
+        return count
+    except Exception:
+        return len(getattr(page, "images", ()) or ())
+
+
+def _select_pdf_layout_pages(
+    page_texts: Sequence[str],
+    pages: Sequence[Any],
+    *,
+    min_cid_tokens: int,
+    min_cid_char_ratio: float,
+    max_page_ratio: float,
+    min_pages: int,
+) -> set[int] | None:
+    """Backward-compatible view of :func:`_select_pdf_layout_work`."""
+
+    work = _select_pdf_layout_work(
+        page_texts,
+        pages,
+        min_cid_tokens=min_cid_tokens,
+        min_cid_char_ratio=min_cid_char_ratio,
+        max_page_ratio=max_page_ratio,
+        min_pages=min_pages,
+    )
+    return None if work is None else work[0]
+
+
 def _extract_pdfplumber_layout(
     file_path: str,
     *,
@@ -3590,6 +4534,11 @@ def _extract_pdfplumber_layout(
         tuple[str | None, str | None, str | None, _OcrStageTimings],
     ] | None = None,
     ocr_cache: "PageOcrCache | None" = None,
+    ocr_cache_fast_path: bool = True,
+    page_numbers: set[int] | None = None,
+    table_page_numbers: set[int] | None = None,
+    figure_page_numbers: set[int] | None = None,
+    word_page_numbers: set[int] | None = None,
 ) -> list[_PageLayout]:
     """Extract per-page layout (tables + table-stripped text) using pdfplumber.
 
@@ -3606,37 +4555,117 @@ def _extract_pdfplumber_layout(
     layouts: list[_PageLayout] = []
     with pdfplumber.open(file_path) as document:
         for index, page in enumerate(document.pages, start=1):
+            if page_numbers is not None and index not in page_numbers:
+                # Keep positional alignment with pypdf while avoiding the
+                # expensive table/figure/column work on native-text pages.
+                try:
+                    native_text = page.extract_text() or ""
+                except Exception:
+                    native_text = None
+                layouts.append(
+                    _PageLayout(
+                        page_number=index,
+                        width=float(page.width or 0.0),
+                        height=float(page.height or 0.0),
+                        text_without_tables=native_text,
+                    )
+                )
+                continue
+            # On an adaptive run, OCR-only pages can reuse their cached text
+            # without paying for table detection, figure inspection, or a
+            # second native-text extraction.  Pages that may contain tables
+            # or figures still take the full layout path so the cache cannot
+            # hide structured content.
+            if (
+                ocr_page_text_fn is not None
+                and ocr_cache is not None
+                and ocr_cache.enabled
+                and ocr_cache_fast_path
+                and table_page_numbers is not None
+                and figure_page_numbers is not None
+                and index not in table_page_numbers
+                and index not in figure_page_numbers
+            ):
+                cached_ocr_text = ocr_cache.get(
+                    file_path=file_path,
+                    page_number=index,
+                    provider_tag="rapidocr",
+                    options_repr="",
+                )
+                if cached_ocr_text is not None:
+                    token_count = _estimate_token_count(cached_ocr_text)
+                    layouts.append(
+                        _PageLayout(
+                            page_number=index,
+                            width=float(page.width or 0.0),
+                            height=float(page.height or 0.0),
+                            text_without_tables=cached_ocr_text,
+                            column_count_hint=1,
+                            layout_reading_order_confidence=0.98,
+                            ocr_attempt_reason="cid_dense",
+                            ocr_fallback_reason="cid_dense",
+                            ocr_acceptance_reason="cache_hit",
+                            native_text_token_count=token_count,
+                            final_text_token_count=token_count,
+                        )
+                    )
+                    continue
             page_started = time.monotonic()
             tables: list[_PdfTable] = []
-            try:
-                found = page.find_tables() or []
-            except Exception:  # pragma: no cover - pdfplumber edge cases
-                found = []
             table_bboxes: list[tuple[float, float, float, float]] = []
-            for table in found:
+            if table_page_numbers is None or index in table_page_numbers:
                 try:
-                    cells = table.extract() or []
-                except Exception:
-                    cells = []
-                cells = [
-                    [(cell or "") for cell in row]
-                    for row in cells
-                    if any((cell or "").strip() for cell in row)
-                ]
-                if len(cells) < min_rows:
-                    continue
-                if max((len(row) for row in cells), default=0) < min_cols:
-                    continue
-                bbox = tuple(float(value) for value in table.bbox)
-                tables.append(_PdfTable(bbox=bbox, cells=cells))  # type: ignore[arg-type]
-                table_bboxes.append(bbox)  # type: ignore[arg-type]
-            figure_regions = _extract_pdf_figure_regions(
-                page,
-                page_number=index,
-                table_bboxes=table_bboxes,
+                    found = page.find_tables() or []
+                except Exception:  # pragma: no cover - pdfplumber edge cases
+                    found = []
+                for table in found:
+                    try:
+                        cells = table.extract() or []
+                    except Exception:
+                        cells = []
+                    cells = [
+                        [(cell or "") for cell in row]
+                        for row in cells
+                        if any((cell or "").strip() for cell in row)
+                    ]
+                    if len(cells) < min_rows:
+                        continue
+                    if max((len(row) for row in cells), default=0) < min_cols:
+                        continue
+                    bbox = tuple(float(value) for value in table.bbox)
+                    tables.append(_PdfTable(bbox=bbox, cells=cells))  # type: ignore[arg-type]
+                    table_bboxes.append(bbox)  # type: ignore[arg-type]
+            needs_words = (
+                word_page_numbers is None
+                or index in word_page_numbers
+                or figure_page_numbers is None
+                or index in figure_page_numbers
             )
+            if figure_page_numbers is None or index in figure_page_numbers:
+                if needs_words:
+                    try:
+                        page_words = list(page.extract_words() or [])
+                    except Exception:
+                        page_words = []
+                else:
+                    page_words = []
+                figure_regions = _extract_pdf_figure_regions(
+                    page,
+                    page_number=index,
+                    table_bboxes=table_bboxes,
+                    words=page_words,
+                )
+            else:
+                figure_regions = []
+                if needs_words:
+                    try:
+                        page_words = list(page.extract_words() or [])
+                    except Exception:
+                        page_words = []
+                else:
+                    page_words = []
 
-            column_count_hint = _estimate_column_count(page)
+            column_count_hint = _estimate_column_count(page, words=page_words)
             text_without_tables: str | None
             layout_reading_order_applied = False
             layout_reading_order_strategy: str | None = None
@@ -4175,7 +5204,11 @@ def _extract_text_by_columns(
     return filtered.extract_text() or ""
 
 
-def _estimate_column_count(page: Any) -> int:
+def _estimate_column_count(
+    page: Any,
+    *,
+    words: Sequence[Mapping[str, Any]] | None = None,
+) -> int:
     """Return a conservative page-level column count hint from word x positions.
 
     This is intentionally informational only. It does not change parse order or
@@ -4183,10 +5216,11 @@ def _estimate_column_count(page: Any) -> int:
     the regression report can surface them for human inspection.
     """
 
-    try:
-        words = page.extract_words() or []
-    except Exception:
-        return 1
+    if words is None:
+        try:
+            words = page.extract_words() or []
+        except Exception:
+            return 1
 
     height = float(page.height or 0.0)
     width = float(page.width or 0.0)

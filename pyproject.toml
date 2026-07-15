@@ -38,6 +38,10 @@ pymupdf4llm = [
 docling = [
     "docling>=2.18,<3",
 ]
+local-embedding = [
+    "torch>=2.0,<3",
+    "transformers>=4.40,<5",
+]
 test = [
     "jsonschema>=4.23,<5",
     "pytest>=8,<9",

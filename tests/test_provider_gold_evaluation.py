@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.provider_gold_evaluation import build_gold_evaluation, evaluate_report, score_page
+from tools.provider_gold_evaluation import build_gold_evaluation, evaluate_report, load_gold_corpus, score_page
 from tools.provider_gold_review_queue import build_review_queue, evenly_spaced_pages
 
 
@@ -47,6 +47,34 @@ def _provider(*, provider_id: str = "shadow", table: bool = True, elapsed_s: flo
 
 
 class ProviderGoldEvaluationTests(unittest.TestCase):
+    def test_gold_corpus_import_accepts_pending_snake_case_review_queue(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            queue = root / "queue.json"
+            queue.write_text(json.dumps({
+                "pages": [{
+                    "id": "review-doc-p3",
+                    "document_id": "doc",
+                    "page_number": 3,
+                    "review_status": "pending",
+                    "review": {"reviewer": ""},
+                    "expected": {"anchors": []},
+                }],
+            }), encoding="utf-8")
+            corpus = root / "gold.json"
+            corpus.write_text(json.dumps({
+                "minimum_approved_pages": 50,
+                "imports": [{"path": "queue.json", "review_status": "pending"}],
+                "pages": [],
+            }), encoding="utf-8")
+
+            loaded = load_gold_corpus(corpus)
+
+        self.assertEqual(len(loaded["pages"]), 1)
+        self.assertEqual(loaded["pages"][0]["document_id"], "doc")
+        self.assertEqual(loaded["pages"][0]["page_number"], 3)
+        self.assertEqual(loaded["pages"][0]["review_status"], "pending")
+
     def test_review_queue_remains_pending_and_evenly_covers_each_document(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -226,3 +254,53 @@ extensions = [".txt"]
 
         self.assertFalse(result["promotion"]["shadow"]["eligible_for_canary"])
         self.assertIn("insufficient_human_approved_gold_pages", result["promotion"]["shadow"]["blockers"])
+
+    def test_risk_summary_prioritizes_pending_slow_and_structurally_changed_pages(self) -> None:
+        page = {
+            "id": "gold-p1",
+            "document_id": "doc-1",
+            "page_number": 1,
+            "review_status": "pending",
+            "expected": {},
+        }
+        comparison = {
+            "samples": [{
+                "sample_name": "gold-p1",
+                "providers": [
+                    {
+                        "provider_id": "pdf-text",
+                        "status": "done",
+                        "elapsed_s": 1.0,
+                        "blocks": 2,
+                        "tables": 1,
+                        "provider_report": {"summary": {"total_figures": 1}},
+                    },
+                    {
+                        "provider_id": "shadow",
+                        "status": "done",
+                        "elapsed_s": 2.0,
+                        "blocks": 3,
+                        "tables": 2,
+                        "provider_report": {"summary": {"total_figures": 0}},
+                    },
+                ],
+            }],
+        }
+        corpus = {
+            "pages": [page],
+            "path": "gold.json",
+            "minimum_approved_pages": 50,
+            "minimum_stable_runs": 3,
+            "minimum_score_improvement": 5,
+            "approved_provider_ids": {"pdf-text"},
+        }
+
+        result = evaluate_report(comparison=comparison, corpus=corpus, baseline_provider_id="pdf-text")
+
+        risk = result["risk_summary"]
+        self.assertEqual(risk["sample_count"], 1)
+        self.assertEqual(risk["provider_metrics"]["shadow"]["average_elapsed_s"], 2.0)
+        self.assertEqual(risk["priority_pages"][0]["page_id"], "gold-p1")
+        self.assertIn("candidate_slower_than_baseline", risk["priority_pages"][0]["risk_codes"])
+        self.assertIn("table_count_changed", risk["priority_pages"][0]["risk_codes"])
+        self.assertIn("figure_count_changed", risk["priority_pages"][0]["risk_codes"])

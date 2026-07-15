@@ -45,6 +45,201 @@ def _ratio(matches: int, total: int, *, empty: float = 1.0) -> float:
     return empty if total <= 0 else max(0.0, min(1.0, matches / total))
 
 
+def _mean(values: Sequence[float]) -> float | None:
+    return round(statistics.mean(values), 3) if values else None
+
+
+def _p95(values: Sequence[float]) -> float | None:
+    """Return a deterministic linearly interpolated p95 for small samples."""
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * 0.95
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    value = ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    return round(value, 3)
+
+
+def _provider_figure_count(provider: Mapping[str, Any]) -> int:
+    report = provider.get("provider_report")
+    summary = report.get("summary") if isinstance(report, Mapping) else None
+    if not isinstance(summary, Mapping):
+        return 0
+    return int(summary.get("total_figures") or 0)
+
+
+def _provider_has_coverage_warning(provider: Mapping[str, Any]) -> bool:
+    coverage = provider.get("coverage_summary")
+    rag_quality = provider.get("rag_coverage_quality")
+    coverage = coverage if isinstance(coverage, Mapping) else {}
+    rag_quality = rag_quality if isinstance(rag_quality, Mapping) else {}
+    numeric_flags = (
+        "pages_with_coverage_gaps",
+        "pages_missing_rag_units",
+        "pages_missing_chunks",
+        "pages_chunks_not_embedded",
+        "pages_table_without_units",
+        "pages_figure_caption_missing",
+    )
+    return bool(
+        any(int(coverage.get(key) or 0) > 0 for key in numeric_flags)
+        or rag_quality.get("flags")
+        or rag_quality.get("warnings")
+    )
+
+
+def _provider_metrics(provider: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(provider.get("status") or "")
+    return {
+        "provider_id": str(provider.get("provider_id") or ""),
+        "status": status,
+        "elapsed_s": float(provider.get("elapsed_s") or 0),
+        "blocks": int(provider.get("blocks") or 0),
+        "tables": int(provider.get("tables") or 0),
+        "figures": _provider_figure_count(provider),
+        "coverage_warning": _provider_has_coverage_warning(provider),
+    }
+
+
+def _risk_summary(
+    *,
+    comparison: Mapping[str, Any],
+    page_by_id: Mapping[str, Mapping[str, Any]],
+    baseline_provider_id: str,
+) -> dict[str, Any]:
+    """Summarize pending-review risks without inferring human gold labels."""
+    provider_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    document_rows: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    priority_pages: list[dict[str, Any]] = []
+    sample_count = 0
+    for sample in comparison.get("samples", []) or []:
+        if not isinstance(sample, Mapping):
+            continue
+        page_id = str(sample.get("sample_name") or "")
+        page = page_by_id.get(page_id)
+        if page is None:
+            continue
+        sample_count += 1
+        document_id = str(page.get("document_id") or "")
+        providers = [item for item in sample.get("providers", []) or [] if isinstance(item, Mapping)]
+        rows = {_provider_metrics(provider)["provider_id"]: _provider_metrics(provider) for provider in providers}
+        for provider_id, row in rows.items():
+            provider_rows[provider_id].append(row)
+            document_rows[document_id][provider_id].append(row)
+        baseline = rows.get(baseline_provider_id)
+        for provider_id, candidate in rows.items():
+            if provider_id == baseline_provider_id:
+                continue
+            risk_codes: list[str] = []
+            delta_pct: float | None = None
+            if candidate["status"] != "done":
+                risk_codes.append("provider_failed")
+            if candidate["coverage_warning"]:
+                risk_codes.append("coverage_warning")
+            if baseline is None or baseline["status"] != "done":
+                risk_codes.append("baseline_missing")
+            if baseline and baseline["status"] == "done" and candidate["status"] == "done":
+                if baseline["elapsed_s"] > 0:
+                    delta_pct = round((candidate["elapsed_s"] / baseline["elapsed_s"] - 1) * 100, 3)
+                    if delta_pct >= 20:
+                        risk_codes.append("candidate_slower_than_baseline")
+                if candidate["blocks"] != baseline["blocks"]:
+                    risk_codes.append("block_count_changed")
+                if candidate["tables"] != baseline["tables"]:
+                    risk_codes.append("table_count_changed")
+                if candidate["figures"] != baseline["figures"]:
+                    risk_codes.append("figure_count_changed")
+            if not risk_codes:
+                continue
+            weights = {
+                "provider_failed": 100,
+                "baseline_missing": 90,
+                "coverage_warning": 70,
+                "candidate_slower_than_baseline": 60,
+                "table_count_changed": 35,
+                "block_count_changed": 25,
+                "figure_count_changed": 15,
+            }
+            priority_pages.append({
+                "page_id": page_id,
+                "document_id": document_id,
+                "page_number": int(page.get("page_number") or 0),
+                "provider_id": provider_id,
+                "risk_codes": risk_codes,
+                "risk_score": sum(weights.get(code, 10) for code in risk_codes),
+                "candidate_elapsed_s": candidate["elapsed_s"],
+                "baseline_elapsed_s": baseline["elapsed_s"] if baseline else None,
+                "elapsed_delta_pct": delta_pct,
+                "candidate_blocks": candidate["blocks"],
+                "baseline_blocks": baseline["blocks"] if baseline else None,
+                "candidate_tables": candidate["tables"],
+                "baseline_tables": baseline["tables"] if baseline else None,
+                "candidate_figures": candidate["figures"],
+                "baseline_figures": baseline["figures"] if baseline else None,
+            })
+
+    provider_summary: dict[str, Any] = {}
+    for provider_id, rows in sorted(provider_rows.items()):
+        completed = [row for row in rows if row["status"] == "done"]
+        elapsed = [row["elapsed_s"] for row in completed if row["elapsed_s"] > 0]
+        provider_summary[provider_id] = {
+            "sample_count": len(rows),
+            "completed_count": len(completed),
+            "failed_count": len(rows) - len(completed),
+            "average_elapsed_s": _mean(elapsed),
+            "p95_elapsed_s": _p95(elapsed),
+            "max_elapsed_s": round(max(elapsed), 3) if elapsed else None,
+            "coverage_warning_count": sum(1 for row in completed if row["coverage_warning"]),
+            "total_blocks": sum(row["blocks"] for row in completed),
+            "total_tables": sum(row["tables"] for row in completed),
+            "total_figures": sum(row["figures"] for row in completed),
+        }
+
+    document_summary: list[dict[str, Any]] = []
+    for document_id, by_provider in sorted(document_rows.items()):
+        provider_metrics: dict[str, Any] = {}
+        for provider_id, rows in sorted(by_provider.items()):
+            completed = [row for row in rows if row["status"] == "done"]
+            elapsed = [row["elapsed_s"] for row in completed if row["elapsed_s"] > 0]
+            provider_metrics[provider_id] = {
+                "sample_count": len(rows),
+                "completed_count": len(completed),
+                "failed_count": len(rows) - len(completed),
+                "average_elapsed_s": _mean(elapsed),
+                "p95_elapsed_s": _p95(elapsed),
+                "total_blocks": sum(row["blocks"] for row in completed),
+                "total_tables": sum(row["tables"] for row in completed),
+                "total_figures": sum(row["figures"] for row in completed),
+            }
+        document_risks = sorted({
+            code
+            for item in priority_pages
+            if item["document_id"] == document_id
+            for code in item["risk_codes"]
+        })
+        document_summary.append({
+            "document_id": document_id,
+            "provider_metrics": provider_metrics,
+            "risk_codes": document_risks,
+        })
+
+    priority_pages.sort(
+        key=lambda item: (
+            -int(item["risk_score"]),
+            -(float(item["elapsed_delta_pct"]) if item["elapsed_delta_pct"] is not None else -1.0),
+            str(item["document_id"]),
+            int(item["page_number"]),
+        )
+    )
+    return {
+        "sample_count": sample_count,
+        "provider_metrics": provider_summary,
+        "document_metrics": document_summary,
+        "priority_pages": priority_pages[:20],
+    }
+
+
 def _expected_list(expected: Mapping[str, Any], key: str) -> list[str]:
     raw = expected.get(key) or []
     if isinstance(raw, str):
@@ -66,16 +261,24 @@ def _resolve_imported_pages(payload: Mapping[str, Any], corpus_path: Path) -> li
             continue
         imported_payload = _load_json((corpus_path.parent / source).resolve())
         status = str(imported.get("review_status") or "seed")
-        for sample in imported_payload.get("samples", []) or []:
+        imported_pages = imported_payload.get("samples")
+        if not isinstance(imported_pages, Sequence) or isinstance(imported_pages, (str, bytes)):
+            imported_pages = imported_payload.get("pages", [])
+        for sample in imported_pages or []:
             if not isinstance(sample, Mapping):
                 continue
+            sample_status = str(sample.get("review_status") or status)
+            document_id = str(sample.get("documentId") or sample.get("document_id") or "")
+            page_number = int(sample.get("pageNumber") or sample.get("page_number") or 0)
             page = {
                 "id": str(sample.get("id") or ""),
-                "document_id": str(sample.get("documentId") or ""),
-                "page_number": int(sample.get("pageNumber") or 0),
+                "document_id": document_id,
+                "page_number": page_number,
                 "title": str(sample.get("title") or ""),
                 "expected": dict(sample.get("expected") or {}),
-                "review_status": status,
+                "review": dict(sample.get("review") or {}),
+                "evidence": dict(sample.get("evidence") or {}),
+                "review_status": sample_status,
                 "source": f"import:{source}",
             }
             if page["id"] and page["document_id"] and page["page_number"] > 0:
@@ -264,6 +467,11 @@ def evaluate_report(
             "recommendation": "manual_canary_config_review" if not blockers else "remain_shadow_only",
         }
 
+    risk_summary = _risk_summary(
+        comparison=comparison,
+        page_by_id=page_by_id,
+        baseline_provider_id=baseline_provider_id,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "weights": WEIGHTS,
@@ -277,6 +485,7 @@ def evaluate_report(
         "pages": page_results,
         "providers": provider_summary,
         "promotion": promotions,
+        "risk_summary": risk_summary,
     }
 
 
@@ -290,6 +499,7 @@ def build_gold_evaluation(
     include_seed: bool = False,
     document_ids: Sequence[str] = (),
     progress: bool = False,
+    track_python_memory: bool = False,
 ) -> dict[str, Any]:
     corpus = load_gold_corpus(corpus_path)
     source_map_file = Path(source_map_path).resolve()
@@ -342,6 +552,7 @@ def build_gold_evaluation(
             suite=suite_path,
             providers=list(dict.fromkeys([baseline_provider_id, *providers])),
             progress=progress,
+            track_python_memory=track_python_memory,
         )
     evaluation = evaluate_report(comparison=comparison, corpus=corpus, baseline_provider_id=baseline_provider_id)
     return {"comparison": comparison, "gold_evaluation": evaluation}
@@ -363,6 +574,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-json")
     parser.add_argument("--progress", action="store_true")
+    parser.add_argument(
+        "--track-python-memory",
+        action="store_true",
+        help="Opt in to tracemalloc peak memory tracking; it can materially slow native PDF providers",
+    )
     return parser
 
 
@@ -378,6 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         include_seed=bool(args.include_seed),
         document_ids=args.document_id,
         progress=bool(args.progress),
+        track_python_memory=bool(args.track_python_memory),
     )
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.out_json:

@@ -8,6 +8,7 @@ import re
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import uuid4
 
+from .audit_placeholders import is_non_content_audit_placeholder
 from .config import ParserSettings
 from .contracts import ChunkBuilder, ParserAdapter
 from .models import Block, Chunk, ParseRequest
@@ -878,11 +879,21 @@ def _build_manual_anatomy(items: Sequence[DocumentArtifactItem]) -> dict[str, An
     }
 
 
+def _is_non_content_audit_item(item: DocumentArtifactItem) -> bool:
+    metadata = item.metadata or {}
+    return is_non_content_audit_placeholder(
+        semantic_role=item.semantic_role,
+        metadata=metadata,
+    )
+
+
 def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str, Any]:
-    total_items = max(len(items), 1)
+    audit_artifact_items = [item for item in items if _is_non_content_audit_item(item)]
+    quality_items = [item for item in items if not _is_non_content_audit_item(item)]
+    total_items = max(len(quality_items), 1)
     heading_items: list[tuple[int, DocumentArtifactItem, str]] = []
     body_like_headings: list[tuple[int, DocumentArtifactItem, str]] = []
-    for position, item in enumerate(items):
+    for position, item in enumerate(quality_items):
         inferred_role = _infer_manual_role(item)
         if inferred_role in {"front_matter", "body_section", "appendix"}:
             heading_items.append((position, item, inferred_role))
@@ -890,18 +901,18 @@ def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str,
             body_like_headings.append((position, item, inferred_role))
     noise_items = [
         item
-        for item in items
+        for item in quality_items
         if str(item.semantic_role or "").strip().lower() in _ARTIFACT_SEMANTIC_ROLES
     ]
     toc_candidates = [
         item
-        for item in items
+        for item in quality_items
         if str(item.semantic_role or "").strip().lower() in {"toc_entry", "lep_entry"}
         or str((item.metadata or {}).get("page_type") or "").strip().lower() == "toc"
     ]
     toc_recognized = [
         item
-        for item in items
+        for item in quality_items
         if str(item.semantic_role or "").strip().lower() in {"toc_entry", "lep_entry"}
     ]
 
@@ -915,9 +926,9 @@ def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str,
         next_heading_position = (
             body_like_headings[list_index + 1][0]
             if list_index + 1 < len(body_like_headings)
-            else len(items)
+            else len(quality_items)
         )
-        for follower in items[start_position + 1 : next_heading_position]:
+        for follower in quality_items[start_position + 1 : next_heading_position]:
             follower_role = str(follower.semantic_role or "paragraph").strip().lower()
             if follower_role in _ARTIFACT_SEMANTIC_ROLES:
                 continue
@@ -954,6 +965,8 @@ def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str,
         "structure_usability_score": structure_usability_score,
         "counts": {
             "total_items": len(items),
+            "quality_denominator_items": len(quality_items),
+            "audit_artifact_items": len(audit_artifact_items),
             "heading_items": len(heading_items),
             "body_like_headings": len(body_like_headings),
             "noise_items": len(noise_items),
