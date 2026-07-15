@@ -1927,6 +1927,11 @@ class PdfTextParser(ParserAdapter):
             getattr(extract_timings, "provider_cls_rotate_high_count", 0) or 0
         )
         timings.postprocess_elapsed_s = extract_timings.postprocess_elapsed_s
+        timings.ocr_lines = [
+            dict(line)
+            for line in getattr(extract_timings, "ocr_lines", ()) or ()
+            if isinstance(line, Mapping)
+        ]
         timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
         if not text:
             return None, reason, ocr_error_reason or "empty_ocr_text", timings
@@ -2312,6 +2317,18 @@ class PdfTextParser(ParserAdapter):
                 }, parser_name=self.name)
                 if page_layout is not None:
                     _attach_page_layout_metadata(metadata, page_layout)
+                    if page_layout.ocr_fallback_reason is not None:
+                        metadata["source_kind"] = "pdf_ocr_fallback"
+                    ocr_lines = _ocr_lines_for_paragraph(
+                        paragraph,
+                        page_layout,
+                        paragraph_index=item_index + 1,
+                    )
+                    if ocr_lines:
+                        metadata["lines"] = ocr_lines
+                        ocr_bbox = _bbox_union_from_line_records(ocr_lines)
+                        if ocr_bbox is not None:
+                            metadata["bbox"] = ocr_bbox
                 if fast_text_profile:
                     metadata["profile_fast_text_path"] = True
                 if page_number in stripped_page_numbers:
@@ -2389,6 +2406,18 @@ def _merge_cross_page_paragraph_blocks(blocks: Sequence[Block]) -> list[Block]:
             block_ids = list(metadata.get("merged_block_ids") or [previous.block_id])
             block_ids.append(block.block_id)
             metadata["merged_block_ids"] = block_ids
+            previous_lines = [
+                dict(line)
+                for line in metadata.get("lines", ()) or ()
+                if isinstance(line, Mapping)
+            ]
+            current_lines = [
+                dict(line)
+                for line in (block.metadata or {}).get("lines", ()) or ()
+                if isinstance(line, Mapping)
+            ]
+            if current_lines:
+                metadata["lines"] = previous_lines + current_lines
             merged[-1] = Block(
                 block_id=previous.block_id,
                 doc_id=previous.doc_id,
@@ -4300,6 +4329,7 @@ class _PageLayout:
     ocr_acceptance_reason: str | None = None
     ocr_rejection_reason: str | None = None
     ocr_error_reason: str | None = None
+    ocr_lines: list[dict[str, Any]] = _dc_field(default_factory=list)
     native_text_token_count: int = 0
     final_text_token_count: int = 0
     ocr_engine_init_elapsed_s: float = 0.0
@@ -4334,6 +4364,7 @@ class _OcrStageTimings:
     provider_cls_rotate_high_count: int = 0
     postprocess_elapsed_s: float = 0.0
     total_elapsed_s: float = 0.0
+    ocr_lines: list[dict[str, Any]] = _dc_field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -4675,6 +4706,7 @@ def _extract_pdfplumber_layout(
             ocr_rejection_reason: str | None = None
             ocr_error_reason: str | None = None
             ocr_timings = _OcrStageTimings()
+            ocr_lines: list[dict[str, Any]] = []
             try:
                 if layout_reading_order_enabled and _should_rebuild_multi_column_text(page, column_count_hint=column_count_hint):
                     text_without_tables = _extract_text_by_columns(
@@ -4720,6 +4752,10 @@ def _extract_pdfplumber_layout(
                         text_without_tables = recovered_text
                         ocr_fallback_reason = ocr_attempt_reason
                         ocr_acceptance_reason = "fallback_applied"
+                        ocr_lines = _ocr_line_records_for_page(
+                            getattr(ocr_timings, "ocr_lines", ()) or (),
+                            page_number=index,
+                        )
                         # Persist to cache for future runs.
                         if ocr_cache is not None and ocr_cache.enabled:
                             ocr_cache.put(
@@ -4759,6 +4795,7 @@ def _extract_pdfplumber_layout(
                     ocr_acceptance_reason=ocr_acceptance_reason,
                     ocr_rejection_reason=ocr_rejection_reason,
                     ocr_error_reason=ocr_error_reason,
+                    ocr_lines=ocr_lines,
                     native_text_token_count=native_text_token_count,
                     final_text_token_count=final_text_token_count,
                     ocr_engine_init_elapsed_s=ocr_timings.engine_init_elapsed_s,
@@ -4854,6 +4891,96 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
         metadata["ocr_postprocess_elapsed_s"] = page_layout.ocr_postprocess_elapsed_s
     if page_layout.ocr_total_elapsed_s > 0.0:
         metadata["ocr_total_elapsed_s"] = page_layout.ocr_total_elapsed_s
+
+
+def _ocr_line_records_for_page(
+    lines: Sequence[Mapping[str, Any]],
+    *,
+    page_number: int,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    prefix = f"p{page_number}:"
+    for fallback_index, line in enumerate(lines, start=1):
+        if not isinstance(line, Mapping):
+            continue
+        record = dict(line)
+        local_line_id = str(record.get("line_id") or f"ocr-l{fallback_index}")
+        record["line_id"] = (
+            local_line_id
+            if local_line_id.startswith(prefix)
+            else f"{prefix}{local_line_id}"
+        )
+        record["page_number"] = page_number
+        records.append(record)
+    return records
+
+
+def _compact_ocr_locator_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _ocr_lines_for_paragraph(
+    paragraph: str,
+    page_layout: _PageLayout,
+    *,
+    paragraph_index: int,
+) -> list[dict[str, Any]]:
+    lines = [
+        dict(line)
+        for line in getattr(page_layout, "ocr_lines", ()) or ()
+        if isinstance(line, Mapping)
+    ]
+    if not lines:
+        return []
+
+    paragraph_text = _compact_ocr_locator_text(paragraph)
+    if not paragraph_text:
+        return []
+    indexed = [
+        line
+        for line in lines
+        if line.get("paragraph_index") == paragraph_index
+    ]
+    indexed_text = _compact_ocr_locator_text(
+        " ".join(str(line.get("text") or "") for line in indexed)
+    )
+    if indexed and indexed_text == paragraph_text:
+        return indexed
+
+    matched = [
+        line
+        for line in lines
+        if _compact_ocr_locator_text(line.get("text"))
+        and _compact_ocr_locator_text(line.get("text")) in paragraph_text
+    ]
+    if matched:
+        return matched
+    return indexed
+
+
+def _bbox_union_from_line_records(
+    lines: Sequence[Mapping[str, Any]],
+) -> tuple[float, float, float, float] | None:
+    bboxes: list[tuple[float, float, float, float]] = []
+    for line in lines:
+        raw = line.get("bbox")
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            continue
+        try:
+            x0, top, x1, bottom = (float(value) for value in raw)
+        except (TypeError, ValueError):
+            continue
+        if x1 <= x0 or bottom <= top:
+            continue
+        bboxes.append((x0, top, x1, bottom))
+    if not bboxes:
+        return None
+    return (
+        min(item[0] for item in bboxes),
+        min(item[1] for item in bboxes),
+        max(item[2] for item in bboxes),
+        max(item[3] for item in bboxes),
+    )
 
 
 def _layout_reading_order_confidence(
@@ -5056,7 +5183,18 @@ def _extract_ocr_text_from_page(
         column_count_hint=column_count_hint,
         page_width=float(rendered.width),
     )
-    paragraphs = _group_ocr_lines(lines, merge_line_gap_ratio=merge_line_gap_ratio)
+    line_groups = _group_ocr_line_groups(
+        lines,
+        merge_line_gap_ratio=merge_line_gap_ratio,
+    )
+    paragraphs = _ocr_paragraphs_from_line_groups(line_groups)
+    timings.ocr_lines = _ocr_line_records(
+        line_groups,
+        rendered_width=float(rendered.width),
+        rendered_height=float(rendered.height),
+        page_width=float(page.width or 0.0),
+        page_height=float(page.height or 0.0),
+    )
     timings.postprocess_elapsed_s = round(time.monotonic() - postprocess_started, 6)
     timings.total_elapsed_s = round(
         timings.render_elapsed_s + timings.call_elapsed_s + timings.postprocess_elapsed_s,
@@ -5129,11 +5267,21 @@ def _group_ocr_lines(
     *,
     merge_line_gap_ratio: float,
 ) -> list[str]:
+    return _ocr_paragraphs_from_line_groups(
+        _group_ocr_line_groups(lines, merge_line_gap_ratio=merge_line_gap_ratio)
+    )
+
+
+def _group_ocr_line_groups(
+    lines: Sequence[_OcrLine],
+    *,
+    merge_line_gap_ratio: float,
+) -> list[list[_OcrLine]]:
     if not lines:
         return []
 
-    paragraphs: list[str] = []
-    current: list[str] = [lines[0].text]
+    groups: list[list[_OcrLine]] = []
+    current: list[_OcrLine] = [lines[0]]
     previous = lines[0]
     for line in lines[1:]:
         previous_height = max(1.0, previous.bbox[3] - previous.bbox[1])
@@ -5146,13 +5294,65 @@ def _group_ocr_lines(
             and x_shift <= max(previous_height, current_height) * 6.0
         )
         if same_paragraph:
-            current.append(line.text)
+            current.append(line)
         else:
-            paragraphs.append(" ".join(current))
-            current = [line.text]
+            groups.append(current)
+            current = [line]
         previous = line
-    paragraphs.append(" ".join(current))
+    groups.append(current)
+    return [group for group in groups if any(item.text.strip() for item in group)]
+
+
+def _ocr_paragraphs_from_line_groups(
+    groups: Sequence[Sequence[_OcrLine]],
+) -> list[str]:
+    paragraphs = [
+        " ".join(line.text for line in group if line.text.strip()).strip()
+        for group in groups
+    ]
     return [paragraph for paragraph in paragraphs if paragraph.strip()]
+
+
+def _ocr_line_records(
+    groups: Sequence[Sequence[_OcrLine]],
+    *,
+    rendered_width: float,
+    rendered_height: float,
+    page_width: float,
+    page_height: float,
+) -> list[dict[str, Any]]:
+    if rendered_width <= 0.0 or rendered_height <= 0.0:
+        return []
+    target_width = page_width if page_width > 0.0 else rendered_width
+    target_height = page_height if page_height > 0.0 else rendered_height
+    scale_x = target_width / rendered_width
+    scale_y = target_height / rendered_height
+    records: list[dict[str, Any]] = []
+    line_number = 1
+    for paragraph_index, group in enumerate(groups, start=1):
+        for paragraph_line_index, line in enumerate(group, start=1):
+            x0, top, x1, bottom = line.bbox
+            records.append(
+                {
+                    "line_id": f"ocr-p{paragraph_index}-l{paragraph_line_index}",
+                    "line_index": line_number,
+                    "paragraph_index": paragraph_index,
+                    "paragraph_line_index": paragraph_line_index,
+                    "text": line.text,
+                    "bbox": (
+                        round(x0 * scale_x, 4),
+                        round(top * scale_y, 4),
+                        round(x1 * scale_x, 4),
+                        round(bottom * scale_y, 4),
+                    ),
+                    "page_width": float(target_width),
+                    "page_height": float(target_height),
+                    "confidence": round(float(line.confidence), 4),
+                    "source_kind": "pdf_ocr_fallback",
+                }
+            )
+            line_number += 1
+    return records
 
 
 def _should_rebuild_multi_column_text(page: Any, *, column_count_hint: int) -> bool:

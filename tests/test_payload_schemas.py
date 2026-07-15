@@ -84,6 +84,21 @@ def _sample_snapshot() -> dict[str, object]:
                 "rotation": 0,
                 "source_kind": "native_text",
                 "reading_order_confidence": 0.82,
+                "lines": [
+                    {
+                        "line_id": "p1:ocr-p1-l1",
+                        "line_index": 1,
+                        "paragraph_index": 1,
+                        "paragraph_line_index": 1,
+                        "page_number": 1,
+                        "text": "Inspect the hydraulic pump before dispatch.",
+                        "bbox": [10, 20, 300, 60],
+                        "page_width": 612.0,
+                        "page_height": 792.0,
+                        "confidence": 0.95,
+                        "source_kind": "native_text",
+                    }
+                ],
             },
         ),
         Block(

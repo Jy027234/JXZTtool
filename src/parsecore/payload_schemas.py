@@ -645,6 +645,14 @@ def _ir_block_schema() -> dict[str, Any]:
             "alt_text": _string_schema(),
             "quality_flags": _string_list_schema(),
             "provenance": _provenance_schema(),
+            "lines": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
+            "words": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
         },
         "additionalProperties": False,
     }
@@ -938,6 +946,14 @@ def _reader_block_schema() -> dict[str, Any]:
             "quality_signal_codes": _string_list_schema(),
             "table": _generic_object_schema(),
             "figure": _generic_object_schema(),
+            "lines": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
+            "words": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
         },
         "additionalProperties": False,
     }

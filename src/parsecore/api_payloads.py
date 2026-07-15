@@ -1692,7 +1692,7 @@ def _reader_base_block(
 ) -> dict[str, Any]:
     unit_payloads = _reader_unit_payloads(knowledge_units)
     rag_text = _reader_rag_text(unit_payloads)
-    return {
+    payload = {
         "reader_block_id": f"reader:{index:06d}",
         "page_number": _safe_int(block.get("page_number"), default=1),
         "page_span": list(_page_span_from_payload(block.get("page_span"), fallback_page=_safe_int(block.get("page_number"), default=1))),
@@ -1718,6 +1718,21 @@ def _reader_base_block(
         "quality_flags": list(block.get("quality_flags") or []),
         "provenance": dict(block.get("provenance") or {}),
     }
+    for region_field in ("lines", "words"):
+        raw_regions = block.get(region_field)
+        if not isinstance(raw_regions, Sequence) or isinstance(
+            raw_regions,
+            (str, bytes, bytearray),
+        ):
+            continue
+        regions = [
+            dict(region)
+            for region in raw_regions
+            if isinstance(region, Mapping)
+        ]
+        if regions:
+            payload[region_field] = regions
+    return payload
 
 
 def _reader_units_by_source(
@@ -3552,8 +3567,68 @@ def _structured_lines_from_blocks(
             continue
         page_number = _safe_int(metadata.get("page"), default=1)
         parser = str(metadata.get("parser") or "")
+        source_lines = [
+            dict(line)
+            for line in metadata.get("lines", ()) or ()
+            if isinstance(line, Mapping)
+        ]
+        source_line_count_before = len(lines)
+        for line_index, source_line in enumerate(source_lines, start=1):
+            text = " ".join(str(source_line.get("text") or "").split())
+            if not text:
+                continue
+            source_page_number = _safe_int(
+                source_line.get("page_number"),
+                default=page_number,
+            )
+            line_payload: dict[str, Any] = {
+                "line_id": f"{block.block_id}:line:{line_index}",
+                "doc_id": doc_id or block.doc_id,
+                "parse_run_id": parse_run_id,
+                "block_id": block.block_id,
+                "block_type": block.type.value,
+                "block_index": block_index,
+                "line_index": line_index,
+                "page_number": source_page_number,
+                "page_start": source_page_number,
+                "page_end": source_page_number,
+                "semantic_role": role,
+                "source_parser": parser,
+                "text": text,
+                "normalized_text": _normalize_record_text(text),
+            }
+            source_line_id = str(source_line.get("line_id") or "").strip()
+            if source_line_id:
+                line_payload["source_line_id"] = source_line_id
+            source_line_index = _safe_int(source_line.get("line_index"), default=0)
+            if source_line_index > 0:
+                line_payload["source_line_index"] = source_line_index
+            for index_field in ("paragraph_index", "paragraph_line_index", "column_index"):
+                index_value = _safe_int(source_line.get(index_field), default=0)
+                include_zero_column = (
+                    index_field == "column_index"
+                    and index_value == 0
+                    and index_field in source_line
+                )
+                if index_value > 0 or include_zero_column:
+                    line_payload[index_field] = index_value
+            bbox = source_line.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    line_payload["bbox"] = [float(value) for value in bbox]
+                except (TypeError, ValueError):
+                    pass
+            for number_field in ("page_width", "page_height", "confidence"):
+                number_value = source_line.get(number_field)
+                if isinstance(number_value, (int, float)):
+                    line_payload[number_field] = float(number_value)
+            source_kind = str(source_line.get("source_kind") or "").strip()
+            if source_kind:
+                line_payload["source_kind"] = source_kind
+            lines.append(line_payload)
+        if len(lines) > source_line_count_before:
+            continue
         for line_index, text in enumerate(_block_lines(block.content), start=1):
-            line_number = len(lines) + 1
             lines.append(
                 {
                     "line_id": f"{block.block_id}:line:{line_index}",

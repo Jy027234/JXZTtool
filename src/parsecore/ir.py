@@ -468,7 +468,7 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
             "start": page_number,
             "end": metadata.get("page_end"),
         }
-    return {
+    payload = {
         "block_id": block.block_id,
         "page_number": page_number,
         "page_span": list(_page_span_tuple(page_span, fallback_page=page_number)),
@@ -486,6 +486,11 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
         "quality_flags": _string_list(metadata.get("quality_flags")),
         "provenance": provenance,
     }
+    for region_field in ("lines", "words"):
+        regions = _source_regions(metadata.get(region_field))
+        if regions:
+            payload[region_field] = regions
+    return payload
 
 
 def _ir_tables(*, tables: Sequence[Mapping[str, Any]], blocks: Sequence[Block]) -> list[dict[str, Any]]:
@@ -1592,6 +1597,21 @@ def _bbox(value: Any) -> list[float] | None:
         return [float(item) for item in value]
     except (TypeError, ValueError):
         return None
+
+
+def _source_regions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    regions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        region = dict(item)
+        bbox = _bbox(region.get("bbox"))
+        if bbox is not None:
+            region["bbox"] = bbox
+        regions.append(region)
+    return regions
 
 
 def _string_list(value: Any) -> list[str]:

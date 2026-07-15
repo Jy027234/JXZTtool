@@ -1073,7 +1073,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 - `format=jsonl|csv|tsv|sqlite|xlsx`
 - `tenant_id=...` 可选，默认 `default`
 
-解析完成后，中台会把结构化 `pages / lines / records` 作为 document views 持久化到当前 JobStore；records 查询会优先读取持久化结果，缺失时再回退到 block 现场投影。主文档快照默认不再携带 `pages / lines / records` views，页面/行导出会按需加载对应 view，记录级查询入口则用于分页读取派生 records，避免把大结果集塞进主文档响应。records 可能来自结构化表格行，也可能来自 `large-pdf-catalog` / `large-pdf-ledger` 下按序号行聚合出的文本记录；消费方应按 `source / fields / raw_text / normalized_text / page_start / page_end` 宽松解析。
+解析完成后，中台会把结构化 `pages / lines / records` 作为 document views 持久化到当前 JobStore；records 查询会优先读取持久化结果，缺失时再回退到 block 现场投影。主文档快照默认不再携带 `pages / lines / records` views，页面/行导出会按需加载对应 view，记录级查询入口则用于分页读取派生 records，避免把大结果集塞进主文档响应。PDF 坏页由实时 OCR 恢复时，`lines` 行会追加原始页坐标 `bbox`、置信度、OCR 页内顺序及 `source_kind=pdf_ocr_fallback`；相同信息也会透传到 IR/Reader block 的可选 `lines` 字段。OCR 缓存命中只能恢复正文和来源标记，不会生成虚假行框。records 可能来自结构化表格行，也可能来自 `large-pdf-catalog` / `large-pdf-ledger` 下按序号行聚合出的文本记录；消费方应按 `source / fields / raw_text / normalized_text / page_start / page_end` 宽松解析。
 
 ```text
 GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0

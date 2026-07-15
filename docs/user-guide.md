@@ -130,6 +130,8 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/big-pdf
 
 解析完成后，中台会持久化 `pages / lines / records`。主文档响应默认不携带这些大 views，records 应通过专用入口分页读取：
 
+`lines` 数据集在 PDF 坏页由实时 OCR 恢复时会额外保留 `bbox / confidence / source_kind / source_line_id / source_line_index / paragraph_index`，坐标已换算到原始 PDF 页面尺寸，可用于宿主阅读页定位和证据高亮。OCR 文本缓存只保存正文；缓存命中时中台会继续标记 `source_kind=pdf_ocr_fallback`，但不会伪造已经不可恢复的行框坐标。
+
 ```text
 GET /v1/parse/documents/{doc_id}/records?limit=100&offset=0
 GET /v1/parse/documents/{doc_id}/records?query=TC001A

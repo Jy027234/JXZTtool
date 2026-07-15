@@ -14,10 +14,14 @@ from parsecore.ocr import OcrRequestError
 from parsecore.parsers import (
     ImageOcrParser,
     PdfTextParser,
+    _OcrLine,
+    _OcrStageTimings,
     _extract_pdf_figure_regions,
     _filter_repeated_pdf_figure_regions,
     _layout_reading_order_confidence,
     _ocr_fallback_reason_for_page,
+    _ocr_line_records,
+    _ocr_line_records_for_page,
     _pdf_page_image_count_hint,
     _select_pdf_layout_pages,
     _select_pdf_layout_work,
@@ -78,6 +82,7 @@ def _fake_page_layout(
     ocr_fallback_reason: str | None,
     tables: list[object] | None = None,
     figure_regions: list[object] | None = None,
+    ocr_lines: list[dict[str, object]] | None = None,
     column_count_hint: int = 1,
     layout_reading_order_applied: bool = False,
     layout_reading_order_strategy: str | None = None,
@@ -99,6 +104,7 @@ def _fake_page_layout(
         ocr_acceptance_reason=None,
         ocr_rejection_reason=None,
         ocr_error_reason=None,
+        ocr_lines=ocr_lines or [],
         ocr_engine_init_elapsed_s=0.0,
         ocr_render_elapsed_s=0.0,
         ocr_input_prepare_elapsed_s=0.0,
@@ -464,7 +470,27 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
             captured["ocr_page_text_fn"] = kwargs.get("ocr_page_text_fn")
-            return [_fake_page_layout(text_without_tables="Recovered OCR text", ocr_fallback_reason="cid_ratio")]
+            return [
+                _fake_page_layout(
+                    text_without_tables="Recovered OCR text",
+                    ocr_fallback_reason="cid_ratio",
+                    ocr_lines=[
+                        {
+                            "line_id": "p1:ocr-p1-l1",
+                            "line_index": 1,
+                            "paragraph_index": 1,
+                            "paragraph_line_index": 1,
+                            "page_number": 1,
+                            "text": "Recovered OCR text",
+                            "bbox": (10.0, 20.0, 80.0, 36.0),
+                            "page_width": 100.0,
+                            "page_height": 100.0,
+                            "confidence": 0.93,
+                            "source_kind": "pdf_ocr_fallback",
+                        }
+                    ],
+                )
+            ]
 
         with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
             pdf_path = Path(temp_dir) / "sample.pdf"
@@ -484,6 +510,105 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertIsNotNone(captured.get("ocr_page_text_fn"))
         self.assertEqual(blocks[1].content, "Recovered OCR text")
         self.assertTrue(blocks[1].metadata["ocr_fallback_used"])
+        self.assertEqual(blocks[1].metadata["source_kind"], "pdf_ocr_fallback")
+        self.assertEqual(blocks[1].metadata["bbox"], (10.0, 20.0, 80.0, 36.0))
+        self.assertEqual(blocks[1].metadata["lines"][0]["text"], "Recovered OCR text")
+        self.assertEqual(blocks[1].metadata["lines"][0]["bbox"], (10.0, 20.0, 80.0, 36.0))
+
+    def test_ocr_fallback_without_live_lines_does_not_fabricate_regions(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-options-") as temp_dir:
+            pdf_path = Path(temp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-pdf-ocr-cached-text",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch("parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader), patch(
+                "parsecore.parsers._extract_pdfplumber_layout",
+                return_value=[
+                    _fake_page_layout(
+                        text_without_tables="Recovered cached OCR text",
+                        ocr_fallback_reason="native_text_empty",
+                    )
+                ],
+            ):
+                blocks = parser.parse(request)
+
+        self.assertEqual(blocks[1].content, "Recovered cached OCR text")
+        self.assertEqual(blocks[1].metadata["source_kind"], "pdf_ocr_fallback")
+        self.assertNotIn("lines", blocks[1].metadata)
+        self.assertNotIn("bbox", blocks[1].metadata)
+
+    def test_ocr_recovery_preserves_line_regions_from_extract_timings(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"ocr_bad_pages": True}},
+        )
+        extract_timings = _OcrStageTimings(
+            ocr_lines=[
+                {
+                    "line_id": "ocr-p1-l1",
+                    "line_index": 1,
+                    "paragraph_index": 1,
+                    "paragraph_line_index": 1,
+                    "text": "Recovered OCR text",
+                    "bbox": (10.0, 20.0, 80.0, 36.0),
+                    "page_width": 100.0,
+                    "page_height": 100.0,
+                    "confidence": 0.93,
+                    "source_kind": "pdf_ocr_fallback",
+                }
+            ]
+        )
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(object(), None, 0.0)), patch(
+            "parsecore.parsers._extract_ocr_text_from_page",
+            return_value=("Recovered OCR text", None, extract_timings),
+        ):
+            text, reason, error, timings = parser._maybe_recover_page_with_ocr(
+                SimpleNamespace(width=100.0, height=100.0, images=[object()]),
+                [],
+                1,
+                "",
+            )
+
+        self.assertEqual(text, "Recovered OCR text")
+        self.assertEqual(reason, "native_text_empty")
+        self.assertIsNone(error)
+        self.assertEqual(timings.ocr_lines[0]["text"], "Recovered OCR text")
+        self.assertEqual(timings.ocr_lines[0]["bbox"], (10.0, 20.0, 80.0, 36.0))
+
+    def test_ocr_line_records_scale_render_coordinates_to_pdf_page(self) -> None:
+        records = _ocr_line_records(
+            [
+                [
+                    _OcrLine(
+                        bbox=(20.0, 40.0, 160.0, 72.0),
+                        text="Recovered OCR text",
+                        confidence=0.93,
+                    )
+                ]
+            ],
+            rendered_width=200.0,
+            rendered_height=200.0,
+            page_width=100.0,
+            page_height=100.0,
+        )
+
+        self.assertEqual(records[0]["bbox"], (10.0, 20.0, 80.0, 36.0))
+        self.assertEqual(records[0]["confidence"], 0.93)
+        self.assertEqual(records[0]["source_kind"], "pdf_ocr_fallback")
+        page_records = _ocr_line_records_for_page(records, page_number=3)
+        self.assertEqual(page_records[0]["line_id"], "p3:ocr-p1-l1")
+        self.assertEqual(page_records[0]["page_number"], 3)
 
     def test_request_ocr_cache_override_disables_layout_cache(self) -> None:
         parser = PdfTextParser(

@@ -11,11 +11,106 @@ from parsecore.api_payloads import (
     _normalize_reader_text,
     _quality_required_provider_capabilities,
     _project_pages,
+    _structured_lines_from_blocks,
 )
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, SemanticRole
 
 
 class DocumentProjectionQualitySignalTests(unittest.TestCase):
+    def test_structured_lines_preserve_ocr_source_regions(self) -> None:
+        block = Block(
+            block_id="blk-ocr-1",
+            doc_id="doc-ocr-001",
+            type=BlockType.PARAGRAPH,
+            content="Recovered OCR text",
+            metadata={
+                "page": 3,
+                "parser": "pdf-text",
+                "semantic_role": SemanticRole.PARAGRAPH.value,
+                "lines": [
+                    {
+                        "line_id": "p3:ocr-p1-l1",
+                        "line_index": 7,
+                        "paragraph_index": 1,
+                        "paragraph_line_index": 1,
+                        "page_number": 3,
+                        "text": "Recovered OCR text",
+                        "bbox": (10.0, 20.0, 80.0, 36.0),
+                        "page_width": 100.0,
+                        "page_height": 100.0,
+                        "confidence": 0.93,
+                        "source_kind": "pdf_ocr_fallback",
+                    }
+                ],
+            },
+        )
+
+        lines = _structured_lines_from_blocks(
+            (block,),
+            doc_id=block.doc_id,
+            parse_run_id="job-ocr-001",
+        )
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["line_id"], "blk-ocr-1:line:1")
+        self.assertEqual(lines[0]["source_line_id"], "p3:ocr-p1-l1")
+        self.assertEqual(lines[0]["source_line_index"], 7)
+        self.assertEqual(lines[0]["bbox"], [10.0, 20.0, 80.0, 36.0])
+        self.assertEqual(lines[0]["confidence"], 0.93)
+        self.assertEqual(lines[0]["source_kind"], "pdf_ocr_fallback")
+
+    def test_ir_and_reader_preserve_ocr_source_regions(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-ocr-regions-001",
+            doc_id="doc-ocr-regions-001",
+            state=ParseJobState.DONE,
+            media_type="application/pdf",
+            options={"profile": "scan-pdf"},
+        )
+        source_line = {
+            "line_id": "p2:ocr-p1-l1",
+            "line_index": 1,
+            "paragraph_index": 1,
+            "paragraph_line_index": 1,
+            "page_number": 2,
+            "text": "Recovered OCR text",
+            "bbox": (10.0, 20.0, 80.0, 36.0),
+            "page_width": 100.0,
+            "page_height": 100.0,
+            "confidence": 0.93,
+            "source_kind": "pdf_ocr_fallback",
+        }
+        block = Block(
+            block_id="blk-ocr-regions-1",
+            doc_id=job.doc_id,
+            type=BlockType.PARAGRAPH,
+            content="Recovered OCR text",
+            metadata={
+                "page": 2,
+                "parser": "pdf-text",
+                "semantic_role": SemanticRole.PARAGRAPH.value,
+                "bbox": (10.0, 20.0, 80.0, 36.0),
+                "page_width": 100.0,
+                "page_height": 100.0,
+                "source_kind": "pdf_ocr_fallback",
+                "lines": [source_line],
+            },
+        )
+        snapshot = {
+            "job": job,
+            "doc_id": job.doc_id,
+            "blocks": (block,),
+            "chunks": (),
+        }
+
+        ir = _document_projection(snapshot, projection="ir")
+        reader = _document_projection(snapshot, projection="reader")
+
+        expected_source_line = dict(source_line, bbox=[10.0, 20.0, 80.0, 36.0])
+        self.assertEqual(ir["blocks"][0]["lines"], [expected_source_line])
+        self.assertEqual(reader["blocks"][0]["lines"], [expected_source_line])
+        self.assertEqual(reader["blocks"][0]["bbox"], [10.0, 20.0, 80.0, 36.0])
+
     def test_reader_text_preserves_regulatory_hierarchy_and_joins_continuations(self) -> None:
         text = (
             "(a) The competent authorities shall establish a system of record-keeping that allows\n"
