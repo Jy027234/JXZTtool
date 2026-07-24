@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from parsecore.bootstrap import build_runtime
+from parsecore.bootstrap import build_runtime  # noqa: E402
 
 
 if __name__ == "__main__":

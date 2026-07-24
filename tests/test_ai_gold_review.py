@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -16,15 +17,16 @@ def _write(path: Path, payload: object) -> None:
         path.write_bytes(payload)  # type: ignore[arg-type]
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_build_ai_review_records_explicit_nonhuman_scope(tmp_path: Path) -> None:
     packet = tmp_path / "packet"
     screenshot = packet / "pages" / "doc" / "p0001.png"
     text_probe = packet / "pages" / "doc" / "p0001.txt"
     _write(screenshot, b"png")
     _write(text_probe, "Title\nBody")
-    import hashlib
-
-    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     queue = tmp_path / "queue.json"
     _write(
         queue,
@@ -52,9 +54,9 @@ def test_build_ai_review_records_explicit_nonhuman_scope(tmp_path: Path) -> None
                     "source_probe": {"text_chars": 10, "image_count": 0},
                     "evidence": {
                         "screenshot": "pages/doc/p0001.png",
-                        "screenshot_sha256": sha(screenshot),
+                        "screenshot_sha256": _sha256_file(screenshot),
                         "text": "pages/doc/p0001.txt",
-                        "text_sha256": sha(text_probe),
+                        "text_sha256": _sha256_file(text_probe),
                     },
                 }
             ]
@@ -117,9 +119,6 @@ def test_build_ai_review_accepts_confirmed_blank_page_and_forbids_synthetic_titl
     text_probe = packet / "pages" / "doc" / "p0001.txt"
     _write(screenshot, b"png")
     _write(text_probe, "")
-    import hashlib
-
-    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     queue = tmp_path / "queue.json"
     _write(
         queue,
@@ -135,9 +134,9 @@ def test_build_ai_review_accepts_confirmed_blank_page_and_forbids_synthetic_titl
                     "source_probe": {"text_chars": 0, "image_count": 0},
                     "evidence": {
                         "screenshot": "pages/doc/p0001.png",
-                        "screenshot_sha256": sha(screenshot),
+                        "screenshot_sha256": _sha256_file(screenshot),
                         "text": "pages/doc/p0001.txt",
-                        "text_sha256": sha(text_probe),
+                        "text_sha256": _sha256_file(text_probe),
                     },
                 }
             ]

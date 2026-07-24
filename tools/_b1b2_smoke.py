@@ -11,8 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from parsecore.bootstrap import build_runtime  # type: ignore
-from parsecore.models import ParseJobState, ParseRequest  # type: ignore
+from parsecore.bootstrap import build_runtime  # type: ignore  # noqa: E402
+from parsecore.models import ParseJobState, ParseRequest  # type: ignore  # noqa: E402
 
 
 def main() -> None:

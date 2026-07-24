@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import Future
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as _dc_field, replace
 import hashlib
 import importlib
 import importlib.util
@@ -4251,9 +4251,6 @@ class ImageOcrParser(ParserAdapter):
 
 
 # --- A3 dual-channel: pdfplumber-backed layout extraction ---------------------
-
-
-from dataclasses import dataclass, field as _dc_field
 
 
 @dataclass(slots=True)

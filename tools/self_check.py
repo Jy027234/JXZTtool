@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from parsecore.pdf_parts import detect_pdf_page_count
+from parsecore.pdf_parts import detect_pdf_page_count  # noqa: E402
 
 
 FAST_PROFILE = "fast"

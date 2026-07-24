@@ -56,7 +56,7 @@ def _strip_repeated_headers_footers(pages: list[str], threshold: float = 0.5) ->
     for page_text in pages:
         if not page_text.strip():
             continue
-        lines = [l.strip() for l in page_text.split("\n") if l.strip()]
+        lines = [line.strip() for line in page_text.split("\n") if line.strip()]
         if not lines:
             continue
         for line in set(lines[:HEAD_N]):
@@ -77,7 +77,7 @@ def _strip_repeated_headers_footers(pages: list[str], threshold: float = 0.5) ->
     cleaned: list[str] = []
     for page_text in pages:
         lines = page_text.split("\n")
-        filtered = [l for l in lines if l.strip() not in hf_lines]
+        filtered = [line for line in lines if line.strip() not in hf_lines]
         cleaned.append("\n".join(filtered).strip())
     return cleaned
 
@@ -143,7 +143,7 @@ def _compute_stats(raw_blocks: list[dict[str, Any]], display_block_count: int) -
     total = len(raw_blocks)
     ne = len(non_empty)
     very_short = sum(1 for t in non_empty if len(t.strip()) < 10)
-    very_long = sum(1 for l in lengths if l > 2000)
+    very_long = sum(1 for length in lengths if length > 2000)
     single_line = sum(1 for t in non_empty if "\n" not in t)
     table_like = sum(1 for t in non_empty if _looks_table_like(t))
     numeric_heavy = sum(1 for t in non_empty if _looks_numeric_heavy(t))
