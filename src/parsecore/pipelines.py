@@ -845,7 +845,6 @@ def _build_manual_anatomy(items: Sequence[DocumentArtifactItem]) -> dict[str, An
 
     for item in items:
         role = str(item.semantic_role or "paragraph").strip().lower()
-        metadata = item.metadata or {}
         inferred_role = _infer_manual_role(item)
         projected = _entry_projection(item, semantic_role=inferred_role)
         if role in {"front_matter", "toc_entry", "lep_entry", "revision_record", "distribution_list"} or inferred_role in {

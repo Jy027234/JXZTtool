@@ -5,8 +5,6 @@ from __future__ import annotations
 import unittest
 
 from tools.coverage_trend_report import (
-    COVERAGE_METRICS,
-    READER_METRICS,
     build_trend_report,
     render_markdown,
 )

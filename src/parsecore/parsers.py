@@ -2392,7 +2392,6 @@ def _merge_cross_page_paragraph_blocks(blocks: Sequence[Block]) -> list[Block]:
     for block in blocks:
         if merged and _should_merge_cross_page_blocks(merged[-1], block):
             previous = merged[-1]
-            previous_page = _block_page(previous)
             current_page = _block_page(block)
             metadata = dict(previous.metadata)
             metadata["page_end"] = current_page

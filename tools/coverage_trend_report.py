@@ -181,7 +181,7 @@ def build_trend_report(
 
 def render_markdown(payload: Mapping[str, Any]) -> str:
     lines = [
-        f"# Coverage / Reader Trend Report",
+        "# Coverage / Reader Trend Report",
         "",
         f"- schema_version: `{payload.get('schema_version')}`",
         f"- report_count: {payload.get('report_count', 0)}",

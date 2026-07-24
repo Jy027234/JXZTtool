@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, metadata, version
 from pathlib import Path

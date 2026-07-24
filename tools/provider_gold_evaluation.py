@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.provider_comparison_report import build_report, render_markdown  # noqa: E402
+from tools.provider_comparison_report import build_report  # noqa: E402
 
 
 SCHEMA_VERSION = "2026-07-provider-gold-evaluation"

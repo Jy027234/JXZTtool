@@ -2063,7 +2063,6 @@ class PostgresJobStore(JobStore):
         # SELECT ... FOR UPDATE SKIP LOCKED gives us safe multi-worker claim
         # semantics natively in Postgres.
         now = _utc_now()
-        claim_token = uuid4().hex
         with self._lock, self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """

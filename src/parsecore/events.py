@@ -202,7 +202,6 @@ class _StageContext:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        from .api_responses import error_category_for_code
         error_cat = None
         if exc is not None:
             error_cat = str(getattr(exc, "error_category", None) or "parser_failed")

@@ -57,7 +57,6 @@ sys.path.insert(0, str(ROOT / "src"))
 from parsecore.bootstrap import build_runtime  # noqa: E402
 from parsecore.models import ParseRequest  # noqa: E402
 from parsecore.quality import (  # noqa: E402
-    PageQuality,
     StructuralQualityReport,
     evaluate_blocks,
     evaluate_chunk_embeddings,

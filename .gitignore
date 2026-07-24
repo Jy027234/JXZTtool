@@ -2,9 +2,13 @@
 .tmp/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 .mypy_cache/
 dist/
 build/
+output/
+tmp/
+*.egg-info/
 *.pyc
 var/parsecore.db
 var/*.db

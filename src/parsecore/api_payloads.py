@@ -5092,7 +5092,6 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
     pages: dict[int, dict[str, Any]] = {}
     page_signals: dict[int, dict[str, Any]] = {}
     # logical_page tracking for DOCX (always physical page==1, split by headings/breaks)
-    logical_page_map: dict[int, set[int]] = {}  # logical_page_index -> {position indices}
     logical_page_texts: dict[int, list[str]] = {}
     has_logical_pages = False
     for block in blocks:
@@ -5396,7 +5395,6 @@ def _infer_page_type_with_confidence(
     body_text: str,
 ) -> tuple[str, str]:
     """Return (page_type, confidence) where confidence is 'high'/'medium'/'low'."""
-    role_set = set(roles)
     n_blocks = max(len(roles), 1)
     normalized_text = full_text.lower()
 

@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from parsecore.config import OcrProviderSettings
 from parsecore.models import Block, BlockType, ParseRequest
-from parsecore.ocr import OcrRequestError
 from parsecore.parsers import (
     ImageOcrParser,
     PdfTextParser,

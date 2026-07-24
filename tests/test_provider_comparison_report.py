@@ -1006,7 +1006,7 @@ name = "text-native"
     def test_build_report_suite_skips_disabled_entries(self) -> None:
         """P3-T07: verify suite loader skips entries with disabled=true."""
         with TemporaryWorkspace(PROVIDER_COMPARE_CONFIG) as workspace:
-            sample = workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
+            workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
             assert workspace.config_path is not None
             assert workspace.root is not None
             suite = workspace.root / "provider-suite.json"
@@ -1043,7 +1043,7 @@ name = "text-native"
 
     def test_build_report_gate_fails_when_admission_update_budget_is_exceeded(self) -> None:
         with TemporaryWorkspace(PROVIDER_COMPARE_CONFIG) as workspace:
-            sample = workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
+            workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
             assert workspace.config_path is not None
             assert workspace.root is not None
             suite = workspace.root / "provider-suite.json"
@@ -1121,7 +1121,7 @@ name = "text-native"
 
     def test_build_report_exposes_suite_gate_policy(self) -> None:
         with TemporaryWorkspace(PROVIDER_COMPARE_CONFIG) as workspace:
-            sample = workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
+            workspace.create_text_file("fixtures/manual.txt", "Heading\n\nInspect pump.")
             assert workspace.config_path is not None
             assert workspace.root is not None
             suite = workspace.root / "provider-suite.json"

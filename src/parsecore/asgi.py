@@ -10,7 +10,7 @@ from starlette.applications import Starlette
 from .api_health import health_service_details as _base_health_service_details
 from .api_health import health_services as _base_health_services
 from .api_health import is_ocr_service_available as _is_ocr_service_available
-from .api_payloads import _project_pages
+from .api_payloads import _project_pages as _project_pages
 from .api_routes import ApiRoutes
 from .api_support import (
     ApiKeyMiddleware,
