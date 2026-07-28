@@ -3179,6 +3179,10 @@ _PDF_TOC_HEADING_PATTERN = re.compile(
     r"^\s*(?:目录|目次|CONTENTS?|TABLE\s+OF\s+CONTENTS)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_PDF_TOC_PAGE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:目录|目次|CONTENTS?|TABLE\s+OF\s+CONTENTS)(?:\s+|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -3420,6 +3424,7 @@ def _infer_page_type(
         SemanticRole.TOC_ENTRY.value in role_set
         or SemanticRole.LEP_ENTRY.value in role_set
         or _PDF_TOC_HEADING_PATTERN.search(full_text)
+        or _PDF_TOC_PAGE_PREFIX_PATTERN.search(full_text)
     ):
         return "toc"
     if any(token in normalized_text for token in ("signature", "signed by", "approved by", "签字", "签名", "审批")):

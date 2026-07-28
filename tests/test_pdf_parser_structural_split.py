@@ -5,6 +5,7 @@ import unittest
 from parsecore.parsers import (
     PdfTextParser,
     _infer_pdf_structural_heading,
+    _infer_page_type,
     _infer_semantic_role,
     _merge_cross_page_paragraph_blocks,
     _split_inline_structural_items,
@@ -46,6 +47,17 @@ _INLINE_NUMBERED_PARAGRAPH = (
 
 
 class SemanticRoleInferenceTests(unittest.TestCase):
+    def test_classifies_ocr_collapsed_toc_heading_as_toc_page(self) -> None:
+        self.assertEqual(
+            _infer_page_type(
+                page_number=1,
+                roles=[SemanticRole.PARAGRAPH.value],
+                full_text="TABLE OF CONTENTS 1. Scope",
+                has_title=True,
+            ),
+            "toc",
+        )
+
     def test_preserves_safety_and_note_roles(self) -> None:
         self.assertEqual(_infer_semantic_role("NOTE: Retain this record."), SemanticRole.NOTE.value)
         self.assertEqual(_infer_semantic_role("警告：先断开电源。"), SemanticRole.WARNING.value)
