@@ -18,6 +18,7 @@ var/regression/*
 !var/regression/provider-suite.fast.json
 !var/regression/provider-suite.full.json
 !var/regression/provider-suite.perf.json
+var/knowledge-structuring/
 var/self-check/
 var/tmp/
 var/uploads/
