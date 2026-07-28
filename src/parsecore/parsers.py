@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field as _dc_field, replace
+from functools import partial
 import hashlib
 import importlib
 import importlib.util
@@ -15,6 +16,7 @@ import sys
 import tempfile
 from threading import RLock
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 import xml.etree.ElementTree as ET
@@ -1871,6 +1873,8 @@ class PdfTextParser(ParserAdapter):
         table_bboxes: Sequence[tuple[float, float, float, float]],
         column_count_hint: int,
         extracted_text: str | None,
+        *,
+        force_empty_page: bool = False,
     ) -> tuple[str | None, str | None, str | None, _OcrStageTimings]:
         timings = _OcrStageTimings()
         reason = _ocr_fallback_reason_for_page(
@@ -1889,6 +1893,12 @@ class PdfTextParser(ParserAdapter):
                 has_page_image = False
             if has_page_image:
                 reason = "native_text_empty"
+            elif force_empty_page:
+                # Some scan producers encode the full-page raster in a form
+                # that pdfplumber does not expose through ``page.images``.
+                # An explicit force-OCR request must therefore render every
+                # empty-text page instead of trusting image-object metadata.
+                reason = "forced_full_page"
             else:
                 # A truly blank/vector-only page has nothing for the image
                 # OCR engine to read.  Avoid paying the OCR startup/render
@@ -2085,7 +2095,14 @@ class PdfTextParser(ParserAdapter):
                 layout_strategy = "adaptive-selective"
                 layout_candidate_page_count = len(adaptive_layout_page_numbers)
         if effective_dual_channel_enabled:
-            ocr_page_text_fn = self._maybe_recover_page_with_ocr if effective_ocr_bad_pages_enabled else None
+            ocr_page_text_fn = (
+                partial(
+                    self._maybe_recover_page_with_ocr,
+                    force_empty_page=request_enable_ocr is True,
+                )
+                if effective_ocr_bad_pages_enabled
+                else None
+            )
             layout_pages = _extract_pdfplumber_layout(
                 request.file_path,
                 min_rows=self._dual_table_min_rows,
@@ -2190,9 +2207,15 @@ class PdfTextParser(ParserAdapter):
                     min_markers=self._llm_min_markers,
                 )
             is_highlights_page = _is_highlights_page(paragraphs)
-            paragraph_roles = [
-                _infer_semantic_role(paragraph, is_highlights_page=is_highlights_page)
+            paragraph_headings = [
+                _infer_pdf_structural_heading(paragraph)
                 for paragraph in paragraphs
+            ]
+            paragraph_roles = [
+                heading.semantic_role
+                if heading is not None
+                else _infer_semantic_role(paragraph, is_highlights_page=is_highlights_page)
+                for paragraph, heading in zip(paragraphs, paragraph_headings, strict=False)
             ]
             page_type = _infer_page_type(
                 page_number=page_number,
@@ -2200,6 +2223,11 @@ class PdfTextParser(ParserAdapter):
                 full_text="\n\n".join(paragraphs),
                 has_title=(page_number == 1),
             )
+            if page_type == "toc":
+                paragraph_roles = [
+                    SemanticRole.TOC_ENTRY.value if heading is not None else role
+                    for role, heading in zip(paragraph_roles, paragraph_headings, strict=False)
+                ]
             sequence = _build_page_content_sequence(paragraphs, page_layout=page_layout)
             if not sequence:
                 # Keep an explicit, non-indexable page artifact for every
@@ -2308,6 +2336,7 @@ class PdfTextParser(ParserAdapter):
 
                 paragraph = paragraphs[item_index]
                 semantic_role = paragraph_roles[item_index]
+                structural_heading = paragraph_headings[item_index]
                 metadata: dict[str, Any] = _provider_metadata({
                     "page": page_number,
                     "page_type": page_type,
@@ -2315,6 +2344,15 @@ class PdfTextParser(ParserAdapter):
                     "page_position": item_index + 1,
                     "semantic_role": semantic_role,
                 }, parser_name=self.name)
+                if structural_heading is not None and page_type != "toc":
+                    metadata.update(
+                        {
+                            "is_section_heading": True,
+                            "heading_level": structural_heading.heading_level,
+                            "section_no": structural_heading.section_no,
+                            "normalized_title": structural_heading.normalized_title,
+                        }
+                    )
                 if page_layout is not None:
                     _attach_page_layout_metadata(metadata, page_layout)
                     if page_layout.ocr_fallback_reason is not None:
@@ -3050,12 +3088,24 @@ _LEP_ENTRY_PATTERN = re.compile(r"(?:LIST OF EFFECTIVE PAGES|\bPage\s+[A-Z0-9.\-
 
 
 _HEADING_LINE_PATTERN = re.compile(
-    r"^(?:\d+(?:\.\d+)*[.、)]|第[\d一二三四五六七八九十百]+[章节条款])\s"
+    r"^(?:"
+    r"\d+(?:[.．]\d+)*(?:[.．、)]|\s)|"
+    r"[一二三四五六七八九十百千]+、|"
+    r"第\s*(?:\d+(?:[.．-]\d+)*|[一二三四五六七八九十百千]+)\s*[章节条款]"
+    r")[\s\u3000]*\S"
 )
 
 _STRUCTURAL_ITEM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^\s*第\s*(?:\d+(?:[.．-]\d+)*|[一二三四五六七八九十百千]+)\s*[章节条款](?:\s+|$)"
+    ),
+    re.compile(r"^\s*[一二三四五六七八九十百千]+、\s*\S"),
+    re.compile(r"^\s*\d+(?:[.．]\d+)+(?:[.．、)]?\s+)\S"),
+    re.compile(r"^\s*\d+[.．、]\s*\S"),
+    re.compile(r"^\s*\d+\s+[\u3400-\u9fff]\S*"),
     re.compile(r"^\s*\([a-zA-Z]\)\s"),
     re.compile(r"^\s*\(\d+\)\s"),
+    re.compile(r"^\s*\d+[）)]\s*"),
     re.compile(
         r"^\s*(?:NOTE|WARNING|CAUTION|Note|Warning|Caution|注意|警告|小心)\s*[:：]"
     ),
@@ -3100,6 +3150,148 @@ _HIGHLIGHTS_CHANGE_START_PATTERN = re.compile(
 )
 
 _HIGHLIGHTS_PAGE_REF_PATTERN = re.compile(r"\bPages?\s+\d", re.IGNORECASE)
+
+_PDF_CHINESE_STRUCTURAL_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>第\s*(?P<ordinal>\d+(?:[.\-]\d+)*|[一二三四五六七八九十百千]+)\s*"
+    r"(?P<kind>[章节条款]))(?:\s+|$)(?P<title>[^\n]*)",
+)
+_PDF_CHINESE_ENUM_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>[一二三四五六七八九十百千]+)[、.]\s*(?P<title>[^\n]+)"
+)
+_PDF_ENGLISH_STRUCTURAL_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<kind>CHAPTER|SECTION)\s+(?P<number>[A-Z0-9IVXLCDM.-]+)"
+    r"(?:\s*[-:：.]?\s*)(?P<title>[^\n]*)",
+    re.IGNORECASE,
+)
+_PDF_APPENDIX_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<kind>附录|附件|APPENDIX|ANNEX)\s*(?P<number>[A-Z0-9一二三四五六七八九十]*)"
+    r"(?:\s*[-:：.]?\s*)(?P<title>[^\n]*)",
+    re.IGNORECASE,
+)
+_PDF_NUMBERED_HEADING_PATTERN = re.compile(
+    r"^\s*(?P<number>\d+(?:\.\d+)*)(?P<separator>[.)、]|\s+)\s*(?P<title>[^\n]+)"
+)
+_PDF_TOC_HEADING_PATTERN = re.compile(
+    r"^\s*(?:目录|目次|CONTENTS?|TABLE\s+OF\s+CONTENTS)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+@dataclass(slots=True, frozen=True)
+class _PdfStructuralHeading:
+    semantic_role: str
+    section_no: str
+    normalized_title: str
+    heading_level: int
+
+
+def _english_title_like(value: str) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'/-]*", value)
+    if not words:
+        return False
+    if value.rstrip().endswith((".", "?", "!", ";")):
+        return False
+    uppercase_ratio = sum(1 for char in value if char.isupper()) / max(
+        1, sum(1 for char in value if char.isalpha())
+    )
+    title_case_ratio = sum(1 for word in words if word[:1].isupper()) / len(words)
+    return uppercase_ratio >= 0.7 or title_case_ratio >= 0.7 or len(words) <= 3
+
+
+def _infer_pdf_structural_heading(paragraph: str) -> _PdfStructuralHeading | None:
+    """Infer a generic section/clause heading from the paragraph's first line.
+
+    PDF extractors commonly attach the body text to a numbered heading.  The
+    first line is therefore the only part used for hierarchy metadata, while
+    the full paragraph remains the KnowledgeUnit text.
+    """
+
+    first_line = str(paragraph or "").splitlines()[0].strip() if str(paragraph or "").strip() else ""
+    first_line = unicodedata.normalize("NFKC", first_line)
+    first_line = _normalize_inline_whitespace(first_line)
+    if not first_line or len(first_line) > 120 or _TOC_ENTRY_TERMINATOR.search(first_line):
+        return None
+
+    chinese = _PDF_CHINESE_STRUCTURAL_HEADING_PATTERN.match(first_line)
+    if chinese is not None:
+        kind = str(chinese.group("kind") or "")
+        number = _normalize_inline_whitespace(chinese.group("number") or "")
+        title = _normalize_inline_whitespace(chinese.group("title") or "")
+        normalized_title = f"{number} {title}".strip()
+        if kind == "章":
+            role = SemanticRole.BODY_SECTION.value
+            level = 1
+        elif kind == "节":
+            role = SemanticRole.BODY_SECTION.value
+            level = 2
+        else:
+            role = SemanticRole.CLAUSE.value
+            level = 2 if kind == "条" else 3
+        return _PdfStructuralHeading(role, number, normalized_title, level)
+
+    appendix = _PDF_APPENDIX_HEADING_PATTERN.match(first_line)
+    if appendix is not None:
+        kind = _normalize_inline_whitespace(appendix.group("kind") or "")
+        number = _normalize_inline_whitespace(appendix.group("number") or "")
+        title = _normalize_inline_whitespace(appendix.group("title") or "")
+        section_no = f"{kind} {number}".strip()
+        return _PdfStructuralHeading(
+            SemanticRole.APPENDIX.value,
+            section_no,
+            f"{section_no} {title}".strip(),
+            1,
+        )
+
+    english = _PDF_ENGLISH_STRUCTURAL_HEADING_PATTERN.match(first_line)
+    if english is not None:
+        kind = str(english.group("kind") or "").upper()
+        number = str(english.group("number") or "").upper()
+        title = _normalize_inline_whitespace(english.group("title") or "")
+        section_no = f"{kind} {number}".strip()
+        return _PdfStructuralHeading(
+            SemanticRole.BODY_SECTION.value,
+            section_no,
+            f"{section_no} {title}".strip(),
+            1 if kind == "CHAPTER" else 2,
+        )
+
+    chinese_enum = _PDF_CHINESE_ENUM_HEADING_PATTERN.match(first_line)
+    if chinese_enum is not None:
+        number = str(chinese_enum.group("number") or "")
+        title = _normalize_inline_whitespace(chinese_enum.group("title") or "")
+        if title and not re.search(r"[。；;]", title):
+            return _PdfStructuralHeading(
+                SemanticRole.BODY_SECTION.value,
+                number,
+                f"{number}、{title}".strip(),
+                1,
+            )
+
+    numbered = _PDF_NUMBERED_HEADING_PATTERN.match(first_line)
+    if numbered is None:
+        return None
+    number = str(numbered.group("number") or "")
+    separator = str(numbered.group("separator") or "")
+    title = _normalize_inline_whitespace(numbered.group("title") or "")
+    if not title or re.search(r"[。；;]", title):
+        return None
+    if separator == "." and re.match(r"^[A-Z0-9]+\.\d+\s+\S", title, re.IGNORECASE):
+        # Codes such as ``145.A.30`` are handled by the generic clause
+        # matcher below; do not truncate them to a false top-level section.
+        return None
+    is_chinese_title = re.search(r"[\u3400-\u9fff]", title) is not None
+    if "." not in number and separator.isspace():
+        if not is_chinese_title or title.startswith("年") or len(title) > 40:
+            return None
+    if "." not in number and not is_chinese_title and not _english_title_like(title):
+        return None
+    role = SemanticRole.CLAUSE.value if "." in number else SemanticRole.BODY_SECTION.value
+    return _PdfStructuralHeading(
+        role,
+        number,
+        f"{number} {title}".strip(),
+        number.count(".") + 1,
+    )
 
 
 def _split_toc_entries(
@@ -3172,6 +3364,34 @@ def _infer_semantic_role(
         return SemanticRole.WARNING.value
     if re.match(r"^(?:CAUTION|小心)\s*[:：]", stripped, re.IGNORECASE):
         return SemanticRole.CAUTION.value
+    if re.match(r"^(?:DEFINITION|定义)\s*[:：]", stripped, re.IGNORECASE) or re.match(
+        r"^[“\"']?[^。；;:：]{1,48}[”\"']?\s+(?:means|refers\s+to)\b",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return SemanticRole.DEFINITION.value
+    if re.match(r"^(?:PROCEDURE|程序|流程)\s*[:：]", stripped, re.IGNORECASE):
+        return SemanticRole.PROCEDURE.value
+    if re.match(
+        r"^(?:STEP\s+\d+|步骤\s*[一二三四五六七八九十\d]+|第\s*[一二三四五六七八九十\d]+\s*步)\b",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return SemanticRole.PROCEDURE_STEP.value
+    if re.match(
+        r"^(?:[-•·▪◦]\s+|[（(](?:\d+|[一二三四五六七八九十]+)[）)]\s*|\d+[）)]\s*)",
+        stripped,
+    ):
+        return SemanticRole.LIST_ITEM.value
+    structural_heading = _infer_pdf_structural_heading(stripped)
+    if structural_heading is not None:
+        return structural_heading.semantic_role
+    if re.match(
+        r"^(?:(?:[A-Z0-9]+\.)+[A-Z0-9]+|\d+(?:\.\d+){1,5})(?:[.、)])?\s+\S",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return SemanticRole.CLAUSE.value
     if _TOC_ENTRY_TERMINATOR.search(stripped):
         return SemanticRole.TOC_ENTRY.value
     if "LIST OF EFFECTIVE PAGES" in upper or _LEP_ENTRY_PATTERN.search(stripped):
@@ -3192,7 +3412,11 @@ def _infer_page_type(
     role_set = set(roles)
     normalized_text = full_text.lower()
     stripped_text = full_text.strip()
-    if SemanticRole.TOC_ENTRY.value in role_set or SemanticRole.LEP_ENTRY.value in role_set:
+    if (
+        SemanticRole.TOC_ENTRY.value in role_set
+        or SemanticRole.LEP_ENTRY.value in role_set
+        or _PDF_TOC_HEADING_PATTERN.search(full_text)
+    ):
         return "toc"
     if any(token in normalized_text for token in ("signature", "signed by", "approved by", "签字", "签名", "审批")):
         return "signature"

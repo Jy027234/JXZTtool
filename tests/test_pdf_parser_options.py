@@ -1103,7 +1103,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         def fake_extract_pdfplumber_layout(*_args, **kwargs):
             recovered_text, attempt_reason, error_reason, _timings = kwargs["ocr_page_text_fn"](
-                SimpleNamespace(images=[object()]),
+                SimpleNamespace(images=[]),
                 [],
                 1,
                 "",
@@ -1163,9 +1163,28 @@ class PdfTextParserOptionsTests(unittest.TestCase):
 
         self.assertEqual(blocks[1].content, "broken native text")
         self.assertTrue(blocks[1].metadata["ocr_attempted"])
-        self.assertEqual(blocks[1].metadata["ocr_attempt_reason"], "native_text_empty")
+        self.assertEqual(blocks[1].metadata["ocr_attempt_reason"], "forced_full_page")
         self.assertEqual(blocks[1].metadata["ocr_error_reason"], "provider_request_failed")
         self.assertNotIn("ocr_fallback_used", blocks[1].metadata)
+
+    def test_empty_page_without_image_metadata_is_skipped_in_auto_mode(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+
+        recovered, reason, error, timings = parser._maybe_recover_page_with_ocr(
+            SimpleNamespace(images=[]),
+            [],
+            1,
+            "",
+        )
+
+        self.assertIsNone(recovered)
+        self.assertIsNone(reason)
+        self.assertIsNone(error)
+        self.assertEqual(timings.total_elapsed_s, 0.0)
 
     def test_empty_image_page_is_ocr_candidate(self) -> None:
         parser = PdfTextParser(

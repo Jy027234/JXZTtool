@@ -7,6 +7,16 @@
 - 保持 ParseCore 作为独立解析服务的稳定 API、配置、队列、解析质量与可观测能力。
 - 优先处理会影响宿主系统可靠性、吞吐、诊断闭环的服务端问题。
 - 不把宿主系统 UI、业务权限、文档库交互逻辑放入 ParseCore 仓库实现。
+- 不把法规义务判断、公司事实审批、领域 ontology、LLM Wiki Page/Claim 编译、Wiki 生命周期或宿主问答路由放入 ParseCore。
+- ParseCore 只输出通用知识结构契约；当前冻结版本见 `knowledge-unit-contract-v1.md`。
+
+## 已冻结的知识结构配套契约
+
+1. `projection=ir / reader / coverage` 使用版本化 schema 输出源完整性、稳定对象指纹和来源跨度。
+2. KnowledgeUnit 输出章节/列表层级、通用语义角色、跨页连续关系和全量处理状态。
+3. ParseRun diff 区分 `unchanged / added / changed / removed / relocated / unknown`。
+4. coverage 总数守恒并报告静默遗漏；结构风险以质量信号表达。
+5. 宿主必须消费这些解析事实完成法规、手册、公司证据和 Wiki 领域编译，不得要求 ParseCore 作领域结论。
 
 ## 优先级一：队列可靠性与任务生命周期
 

@@ -4,6 +4,8 @@ import unittest
 
 from parsecore.parsers import (
     PdfTextParser,
+    _infer_pdf_structural_heading,
+    _infer_semantic_role,
     _merge_cross_page_paragraph_blocks,
     _split_inline_structural_items,
     _split_structural_items,
@@ -43,6 +45,49 @@ _INLINE_NUMBERED_PARAGRAPH = (
 )
 
 
+class SemanticRoleInferenceTests(unittest.TestCase):
+    def test_preserves_safety_and_note_roles(self) -> None:
+        self.assertEqual(_infer_semantic_role("NOTE: Retain this record."), SemanticRole.NOTE.value)
+        self.assertEqual(_infer_semantic_role("警告：先断开电源。"), SemanticRole.WARNING.value)
+        self.assertEqual(_infer_semantic_role("CAUTION: Wear gloves."), SemanticRole.CAUTION.value)
+
+    def test_detects_generic_knowledge_structure_roles(self) -> None:
+        cases = {
+            "定义：责任经理是指经批准的岗位负责人。": SemanticRole.DEFINITION.value,
+            '"Accountable manager" means the nominated executive.': SemanticRole.DEFINITION.value,
+            "程序：工具校验管理": SemanticRole.PROCEDURE.value,
+            "步骤 2 检查设备状态": SemanticRole.PROCEDURE_STEP.value,
+            "第 三 步 检查签署记录": SemanticRole.PROCEDURE_STEP.value,
+            "（一）检查适航资料": SemanticRole.LIST_ITEM.value,
+            "- Retain the release record": SemanticRole.LIST_ITEM.value,
+            "1.2 Record control requirements": SemanticRole.CLAUSE.value,
+            "145.A.30 Personnel requirements": SemanticRole.CLAUSE.value,
+            "第一章 总则": SemanticRole.BODY_SECTION.value,
+            "第 145.28 条 维修管理手册": SemanticRole.CLAUSE.value,
+            "CHAPTER 3 MAINTENANCE PROCEDURES": SemanticRole.BODY_SECTION.value,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(_infer_semantic_role(text), expected)
+
+    def test_extracts_generic_pdf_hierarchy_metadata_from_first_line(self) -> None:
+        article = _infer_pdf_structural_heading(
+            "第 145.28 条 维修管理手册\n维修单位应当建立并持续更新手册。"
+        )
+        nested = _infer_pdf_structural_heading(
+            "4.2.1 工具设备采购选择评估要求\n按批准程序执行。"
+        )
+
+        self.assertIsNotNone(article)
+        self.assertEqual(article.semantic_role, SemanticRole.CLAUSE.value)
+        self.assertEqual(article.section_no, "第 145.28 条")
+        self.assertEqual(article.heading_level, 2)
+        self.assertIsNotNone(nested)
+        self.assertEqual(nested.semantic_role, SemanticRole.CLAUSE.value)
+        self.assertEqual(nested.section_no, "4.2.1")
+        self.assertEqual(nested.heading_level, 3)
+
+
 class SplitStructuralItemsTests(unittest.TestCase):
     def test_passes_short_paragraphs_through(self) -> None:
         short = "single short paragraph with\ntwo lines"
@@ -78,6 +123,33 @@ class SplitStructuralItemsTests(unittest.TestCase):
         result = _split_structural_items([preamble_plus_items])
         self.assertGreaterEqual(len(result), 3)
         self.assertIn("Preamble line 1", result[0])
+
+    def test_splits_chapters_articles_and_numbered_manual_sections(self) -> None:
+        paragraph = "\n".join(
+            [
+                "document preamble",
+                "filler one",
+                "filler two",
+                "第一章 总则",
+                "第 145.1 条 目的和依据",
+                "条款正文第一行",
+                "条款正文第二行",
+                "第 145.2 条 适用范围",
+                "适用范围正文",
+                "4.1 工具设备的请购",
+                "请购程序正文",
+                "4.2 工具设备的采购",
+                "采购程序正文",
+            ]
+        )
+
+        result = _split_structural_items([paragraph])
+
+        self.assertTrue(any(item.startswith("第一章") for item in result))
+        self.assertTrue(any(item.startswith("第 145.1 条") for item in result))
+        self.assertTrue(any(item.startswith("第 145.2 条") for item in result))
+        self.assertTrue(any(item.startswith("4.1 ") for item in result))
+        self.assertTrue(any(item.startswith("4.2 ") for item in result))
 
 
 class SplitInlineStructuralItemsTests(unittest.TestCase):

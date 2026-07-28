@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import unicodedata
 from typing import Any, Mapping, Sequence
 
 from .models import Block, BlockType, Chunk
 
 
-IR_SCHEMA_VERSION = "2026-06-ir"
-COVERAGE_SCHEMA_VERSION = "2026-06-coverage"
+IR_SCHEMA_VERSION = "2026-07-ir"
+COVERAGE_SCHEMA_VERSION = "2026-07-coverage"
+KNOWLEDGE_UNIT_CONTRACT_VERSION = "2026-07-knowledge-unit-v1"
+KNOWLEDGE_UNIT_DIFF_VERSION = "2026-07-knowledge-unit-diff-v1"
+
+_SECTION_ROLES = {"body_section", "appendix", "section", "heading"}
+_STRUCTURED_UNIT_ROLES = {"clause", "definition", "list_item", "procedure", "procedure_step"}
+_SECTION_NUMBER_PATTERN = re.compile(
+    r"^\s*((?:\d+(?:[.\-]\d+)*|[A-Z]\.?\d+(?:\.\d+)*|第\s*(?:\d+(?:[.\-]\d+)*|[一二三四五六七八九十百千]+)\s*[章节条款]|(?:chapter|section)\s+[A-Z0-9IVXLCDM.-]+|(?:附录|附件|appendix|annex)\s*[A-Z0-9一二三四五六七八九十]*))(?=\s|[、.)）:：]|$)",
+    re.IGNORECASE,
+)
+_LIST_MARKER_PATTERN = re.compile(
+    r"^\s*(?P<marker>[-*•·▪◦]|[（(](?:\d+|[A-Za-z]|[一二三四五六七八九十]+)[）)]|\d+[.)、])\s*"
+)
 
 _SKIP_INDEX_ROLES = {
     "header_footer",
@@ -36,15 +52,21 @@ def build_ir_projection(
 ) -> dict[str, Any]:
     """Build the stable Parse IR projection from existing ParseCore models."""
 
-    ir_blocks = [_ir_block(block, index=index) for index, block in enumerate(blocks, start=1)]
-    ir_tables = _ir_tables(tables=tables, blocks=blocks)
-    figures = _ir_figures(blocks)
+    source_integrity = _snapshot_source_integrity(snapshot)
+    source_version_key = str(source_integrity.get("source_hash") or "")
+    ir_blocks = [
+        _ir_block(block, index=index, source_version_key=source_version_key)
+        for index, block in enumerate(blocks, start=1)
+    ]
+    ir_tables = _ir_tables(tables=tables, blocks=blocks, source_version_key=source_version_key)
+    figures = _ir_figures(blocks, source_version_key=source_version_key)
     knowledge_units = _knowledge_units(
         doc_id=doc_id,
         ir_blocks=ir_blocks,
         ir_tables=ir_tables,
         chunks=chunks,
         index_manifest=snapshot.get("index_manifest"),
+        source_version_key=source_version_key,
     )
     coverage = build_coverage_payload(
         doc_id=doc_id,
@@ -60,12 +82,20 @@ def build_ir_projection(
         knowledge_units=knowledge_units,
         quality_signals=quality_signals,
         index_manifest=snapshot.get("index_manifest"),
+        source_integrity=source_integrity,
+        knowledge_unit_diff=_snapshot_knowledge_unit_diff(
+            snapshot,
+            current_units=knowledge_units,
+            current_parse_run_id=parse_run_id,
+        ),
     )
     return {
         "schema_version": IR_SCHEMA_VERSION,
         "projection": "ir",
         "doc_id": doc_id,
         "parse_run_id": parse_run_id,
+        "source_integrity": source_integrity,
+        "knowledge_unit_diff": coverage["knowledge_unit_diff"],
         "profile": profile,
         "profile_resolution": dict(profile_resolution),
         "state": state,
@@ -104,15 +134,21 @@ def build_coverage_projection(
 ) -> dict[str, Any]:
     """Build a compact RAG/readability coverage projection."""
 
-    ir_blocks = [_ir_block(block, index=index) for index, block in enumerate(blocks, start=1)]
-    ir_tables = _ir_tables(tables=tables, blocks=blocks)
-    figures = _ir_figures(blocks)
+    source_integrity = _snapshot_source_integrity(snapshot)
+    source_version_key = str(source_integrity.get("source_hash") or "")
+    ir_blocks = [
+        _ir_block(block, index=index, source_version_key=source_version_key)
+        for index, block in enumerate(blocks, start=1)
+    ]
+    ir_tables = _ir_tables(tables=tables, blocks=blocks, source_version_key=source_version_key)
+    figures = _ir_figures(blocks, source_version_key=source_version_key)
     knowledge_units = _knowledge_units(
         doc_id=doc_id,
         ir_blocks=ir_blocks,
         ir_tables=ir_tables,
         chunks=chunks,
         index_manifest=snapshot.get("index_manifest"),
+        source_version_key=source_version_key,
     )
     payload = build_coverage_payload(
         doc_id=doc_id,
@@ -128,6 +164,12 @@ def build_coverage_projection(
         knowledge_units=knowledge_units,
         quality_signals=quality_signals,
         index_manifest=snapshot.get("index_manifest"),
+        source_integrity=source_integrity,
+        knowledge_unit_diff=_snapshot_knowledge_unit_diff(
+            snapshot,
+            current_units=knowledge_units,
+            current_parse_run_id=parse_run_id,
+        ),
     )
     payload["local_provider_routing"] = _local_provider_routing_decision(snapshot)
     return payload
@@ -148,6 +190,8 @@ def build_coverage_payload(
     knowledge_units: Sequence[Mapping[str, Any]],
     quality_signals: Sequence[Mapping[str, Any]],
     index_manifest: Any,
+    source_integrity: Mapping[str, Any] | None = None,
+    knowledge_unit_diff: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     page_numbers_set = {
         _safe_int(page.get("page_number"), default=1)
@@ -191,8 +235,19 @@ def build_coverage_payload(
 
     units_by_page: dict[int, list[Mapping[str, Any]]] = {}
     embedded_chunk_ids = {chunk.chunk_id for chunk in chunks if chunk.embedding is not None}
+    source_version_key = next(
+        (str(unit.get("source_version_key") or "") for unit in knowledge_units if str(unit.get("source_version_key") or "")),
+        "",
+    )
+    contract_units = _enrich_knowledge_unit_contract(
+        doc_id=doc_id,
+        units=knowledge_units,
+        ir_blocks=ir_blocks,
+        ir_tables=tables,
+        source_version_key=source_version_key,
+    )
     coverage_units = _coverage_units(
-        knowledge_units=knowledge_units,
+        knowledge_units=contract_units,
         embedded_chunk_ids=embedded_chunk_ids,
     )
     for unit in coverage_units:
@@ -209,7 +264,11 @@ def build_coverage_payload(
         figures_by_page.setdefault(_safe_int(figure.get("page_number"), default=1), []).append(figure)
 
     coverage_pages: list[dict[str, Any]] = []
-    coverage_signals: list[dict[str, Any]] = []
+    coverage_signals: list[dict[str, Any]] = _knowledge_structure_quality_signals(contract_units)
+    for signal in coverage_signals:
+        page_number = signal.get("page_number")
+        if page_number is not None:
+            signals_by_page.setdefault(_safe_int(page_number, default=1), []).append(str(signal.get("code") or ""))
     for page_number in page_numbers:
         page_payload = pages_by_number.get(page_number, {})
         page_blocks = ir_blocks_by_page.get(page_number, [])
@@ -350,6 +409,16 @@ def build_coverage_payload(
         "projection": "coverage",
         "doc_id": doc_id,
         "parse_run_id": parse_run_id,
+        "source_integrity": _normalized_source_integrity(source_integrity),
+        "knowledge_unit_diff": dict(
+            knowledge_unit_diff
+            or build_knowledge_unit_diff(
+                previous_units=(),
+                current_units=contract_units,
+                previous_parse_run_id="",
+                current_parse_run_id=parse_run_id,
+            )
+        ),
         "profile": profile,
         "state": state,
         "coverage": {
@@ -402,7 +471,7 @@ def _ir_pages(*, pages: Sequence[Mapping[str, Any]], ir_blocks: Sequence[Mapping
     return ir_pages
 
 
-def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
+def _ir_block(block: Block, *, index: int, source_version_key: str = "") -> dict[str, Any]:
     metadata = block.metadata or {}
     role = str(metadata.get("semantic_role") or block.type.value)
     page_number = _page_number(metadata)
@@ -468,14 +537,54 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
             "start": page_number,
             "end": metadata.get("page_end"),
         }
+    heading_level_value = _safe_int(metadata.get("heading_level"), default=0)
+    list_marker_match = _LIST_MARKER_PATTERN.match(block.content or "")
+    list_level_value = _safe_int(metadata.get("list_level"), default=0)
+    if role == "list_item" and list_level_value <= 0:
+        leading_spaces = len(str(block.content or "")) - len(str(block.content or "").lstrip(" \t"))
+        list_level_value = max(1, 1 + (leading_spaces // 2))
+    continuation_group_id = str(
+        metadata.get("continuation_group_id")
+        or metadata.get("continuation_group")
+        or metadata.get("list_group_id")
+        or metadata.get("list_id")
+        or metadata.get("table_group_id")
+        or metadata.get("continued_table_id")
+        or ""
+    ).strip()
+    resolved_page_span = list(_page_span_tuple(page_span, fallback_page=page_number))
+    resolved_bbox = _bbox(metadata.get("bbox"))
+    block_fingerprint = _contract_hash(
+        {
+            "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+            "doc_id": block.doc_id,
+            "source_version_key": source_version_key,
+            "type": block.type.value,
+            "semantic_role": role,
+            "normalized_text": _contract_text(block.content),
+            "page_span": resolved_page_span,
+            "bbox": resolved_bbox,
+            "reading_order": _safe_int(metadata.get("reading_order", metadata.get("page_position")), default=index),
+        }
+    )
     payload = {
         "block_id": block.block_id,
+        "stable_block_id": f"{block.doc_id}:blkf:{block_fingerprint[:20]}",
+        "block_fingerprint": block_fingerprint,
+        "source_version_key": source_version_key,
         "page_number": page_number,
-        "page_span": list(_page_span_tuple(page_span, fallback_page=page_number)),
+        "page_span": resolved_page_span,
         "type": block.type.value,
         "semantic_role": role,
+        "is_section_heading": bool(metadata.get("is_section_heading")) or role in _SECTION_ROLES,
+        "heading_level": heading_level_value if heading_level_value > 0 else None,
+        "normalized_title": str(metadata.get("normalized_title") or ""),
+        "section_no": str(metadata.get("section_no") or metadata.get("section_number") or ""),
+        "list_level": list_level_value if role == "list_item" else 0,
+        "list_marker": str(metadata.get("list_marker") or (list_marker_match.group("marker") if list_marker_match else "")),
+        "list_parent_block_id": str(metadata.get("list_parent_block_id") or metadata.get("parent_list_item_id") or ""),
         "text": block.content,
-        "bbox": _bbox(metadata.get("bbox")),
+        "bbox": resolved_bbox,
         "reading_order": _safe_int(metadata.get("reading_order", metadata.get("page_position")), default=index),
         "confidence": _optional_float(metadata.get("confidence"), default=1.0),
         "source_kind": source_kind,
@@ -484,6 +593,25 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
         "index_policy": index_policy,
         "alt_text": str(metadata.get("alt_text") or "") if block.type == BlockType.IMAGE or role == "image" else "",
         "quality_flags": _string_list(metadata.get("quality_flags")),
+        "continuation": {
+            "group_id": continuation_group_id,
+            "is_continuation": bool(
+                metadata.get("is_continuation")
+                or metadata.get("continued")
+                or metadata.get("continues_from")
+                or metadata.get("continuation_of")
+            ),
+            "continues_from": str(metadata.get("continues_from") or metadata.get("continuation_of") or ""),
+            "continues_to": str(metadata.get("continues_to") or ""),
+            "kind": str(metadata.get("continuation_kind") or ""),
+        },
+        "source_span": _source_span(
+            page_span=resolved_page_span,
+            source_block_ids=[block.block_id],
+            source_table_ids=[],
+            bbox=resolved_bbox,
+            bbox_page=page_number,
+        ),
         "provenance": provenance,
     }
     for region_field in ("lines", "words"):
@@ -493,9 +621,16 @@ def _ir_block(block: Block, *, index: int) -> dict[str, Any]:
     return payload
 
 
-def _ir_tables(*, tables: Sequence[Mapping[str, Any]], blocks: Sequence[Block]) -> list[dict[str, Any]]:
+def _ir_tables(
+    *,
+    tables: Sequence[Mapping[str, Any]],
+    blocks: Sequence[Block],
+    source_version_key: str = "",
+) -> list[dict[str, Any]]:
     block_provider = {block.block_id: _provider_id(block.metadata or {}, block_type=block.type) for block in blocks}
     block_source_kind = {block.block_id: _source_kind(block.metadata or {}, block_type=block.type) for block in blocks}
+    block_doc_id = {block.block_id: block.doc_id for block in blocks}
+    block_metadata = {block.block_id: dict(block.metadata or {}) for block in blocks}
     ir_tables: list[dict[str, Any]] = []
     for table in tables:
         if not isinstance(table, Mapping):
@@ -504,17 +639,50 @@ def _ir_tables(*, tables: Sequence[Mapping[str, Any]], blocks: Sequence[Block]) 
         provider_id = str(table.get("source_parser") or block_provider.get(block_id) or "")
         warnings = _string_list(table.get("warnings"))
         page_number = _safe_int(table.get("page_number"), default=1)
+        table_id = str(table.get("table_id") or "")
+        source_doc_id = str(table.get("source_doc_id") or block_doc_id.get(block_id) or "")
+        page_span = list(
+            _page_span_tuple(
+                table.get("page_span"),
+                fallback_page=page_number,
+            )
+        )
+        table_bbox = _bbox(table.get("bbox"))
+        source_metadata = block_metadata.get(block_id, {})
+        continuation_group_id = str(
+            table.get("continuation_group_id")
+            or table.get("table_group_id")
+            or table.get("continued_table_id")
+            or source_metadata.get("continuation_group_id")
+            or source_metadata.get("table_group_id")
+            or source_metadata.get("continued_table_id")
+            or ""
+        ).strip()
+        table_fingerprint = _contract_hash(
+            {
+                "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "source_version_key": source_version_key,
+                "source_doc_id": source_doc_id,
+                "page_span": page_span,
+                "bbox": table_bbox,
+                "caption": _contract_text(table.get("table_title") or table.get("caption") or ""),
+                "cells": [dict(cell) for cell in table.get("cells", []) if isinstance(cell, Mapping)],
+            }
+        )
         ir_tables.append(
             {
-                "table_id": str(table.get("table_id") or ""),
-                "source_doc_id": str(table.get("source_doc_id") or ""),
+                "table_id": table_id,
+                "stable_table_id": f"{source_doc_id}:tblf:{table_fingerprint[:20]}",
+                "table_fingerprint": table_fingerprint,
+                "source_version_key": source_version_key,
+                "source_doc_id": source_doc_id,
                 "part_doc_id": str(table.get("part_doc_id") or ""),
                 "block_id": block_id,
                 "page_number": page_number,
-                "page_span": [page_number, page_number],
+                "page_span": page_span,
                 "semantic_role": str(table.get("semantic_role") or "table"),
                 "source_kind": str(table.get("source_kind") or block_source_kind.get(block_id) or "structured_table"),
-                "bbox": _bbox(table.get("bbox")),
+                "bbox": table_bbox,
                 "rows": _safe_int(table.get("rows"), default=0),
                 "cols": _safe_int(table.get("cols"), default=0),
                 "header_rows": _safe_int(table.get("header_rows"), default=0),
@@ -524,13 +692,44 @@ def _ir_tables(*, tables: Sequence[Mapping[str, Any]], blocks: Sequence[Block]) 
                 "reader_policy": "table",
                 "index_policy": "index_table_summary_and_cells" if table.get("cells") or table.get("text") else "skip_empty_table",
                 "quality_flags": warnings,
+                "continuation": {
+                    "group_id": continuation_group_id,
+                    "is_continuation": bool(
+                        table.get("is_continuation")
+                        or table.get("continued")
+                        or source_metadata.get("is_continuation")
+                        or source_metadata.get("continued")
+                    ),
+                    "continues_from": str(
+                        table.get("continues_from")
+                        or source_metadata.get("continues_from")
+                        or ""
+                    ),
+                    "continues_to": str(
+                        table.get("continues_to")
+                        or source_metadata.get("continues_to")
+                        or ""
+                    ),
+                    "kind": str(
+                        table.get("continuation_kind")
+                        or source_metadata.get("continuation_kind")
+                        or ""
+                    ),
+                },
+                "source_span": _source_span(
+                    page_span=page_span,
+                    source_block_ids=[block_id] if block_id else [],
+                    source_table_ids=[table_id] if table_id else [],
+                    bbox=table_bbox,
+                    bbox_page=page_number,
+                ),
                 "provenance": {"provider_id": provider_id},
             }
         )
     return ir_tables
 
 
-def _ir_figures(blocks: Sequence[Block]) -> list[dict[str, Any]]:
+def _ir_figures(blocks: Sequence[Block], *, source_version_key: str = "") -> list[dict[str, Any]]:
     figures: list[dict[str, Any]] = []
     for block in blocks:
         metadata = block.metadata or {}
@@ -538,15 +737,38 @@ def _ir_figures(blocks: Sequence[Block]) -> list[dict[str, Any]]:
         if block.type != BlockType.IMAGE and role != "image":
             continue
         page_number = _page_number(metadata)
+        page_span = list(
+            _page_span_tuple(
+                metadata.get("page_span"),
+                fallback_page=page_number,
+            )
+        )
+        figure_bbox = _bbox(metadata.get("bbox"))
+        figure_fingerprint = _contract_hash(
+            {
+                "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "doc_id": block.doc_id,
+                "source_version_key": source_version_key,
+                "page_span": page_span,
+                "bbox": figure_bbox,
+                "figure_type": str(metadata.get("figure_kind") or metadata.get("figure_type") or "image"),
+                "caption": _contract_text(block.content),
+                "alt_text": _contract_text(metadata.get("alt_text") or ""),
+            }
+        )
+        figure_id = f"{block.doc_id}:p{page_number}:f{len(figures) + 1}"
         figures.append(
             {
-                "figure_id": f"{block.doc_id}:p{page_number}:f{len(figures) + 1}",
+                "figure_id": figure_id,
+                "stable_figure_id": f"{block.doc_id}:figf:{figure_fingerprint[:20]}",
+                "figure_fingerprint": figure_fingerprint,
+                "source_version_key": source_version_key,
                 "block_id": block.block_id,
                 "page_number": page_number,
-                "page_span": [page_number, page_number],
+                "page_span": page_span,
                 "semantic_role": role,
                 "source_kind": _source_kind(metadata, block_type=block.type),
-                "bbox": _bbox(metadata.get("bbox")),
+                "bbox": figure_bbox,
                 "figure_type": str(metadata.get("figure_kind") or metadata.get("figure_type") or "image"),
                 "caption": block.content,
                 "alt_text": str(metadata.get("alt_text") or ""),
@@ -559,10 +781,41 @@ def _ir_figures(blocks: Sequence[Block]) -> list[dict[str, Any]]:
                 if block.content.strip() or str(metadata.get("alt_text") or "").strip()
                 else "skip",
                 "quality_flags": _string_list(metadata.get("quality_flags")),
+                "source_span": _source_span(
+                    page_span=page_span,
+                    source_block_ids=[block.block_id],
+                    source_table_ids=[],
+                    bbox=figure_bbox,
+                    bbox_page=page_number,
+                ),
                 "provenance": {"provider_id": _provider_id(metadata, block_type=block.type)},
             }
         )
     return figures
+
+
+def _snapshot_source_version_key(snapshot: Mapping[str, Any]) -> str:
+    index_manifest = snapshot.get("index_manifest")
+    index_payload = index_manifest if isinstance(index_manifest, Mapping) else {}
+    job = snapshot.get("job")
+    job_options = getattr(job, "options", {}) or {}
+    candidates = (
+        snapshot.get("source_hash"),
+        snapshot.get("source_fingerprint"),
+        snapshot.get("document_version"),
+        snapshot.get("version"),
+        index_payload.get("source_hash"),
+        index_payload.get("source_fingerprint"),
+        index_payload.get("document_version"),
+        job_options.get("source_hash"),
+        job_options.get("source_fingerprint"),
+        job_options.get("document_version"),
+    )
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _knowledge_units(
@@ -572,6 +825,7 @@ def _knowledge_units(
     ir_tables: Sequence[Mapping[str, Any]],
     chunks: Sequence[Chunk],
     index_manifest: Any = None,
+    source_version_key: str = "",
 ) -> list[dict[str, Any]]:
     chunk_ids_by_block: dict[str, list[str]] = {}
     for chunk in chunks:
@@ -592,7 +846,13 @@ def _knowledge_units(
         table_ids_by_block=table_ids_by_block,
     )
     if manifest_units:
-        return manifest_units
+        return _enrich_knowledge_unit_contract(
+            doc_id=doc_id,
+            units=manifest_units,
+            ir_blocks=ir_blocks,
+            ir_tables=ir_tables,
+            source_version_key=source_version_key,
+        )
 
     units: list[dict[str, Any]] = []
     tables_by_block = {
@@ -631,7 +891,13 @@ def _knowledge_units(
                 "embedding_state": "skipped" if not should_index else ("pending" if chunk_ids else "pending"),
             }
         )
-    return units
+    return _enrich_knowledge_unit_contract(
+        doc_id=doc_id,
+        units=units,
+        ir_blocks=ir_blocks,
+        ir_tables=ir_tables,
+        source_version_key=source_version_key,
+    )
 
 
 def _knowledge_units_from_runtime_manifest(
@@ -724,6 +990,744 @@ def _knowledge_units_from_runtime_manifest(
     return units
 
 
+def _contract_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return " ".join(normalized.replace("\r", "\n").split()).strip()
+
+
+def _contract_hash(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _source_span(
+    *,
+    page_span: Sequence[Any],
+    source_block_ids: Sequence[Any],
+    source_table_ids: Sequence[Any],
+    bbox: Any,
+    bbox_page: Any,
+) -> dict[str, Any]:
+    start, end = _page_span_tuple(page_span)
+    resolved_bbox = _bbox(bbox)
+    precision = "region" if resolved_bbox is not None and start == end else "page"
+    return {
+        "page_start": start,
+        "page_end": end,
+        "source_block_ids": [str(value) for value in source_block_ids if str(value)],
+        "source_table_ids": [str(value) for value in source_table_ids if str(value)],
+        "bbox": resolved_bbox if precision == "region" else None,
+        "bbox_page": _safe_int(bbox_page, default=start) if precision == "region" else None,
+        "precision": precision,
+        "degraded_reason": "" if precision == "region" else "bbox_unavailable_or_cross_page",
+    }
+
+
+def _normalized_source_integrity(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = value if isinstance(value, Mapping) else {}
+    source_hash = str(payload.get("source_hash") or "")
+    status = str(payload.get("status") or ("verified" if source_hash else "missing"))
+    return {
+        "status": status,
+        "hash_algorithm": str(payload.get("hash_algorithm") or ("sha256" if source_hash else "")),
+        "source_hash": source_hash,
+        "source_size_bytes": _safe_int(payload.get("source_size_bytes"), default=0),
+        "source_mtime_ns": _safe_int(payload.get("source_mtime_ns"), default=0),
+        "parser_schema_version": str(payload.get("parser_schema_version") or IR_SCHEMA_VERSION),
+        "parser_config_fingerprint": str(payload.get("parser_config_fingerprint") or ""),
+        "provider_fingerprint": str(payload.get("provider_fingerprint") or ""),
+    }
+
+
+def _snapshot_source_integrity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    index_manifest = snapshot.get("index_manifest")
+    index_payload = index_manifest if isinstance(index_manifest, Mapping) else {}
+    job = snapshot.get("job")
+    job_options = getattr(job, "options", {}) or {}
+    source_hash = _snapshot_source_version_key(snapshot)
+    return _normalized_source_integrity(
+        {
+            "status": job_options.get("source_hash_status")
+            or index_payload.get("source_hash_status")
+            or ("verified" if source_hash else "missing"),
+            "hash_algorithm": job_options.get("source_hash_algorithm")
+            or index_payload.get("source_hash_algorithm")
+            or ("sha256" if source_hash else ""),
+            "source_hash": source_hash,
+            "source_size_bytes": job_options.get("source_size_bytes") or index_payload.get("source_size_bytes") or 0,
+            "source_mtime_ns": job_options.get("source_mtime_ns") or index_payload.get("source_mtime_ns") or 0,
+            "parser_schema_version": index_payload.get("parser_schema_version") or IR_SCHEMA_VERSION,
+            "parser_config_fingerprint": index_payload.get("parser_config_fingerprint") or "",
+            "provider_fingerprint": index_payload.get("provider_fingerprint") or "",
+        }
+    )
+
+
+def _diff_unit_ref(unit: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "unit_id": str(unit.get("unit_id") or ""),
+        "stable_unit_id": str(unit.get("stable_unit_id") or ""),
+        "unit_fingerprint": str(unit.get("unit_fingerprint") or ""),
+        "content_fingerprint": str(unit.get("content_fingerprint") or ""),
+        "structure_fingerprint": str(unit.get("structure_fingerprint") or ""),
+        "page_span": list(_page_span_tuple(unit.get("page_span"))),
+        "section_no": str(unit.get("section_no") or ""),
+        "title_path": _string_list(unit.get("title_path")),
+    }
+
+
+def build_knowledge_unit_diff(
+    *,
+    previous_units: Sequence[Mapping[str, Any]],
+    current_units: Sequence[Mapping[str, Any]],
+    previous_parse_run_id: str,
+    current_parse_run_id: str,
+) -> dict[str, Any]:
+    """Build a deterministic one-to-one unit mapping across ParseRuns."""
+
+    previous = [dict(unit) for unit in previous_units if isinstance(unit, Mapping)]
+    current = [dict(unit) for unit in current_units if isinstance(unit, Mapping)]
+    unmatched_previous = set(range(len(previous)))
+    unmatched_current = set(range(len(current)))
+    mappings: list[dict[str, Any]] = []
+
+    def append_mapping(
+        previous_index: int | None,
+        current_index: int | None,
+        *,
+        status: str,
+        reason: str,
+        confidence: float,
+    ) -> None:
+        previous_unit = previous[previous_index] if previous_index is not None else None
+        current_unit = current[current_index] if current_index is not None else None
+        mappings.append(
+            {
+                "status": status,
+                "reason": reason,
+                "confidence": confidence,
+                "previous": _diff_unit_ref(previous_unit) if previous_unit is not None else None,
+                "current": _diff_unit_ref(current_unit) if current_unit is not None else None,
+            }
+        )
+        if previous_index is not None:
+            unmatched_previous.discard(previous_index)
+        if current_index is not None:
+            unmatched_current.discard(current_index)
+
+    def match_unique(
+        key_name: str,
+        *,
+        status: str,
+        reason: str,
+        confidence: float,
+    ) -> None:
+        previous_by_key: dict[str, list[int]] = {}
+        current_by_key: dict[str, list[int]] = {}
+        for index in sorted(unmatched_previous):
+            key = str(previous[index].get(key_name) or "")
+            if key:
+                previous_by_key.setdefault(key, []).append(index)
+        for index in sorted(unmatched_current):
+            key = str(current[index].get(key_name) or "")
+            if key:
+                current_by_key.setdefault(key, []).append(index)
+        for key in sorted(set(previous_by_key).intersection(current_by_key)):
+            previous_indexes = previous_by_key[key]
+            current_indexes = current_by_key[key]
+            if len(previous_indexes) == 1 and len(current_indexes) == 1:
+                append_mapping(
+                    previous_indexes[0],
+                    current_indexes[0],
+                    status=status,
+                    reason=reason,
+                    confidence=confidence,
+                )
+
+    match_unique(
+        "unit_fingerprint",
+        status="unchanged",
+        reason="unit_fingerprint_equal",
+        confidence=1.0,
+    )
+
+    composite_previous: dict[tuple[str, str], list[int]] = {}
+    composite_current: dict[tuple[str, str], list[int]] = {}
+    for index in sorted(unmatched_previous):
+        key = (
+            str(previous[index].get("content_fingerprint") or ""),
+            str(previous[index].get("structure_fingerprint") or ""),
+        )
+        if all(key):
+            composite_previous.setdefault(key, []).append(index)
+    for index in sorted(unmatched_current):
+        key = (
+            str(current[index].get("content_fingerprint") or ""),
+            str(current[index].get("structure_fingerprint") or ""),
+        )
+        if all(key):
+            composite_current.setdefault(key, []).append(index)
+    for key in sorted(set(composite_previous).intersection(composite_current)):
+        previous_indexes = composite_previous[key]
+        current_indexes = composite_current[key]
+        if len(previous_indexes) == 1 and len(current_indexes) == 1:
+            append_mapping(
+                previous_indexes[0],
+                current_indexes[0],
+                status="unchanged",
+                reason="content_and_structure_equal_across_source_version",
+                confidence=0.99,
+            )
+
+    match_unique(
+        "content_fingerprint",
+        status="relocated",
+        reason="content_equal_structure_changed",
+        confidence=0.95,
+    )
+    match_unique(
+        "structure_fingerprint",
+        status="changed",
+        reason="structure_equal_content_changed",
+        confidence=0.9,
+    )
+
+    # Ambiguous duplicates are paired deterministically but never represented
+    # as a confident semantic change. Consumers must review these mappings.
+    for key_name in ("content_fingerprint", "structure_fingerprint"):
+        previous_by_key: dict[str, list[int]] = {}
+        current_by_key: dict[str, list[int]] = {}
+        for index in sorted(unmatched_previous):
+            key = str(previous[index].get(key_name) or "")
+            if key:
+                previous_by_key.setdefault(key, []).append(index)
+        for index in sorted(unmatched_current):
+            key = str(current[index].get(key_name) or "")
+            if key:
+                current_by_key.setdefault(key, []).append(index)
+        for key in sorted(set(previous_by_key).intersection(current_by_key)):
+            previous_indexes = previous_by_key[key]
+            current_indexes = current_by_key[key]
+            if len(previous_indexes) == 1 and len(current_indexes) == 1:
+                continue
+            for previous_index, current_index in zip(previous_indexes, current_indexes, strict=False):
+                if previous_index not in unmatched_previous or current_index not in unmatched_current:
+                    continue
+                append_mapping(
+                    previous_index,
+                    current_index,
+                    status="unknown",
+                    reason=f"ambiguous_duplicate_{key_name}",
+                    confidence=0.4,
+                )
+
+    for current_index in sorted(unmatched_current):
+        append_mapping(
+            None,
+            current_index,
+            status="added",
+            reason="no_previous_match",
+            confidence=1.0,
+        )
+    for previous_index in sorted(unmatched_previous):
+        append_mapping(
+            previous_index,
+            None,
+            status="removed",
+            reason="no_current_match",
+            confidence=1.0,
+        )
+
+    statuses = ("unchanged", "added", "changed", "removed", "relocated", "unknown")
+    counts = {status: sum(1 for mapping in mappings if mapping["status"] == status) for status in statuses}
+    return {
+        "schema_version": KNOWLEDGE_UNIT_DIFF_VERSION,
+        "algorithm_version": KNOWLEDGE_UNIT_DIFF_VERSION,
+        "previous_parse_run_id": str(previous_parse_run_id or ""),
+        "current_parse_run_id": str(current_parse_run_id or ""),
+        "baseline": not bool(previous),
+        "complete": counts["unknown"] == 0,
+        "counts": counts,
+        "mappings": mappings,
+    }
+
+
+def _snapshot_knowledge_unit_diff(
+    snapshot: Mapping[str, Any],
+    *,
+    current_units: Sequence[Mapping[str, Any]],
+    current_parse_run_id: str,
+) -> dict[str, Any]:
+    index_manifest = snapshot.get("index_manifest")
+    index_payload = index_manifest if isinstance(index_manifest, Mapping) else {}
+    stored = index_payload.get("knowledge_unit_diff")
+    if isinstance(stored, Mapping) and str(stored.get("current_parse_run_id") or "") in {
+        "",
+        str(current_parse_run_id or ""),
+    }:
+        return dict(stored)
+    previous_units = index_payload.get("previous_knowledge_units")
+    return build_knowledge_unit_diff(
+        previous_units=[unit for unit in previous_units or [] if isinstance(unit, Mapping)]
+        if isinstance(previous_units, list)
+        else (),
+        current_units=current_units,
+        previous_parse_run_id=str(index_payload.get("previous_parse_run_id") or ""),
+        current_parse_run_id=current_parse_run_id,
+    )
+
+
+def _section_number(*, explicit: Any, title: str) -> str:
+    value = _contract_text(explicit)
+    if value:
+        return value
+    match = _SECTION_NUMBER_PATTERN.match(title)
+    return _contract_text(match.group(1)) if match else ""
+
+
+def _section_level(*, block: Mapping[str, Any], section_no: str, role: str) -> int:
+    explicit = _safe_int(block.get("heading_level"), default=0)
+    if explicit > 0:
+        return explicit
+    normalized_no = section_no.strip().rstrip(".）)")
+    if normalized_no and normalized_no[0].isdigit():
+        return max(1, len([part for part in re.split(r"[.\-]", normalized_no) if part]))
+    if role == "appendix":
+        return 1
+    return 1
+
+
+def _unit_source_blocks(
+    unit: Mapping[str, Any],
+    *,
+    blocks_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    return [
+        blocks_by_id[block_id]
+        for block_id in _string_list(unit.get("source_block_ids"))
+        if block_id in blocks_by_id
+    ]
+
+
+def _continuation_source(block: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = block.get("continuation")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _enrich_knowledge_unit_contract(
+    *,
+    doc_id: str,
+    units: Sequence[Mapping[str, Any]],
+    ir_blocks: Sequence[Mapping[str, Any]],
+    ir_tables: Sequence[Mapping[str, Any]] = (),
+    source_version_key: str = "",
+) -> list[dict[str, Any]]:
+    blocks_by_id = {
+        str(block.get("block_id") or ""): block
+        for block in ir_blocks
+        if str(block.get("block_id") or "")
+    }
+    tables_by_id = {
+        str(table.get("table_id") or ""): table
+        for table in ir_tables
+        if str(table.get("table_id") or "")
+    }
+    section_stack: list[dict[str, Any]] = []
+    list_stack: dict[int, dict[str, Any]] = {}
+    enriched: list[dict[str, Any]] = []
+
+    for raw_unit in units:
+        unit = dict(raw_unit)
+        source_blocks = _unit_source_blocks(unit, blocks_by_id=blocks_by_id)
+        primary_block = source_blocks[0] if source_blocks else {}
+        role = str(unit.get("semantic_role") or primary_block.get("semantic_role") or "paragraph").strip().lower()
+        unit_type = str(unit.get("unit_type") or _unit_type(primary_block) or "paragraph").strip().lower()
+        text = str(unit.get("text") or "")
+        normalized_text = _contract_text(text)
+        page_span = list(_page_span_tuple(unit.get("page_span")))
+        is_section_heading = bool(primary_block.get("is_section_heading")) or role in _SECTION_ROLES
+        list_level = _safe_int(primary_block.get("list_level"), default=0) if role == "list_item" else 0
+        list_parent_unit_id = ""
+        if list_level > 0:
+            for existing_level in [level for level in list_stack if level >= list_level]:
+                list_stack.pop(existing_level, None)
+            parent = list_stack.get(list_level - 1)
+            if parent is not None:
+                list_parent_unit_id = str(parent.get("stable_unit_id") or parent.get("unit_id") or "")
+
+        if is_section_heading:
+            list_stack.clear()
+            title = _contract_text(primary_block.get("normalized_title") or normalized_text.split("\n", 1)[0])
+            section_no = _section_number(explicit=primary_block.get("section_no"), title=title)
+            level = _section_level(block=primary_block, section_no=section_no, role=role)
+            while section_stack and int(section_stack[-1]["level"]) >= level:
+                section_stack.pop()
+            parent = section_stack[-1] if section_stack else None
+            title_path = [str(item["title"]) for item in section_stack] + ([title] if title else [])
+            section_fingerprint = _contract_hash(
+                {
+                    "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                    "doc_id": doc_id,
+                    "source_version_key": source_version_key,
+                    "parent_section_id": str((parent or {}).get("section_id") or ""),
+                    "section_no": section_no,
+                    "title": title,
+                    "level": level,
+                    "source_block_fingerprint": str(primary_block.get("block_fingerprint") or ""),
+                    "page_span": page_span,
+                }
+            )
+            section = {
+                "section_id": f"{doc_id}:sec:{section_fingerprint[:20]}",
+                "parent_section_id": str((parent or {}).get("section_id") or ""),
+                "section_no": section_no,
+                "title": title,
+                "title_path": title_path,
+                "level": level,
+            }
+            section_stack.append(section)
+        else:
+            section = section_stack[-1] if section_stack else {
+                "section_id": "",
+                "parent_section_id": "",
+                "section_no": "",
+                "title": "",
+                "title_path": [],
+                "level": 0,
+            }
+
+        content_fingerprint = _contract_hash(
+            {
+                "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "unit_type": unit_type,
+                "semantic_role": role,
+                "normalized_text": normalized_text,
+            }
+        )
+        source_block_fingerprints = sorted(
+            str(block.get("block_fingerprint") or "")
+            for block in source_blocks
+            if str(block.get("block_fingerprint") or "")
+        )
+        source_tables = [
+            tables_by_id[table_id]
+            for table_id in _string_list(unit.get("source_table_ids"))
+            if table_id in tables_by_id
+        ]
+        source_table_fingerprints = sorted(
+            str(table.get("table_fingerprint") or "")
+            for table in source_tables
+            if str(table.get("table_fingerprint") or "")
+        )
+        source_positions = [
+            {
+                "page_span": list(_page_span_tuple(block.get("page_span"))),
+                "reading_order": _safe_int(block.get("reading_order"), default=0),
+                "type": str(block.get("type") or ""),
+            }
+            for block in source_blocks
+        ]
+        structure_fingerprint = _contract_hash(
+            {
+                "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "doc_id": doc_id,
+                "unit_type": unit_type,
+                "semantic_role": role,
+                "section_no": str(section["section_no"]),
+                "title_path": list(section["title_path"]),
+                "source_positions": source_positions,
+            }
+        )
+        unit_fingerprint = _contract_hash(
+            {
+                "version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "doc_id": doc_id,
+                "source_version_key": source_version_key,
+                "content_fingerprint": content_fingerprint,
+                "structure_fingerprint": structure_fingerprint,
+                "source_block_fingerprints": source_block_fingerprints,
+                "source_table_fingerprints": source_table_fingerprints,
+            }
+        )
+        source_bbox = next((block.get("bbox") for block in source_blocks if block.get("bbox") is not None), None)
+        source_span = _source_span(
+            page_span=page_span,
+            source_block_ids=_string_list(unit.get("source_block_ids")),
+            source_table_ids=_string_list(unit.get("source_table_ids")),
+            bbox=source_bbox,
+            bbox_page=page_span[0],
+        )
+        continuity = {
+            "kind": "spans_pages" if page_span[1] > page_span[0] else "none",
+            "group_id": f"{doc_id}:continuity:{unit_fingerprint[:20]}" if page_span[1] > page_span[0] else "",
+            "continues_from_unit_id": "",
+            "continues_to_unit_id": "",
+            "reason": "source_page_span" if page_span[1] > page_span[0] else "",
+            "confidence": 1.0 if page_span[1] > page_span[0] else 0.0,
+        }
+        unit.update(
+            {
+                "unit_contract_version": KNOWLEDGE_UNIT_CONTRACT_VERSION,
+                "stable_unit_id": f"{doc_id}:kuf:{unit_fingerprint[:20]}",
+                "unit_fingerprint": unit_fingerprint,
+                "content_fingerprint": content_fingerprint,
+                "structure_fingerprint": structure_fingerprint,
+                "source_version_key": source_version_key,
+                "source_span": source_span,
+                "list_level": list_level,
+                "list_marker": str(primary_block.get("list_marker") or ""),
+                "list_parent_unit_id": list_parent_unit_id,
+                "continuity_required": bool(_continuation_source(primary_block).get("is_continuation")),
+                "section_id": str(section["section_id"]),
+                "parent_section_id": str(section["parent_section_id"]),
+                "section_no": str(section["section_no"]),
+                "section_title": str(section["title"]),
+                "section_level": int(section["level"]),
+                "title_path": list(section["title_path"]),
+                "continuity": continuity,
+            }
+        )
+        enriched.append(unit)
+        if list_level > 0:
+            list_stack[list_level] = unit
+
+    source_to_index: dict[str, int] = {}
+    last_group_index: dict[str, int] = {}
+    for index, unit in enumerate(enriched):
+        source_blocks = _unit_source_blocks(unit, blocks_by_id=blocks_by_id)
+        primary_block = source_blocks[0] if source_blocks else {}
+        continuation = _continuation_source(primary_block)
+        for source_id in (
+            str(unit.get("unit_id") or ""),
+            str(unit.get("stable_unit_id") or ""),
+            *_string_list(unit.get("source_item_ids")),
+            *_string_list(unit.get("source_block_ids")),
+        ):
+            if source_id:
+                source_to_index[source_id] = index
+
+        group_id = str(continuation.get("group_id") or "").strip()
+        explicit_from = str(continuation.get("continues_from") or "").strip()
+        previous_index = source_to_index.get(explicit_from) if explicit_from else None
+        reason = "explicit_source_relation" if previous_index is not None else ""
+        confidence = 1.0 if previous_index is not None else 0.0
+        if previous_index is None and group_id and group_id in last_group_index:
+            previous_index = last_group_index[group_id]
+            reason = "continuation_group"
+            confidence = 1.0
+        if previous_index is None and bool(continuation.get("is_continuation")) and index > 0:
+            previous = enriched[index - 1]
+            previous_span = _page_span_tuple(previous.get("page_span"))
+            current_span = _page_span_tuple(unit.get("page_span"))
+            compatible = (
+                str(previous.get("unit_type") or "") == str(unit.get("unit_type") or "")
+                and current_span[0] <= previous_span[1] + 1
+            )
+            if compatible:
+                previous_index = index - 1
+                reason = "adjacent_explicit_continuation"
+                confidence = 0.9
+        if previous_index is None and index > 0:
+            previous = enriched[index - 1]
+            shared_table_ids = set(_string_list(previous.get("source_table_ids"))).intersection(
+                _string_list(unit.get("source_table_ids"))
+            )
+            previous_span = _page_span_tuple(previous.get("page_span"))
+            current_span = _page_span_tuple(unit.get("page_span"))
+            if shared_table_ids and current_span[0] == previous_span[1] + 1:
+                previous_index = index - 1
+                reason = "same_table_across_adjacent_pages"
+                confidence = 0.95
+
+        if previous_index is not None and previous_index != index:
+            previous = enriched[previous_index]
+            current_continuity = dict(unit.get("continuity") or {})
+            previous_continuity = dict(previous.get("continuity") or {})
+            current_continuity.update(
+                {
+                    "kind": "continues",
+                    "group_id": group_id or str(previous_continuity.get("group_id") or unit.get("stable_unit_id") or ""),
+                    "continues_from_unit_id": str(previous.get("stable_unit_id") or previous.get("unit_id") or ""),
+                    "reason": reason,
+                    "confidence": confidence,
+                }
+            )
+            previous_continuity.update(
+                {
+                    "kind": "continues",
+                    "group_id": str(current_continuity.get("group_id") or ""),
+                    "continues_to_unit_id": str(unit.get("stable_unit_id") or unit.get("unit_id") or ""),
+                    "reason": reason,
+                    "confidence": confidence,
+                }
+            )
+            unit["continuity"] = current_continuity
+            previous["continuity"] = previous_continuity
+        if group_id:
+            last_group_index[group_id] = index
+
+    return enriched
+
+
+def _numeric_section_path(value: Any) -> tuple[int, ...] | None:
+    normalized = _contract_text(value).rstrip(".）)")
+    if not normalized or not re.fullmatch(r"\d+(?:[.\-]\d+)*", normalized):
+        return None
+    return tuple(int(part) for part in re.split(r"[.\-]", normalized) if part)
+
+
+def _knowledge_structure_quality_signals(
+    units: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    previous_heading: Mapping[str, Any] | None = None
+    previous_sibling_numbers: dict[tuple[str, int], tuple[int, ...]] = {}
+    seen_stable_ids: set[str] = set()
+    for unit in units:
+        page_number = _page_span_tuple(unit.get("page_span"))[0]
+        stable_unit_id = str(unit.get("stable_unit_id") or "")
+        if not stable_unit_id or stable_unit_id in seen_stable_ids:
+            signals.append(
+                {
+                    "code": "structure_unit_identity_invalid",
+                    "severity": "error",
+                    "message": "KnowledgeUnit stable identity is missing or duplicated",
+                    "page_number": page_number,
+                    "detail": {"unit_id": str(unit.get("unit_id") or ""), "stable_unit_id": stable_unit_id},
+                }
+            )
+        if stable_unit_id:
+            seen_stable_ids.add(stable_unit_id)
+
+        section_level = _safe_int(unit.get("section_level"), default=0)
+        section_id = str(unit.get("section_id") or "")
+        text_lines = str(unit.get("text") or "").splitlines()
+        first_line = _contract_text(text_lines[0] if text_lines else "")
+        section_title = _contract_text(unit.get("section_title"))
+        is_heading = bool(section_id) and (
+            str(unit.get("semantic_role") or "").strip().lower() in _SECTION_ROLES
+            or str(unit.get("unit_type") or "").strip().lower() == "title"
+            or (bool(section_title) and first_line == section_title)
+        )
+        if is_heading:
+            if section_level > 1 and not str(unit.get("parent_section_id") or ""):
+                signals.append(
+                    {
+                        "code": "structure_section_parent_missing",
+                        "severity": "warning",
+                        "message": "Section level requires a parent but none was resolved",
+                        "page_number": page_number,
+                        "detail": {"unit_id": str(unit.get("unit_id") or ""), "section_level": section_level},
+                    }
+                )
+            if not _string_list(unit.get("title_path")):
+                signals.append(
+                    {
+                        "code": "structure_title_path_missing",
+                        "severity": "warning",
+                        "message": "Section heading has no resolved title path",
+                        "page_number": page_number,
+                        "detail": {"unit_id": str(unit.get("unit_id") or "")},
+                    }
+                )
+            if previous_heading is not None:
+                previous_level = _safe_int(previous_heading.get("section_level"), default=0)
+                if section_level > previous_level + 1:
+                    signals.append(
+                        {
+                            "code": "structure_heading_level_jump",
+                            "severity": "warning",
+                            "message": "Heading hierarchy jumps over an intermediate level",
+                            "page_number": page_number,
+                            "detail": {
+                                "unit_id": str(unit.get("unit_id") or ""),
+                                "previous_unit_id": str(previous_heading.get("unit_id") or ""),
+                                "previous_level": previous_level,
+                                "current_level": section_level,
+                            },
+                        }
+                    )
+            number_path = _numeric_section_path(unit.get("section_no"))
+            sibling_key = (str(unit.get("parent_section_id") or ""), section_level)
+            previous_number = previous_sibling_numbers.get(sibling_key)
+            if (
+                number_path is not None
+                and previous_number is not None
+                and len(number_path) == len(previous_number)
+                and number_path[:-1] == previous_number[:-1]
+                and number_path[-1] > previous_number[-1] + 1
+            ):
+                signals.append(
+                    {
+                        "code": "structure_section_number_jump",
+                        "severity": "warning",
+                        "message": "Sibling section numbering contains a gap",
+                        "page_number": page_number,
+                        "detail": {
+                            "unit_id": str(unit.get("unit_id") or ""),
+                            "previous_section_no": ".".join(str(part) for part in previous_number),
+                            "current_section_no": str(unit.get("section_no") or ""),
+                        },
+                    }
+                )
+            if number_path is not None:
+                previous_sibling_numbers[sibling_key] = number_path
+            previous_heading = unit
+
+        semantic_role = str(unit.get("semantic_role") or "").strip().lower()
+        list_level = _safe_int(unit.get("list_level"), default=0)
+        if semantic_role == "list_item" and list_level > 1 and not str(unit.get("list_parent_unit_id") or ""):
+            signals.append(
+                {
+                    "code": "structure_list_parent_missing",
+                    "severity": "warning",
+                    "message": "Nested list item has no resolved parent item",
+                    "page_number": page_number,
+                    "detail": {"unit_id": str(unit.get("unit_id") or ""), "list_level": list_level},
+                }
+            )
+        if semantic_role in {"clause", "definition", "procedure", "list_item"} and not _contract_text(unit.get("text")):
+            signals.append(
+                {
+                    "code": "structure_semantic_unit_empty",
+                    "severity": "error",
+                    "message": "Structured semantic unit has no content",
+                    "page_number": page_number,
+                    "detail": {"unit_id": str(unit.get("unit_id") or ""), "semantic_role": semantic_role},
+                }
+            )
+        continuity = unit.get("continuity") if isinstance(unit.get("continuity"), Mapping) else {}
+        if (
+            bool(unit.get("continuity_required"))
+            and str(continuity.get("kind") or "") != "spans_pages"
+            and not str(continuity.get("continues_from_unit_id") or "")
+        ):
+            is_table = semantic_role == "table" or str(unit.get("unit_type") or "") == "table"
+            signals.append(
+                {
+                    "code": "structure_cross_page_table_break" if is_table else "structure_cross_page_continuity_missing",
+                    "severity": "warning",
+                    "message": "Declared table continuation could not be linked"
+                    if is_table
+                    else "Declared continuation could not be linked",
+                    "page_number": page_number,
+                    "detail": {"unit_id": str(unit.get("unit_id") or "")},
+                }
+            )
+        start, end = _page_span_tuple(unit.get("page_span"))
+        if end > start and str(continuity.get("kind") or "") not in {"spans_pages", "continues"}:
+            signals.append(
+                {
+                    "code": "structure_cross_page_continuity_missing",
+                    "severity": "warning",
+                    "message": "Cross-page unit has no continuity relation",
+                    "page_number": start,
+                    "detail": {"unit_id": str(unit.get("unit_id") or ""), "page_span": [start, end]},
+                }
+            )
+    return signals
+
+
 def _knowledge_unit_text_from_exact_chunks(
     *,
     chunk_ids: Sequence[str],
@@ -813,6 +1817,16 @@ def _coverage_units(
             should_index_for_rag=should_index,
             missing_reason=missing_reason,
         )
+        processing_status = (
+            "skipped"
+            if not should_index
+            else ("failed" if missing_reason is not None else "processed")
+        )
+        processing_reason = (
+            str(unit.get("skip_reason") or "not_indexable")
+            if processing_status == "skipped"
+            else (str(missing_reason) if missing_reason else "chunked_and_embedded")
+        )
         quality_signal_codes = _coverage_unit_quality_signal_codes(
             unit=unit,
             missing_reason=missing_reason,
@@ -820,6 +1834,17 @@ def _coverage_units(
         coverage_units.append(
             {
                 "unit_id": str(unit.get("unit_id") or ""),
+                "stable_unit_id": str(unit.get("stable_unit_id") or ""),
+                "unit_contract_version": str(unit.get("unit_contract_version") or KNOWLEDGE_UNIT_CONTRACT_VERSION),
+                "unit_fingerprint": str(unit.get("unit_fingerprint") or ""),
+                "content_fingerprint": str(unit.get("content_fingerprint") or ""),
+                "structure_fingerprint": str(unit.get("structure_fingerprint") or ""),
+                "source_version_key": str(unit.get("source_version_key") or ""),
+                "source_span": dict(unit.get("source_span") or {}),
+                "list_level": _safe_int(unit.get("list_level"), default=0),
+                "list_marker": str(unit.get("list_marker") or ""),
+                "list_parent_unit_id": str(unit.get("list_parent_unit_id") or ""),
+                "continuity_required": bool(unit.get("continuity_required")),
                 "doc_id": str(unit.get("doc_id") or ""),
                 "source_item_ids": _string_list(unit.get("source_item_ids")),
                 "source_block_ids": _string_list(unit.get("source_block_ids")),
@@ -828,6 +1853,13 @@ def _coverage_units(
                 "text": str(unit.get("text") or ""),
                 "unit_type": str(unit.get("unit_type") or ""),
                 "semantic_role": str(unit.get("semantic_role") or ""),
+                "section_id": str(unit.get("section_id") or ""),
+                "parent_section_id": str(unit.get("parent_section_id") or ""),
+                "section_no": str(unit.get("section_no") or ""),
+                "section_title": str(unit.get("section_title") or ""),
+                "section_level": _safe_int(unit.get("section_level"), default=0),
+                "title_path": _string_list(unit.get("title_path")),
+                "continuity": dict(unit.get("continuity") or {}),
                 "should_index_for_rag": should_index,
                 "skip_reason": unit.get("skip_reason"),
                 "quality_flags": _string_list(unit.get("quality_flags")),
@@ -839,6 +1871,8 @@ def _coverage_units(
                 "embedding_state": embedding_state,
                 "embedding_error_category": unit.get("embedding_error_category"),
                 "coverage_state": coverage_state,
+                "processing_status": processing_status,
+                "processing_reason": processing_reason,
                 "missing_reason": missing_reason,
                 "quality_signal_codes": quality_signal_codes,
             }
@@ -973,8 +2007,26 @@ def _index_manifest_with_rag_coverage(
     rag_units = [
         {
             "unit_id": str(unit.get("unit_id") or ""),
+            "stable_unit_id": str(unit.get("stable_unit_id") or ""),
+            "unit_contract_version": str(unit.get("unit_contract_version") or KNOWLEDGE_UNIT_CONTRACT_VERSION),
+            "unit_fingerprint": str(unit.get("unit_fingerprint") or ""),
+            "content_fingerprint": str(unit.get("content_fingerprint") or ""),
+            "structure_fingerprint": str(unit.get("structure_fingerprint") or ""),
+            "source_version_key": str(unit.get("source_version_key") or ""),
+            "source_span": dict(unit.get("source_span") or {}),
+            "list_level": _safe_int(unit.get("list_level"), default=0),
+            "list_marker": str(unit.get("list_marker") or ""),
+            "list_parent_unit_id": str(unit.get("list_parent_unit_id") or ""),
+            "continuity_required": bool(unit.get("continuity_required")),
             "unit_type": str(unit.get("unit_type") or ""),
             "semantic_role": str(unit.get("semantic_role") or ""),
+            "section_id": str(unit.get("section_id") or ""),
+            "parent_section_id": str(unit.get("parent_section_id") or ""),
+            "section_no": str(unit.get("section_no") or ""),
+            "section_title": str(unit.get("section_title") or ""),
+            "section_level": _safe_int(unit.get("section_level"), default=0),
+            "title_path": _string_list(unit.get("title_path")),
+            "continuity": dict(unit.get("continuity") or {}),
             "page_span": list(_page_span_tuple(unit.get("page_span"))),
             "source_item_ids": _string_list(unit.get("source_item_ids")),
             "source_block_ids": _string_list(unit.get("source_block_ids")),
@@ -984,6 +2036,8 @@ def _index_manifest_with_rag_coverage(
             "chunk_ids": _string_list(unit.get("chunk_ids")),
             "embedded": _unit_embedded(unit, embedded_chunk_ids=embedded_chunk_ids),
             "coverage_state": str(unit.get("coverage_state") or ""),
+            "processing_status": str(unit.get("processing_status") or ""),
+            "processing_reason": str(unit.get("processing_reason") or ""),
             "missing_reason": unit.get("missing_reason"),
             "quality_signal_codes": _string_list(unit.get("quality_signal_codes")),
         }
@@ -1002,6 +2056,9 @@ def _index_manifest_with_rag_coverage(
         "embedded_chunk_count": len(embedded_chunk_ids),
         "embedded_unit_count": len(embedded_units),
         "unembedded_unit_count": len(unembedded_units),
+        "accounted_unit_count": _safe_int(summary.get("accounted_unit_count"), default=0),
+        "unaccounted_unit_count": _safe_int(summary.get("unaccounted_unit_count"), default=0),
+        "processing_status_counts": dict(summary.get("processing_status_counts") or {}),
         "coverage_score": _optional_float(summary.get("unit_chunk_coverage_ratio"), default=1.0),
         "text_page_coverage_ratio": _optional_float(summary.get("text_page_coverage_ratio"), default=1.0),
         "table_unit_coverage_ratio": _optional_float(summary.get("table_unit_coverage_ratio"), default=1.0),
@@ -1159,6 +2216,11 @@ def _coverage_summary(
         for unit in indexable_units
         if unit.get("missing_reason") is not None and str(unit.get("unit_id") or "")
     ]
+    processing_status_counts = {
+        status: sum(1 for unit in units if str(unit.get("processing_status") or "") == status)
+        for status in ("pending", "processed", "skipped", "failed", "reviewed")
+    }
+    accounted_unit_count = sum(processing_status_counts.values())
     return {
         "total_pages": total_pages,
         "pages_with_parsed_text": pages_with_parsed_text,
@@ -1172,6 +2234,9 @@ def _coverage_summary(
         "total_indexable_units": total_indexable_units,
         "total_chunked_units": total_chunked_units,
         "total_unit_count": len(units),
+        "accounted_unit_count": accounted_unit_count,
+        "unaccounted_unit_count": max(0, len(units) - accounted_unit_count),
+        "processing_status_counts": processing_status_counts,
         "skipped_unit_count": len(skipped_units),
         "embedded_unit_count": len(embedded_units),
         "unembedded_unit_count": len(unembedded_units),
@@ -1513,6 +2578,9 @@ def _unit_type(block: Mapping[str, Any]) -> str:
         return "figure_caption"
     if block_type == "title":
         return "title"
+    semantic_role = str(block.get("semantic_role") or "").strip().lower()
+    if semantic_role in _STRUCTURED_UNIT_ROLES:
+        return semantic_role
     return "paragraph"
 
 

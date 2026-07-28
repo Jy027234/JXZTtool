@@ -42,7 +42,7 @@ DOCUMENT_SCHEMA_VERSION = "2026-06"
 PROVIDER_USAGE_SCHEMA_VERSION = "2026-06-provider-usage"
 PROVIDER_COMPARISON_SCHEMA_VERSION = "2026-06-provider-comparison"
 QUALITY_GATE_SCHEMA_VERSION = "2026-06-quality-gate"
-READER_SCHEMA_VERSION = "2026-06-reader"
+READER_SCHEMA_VERSION = "2026-07-reader"
 PART_RERUN_COMPARISON_SCHEMA_VERSION = "2026-06-part-rerun-comparison"
 DEFAULT_READING_ORDER_CONFIDENCE_THRESHOLD = 0.75
 
@@ -1460,6 +1460,8 @@ def _document_reader_projection(ir: Mapping[str, Any]) -> dict[str, Any]:
         "projection": "reader",
         "doc_id": ir.get("doc_id"),
         "parse_run_id": ir.get("parse_run_id"),
+        "source_integrity": ir.get("source_integrity"),
+        "knowledge_unit_diff": ir.get("knowledge_unit_diff"),
         "profile": ir.get("profile"),
         "profile_resolution": ir.get("profile_resolution"),
         "local_provider_routing": ir.get("local_provider_routing"),
@@ -1782,8 +1784,26 @@ def _reader_unit_payloads(units: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         payloads.append(
             {
                 "unit_id": str(unit.get("unit_id") or ""),
+                "stable_unit_id": str(unit.get("stable_unit_id") or ""),
+                "unit_contract_version": str(unit.get("unit_contract_version") or ""),
+                "unit_fingerprint": str(unit.get("unit_fingerprint") or ""),
+                "content_fingerprint": str(unit.get("content_fingerprint") or ""),
+                "structure_fingerprint": str(unit.get("structure_fingerprint") or ""),
+                "source_version_key": str(unit.get("source_version_key") or ""),
+                "source_span": dict(unit.get("source_span") or {}),
+                "list_level": _safe_int(unit.get("list_level"), default=0),
+                "list_marker": str(unit.get("list_marker") or ""),
+                "list_parent_unit_id": str(unit.get("list_parent_unit_id") or ""),
+                "continuity_required": bool(unit.get("continuity_required")),
                 "unit_type": str(unit.get("unit_type") or ""),
                 "semantic_role": str(unit.get("semantic_role") or ""),
+                "section_id": str(unit.get("section_id") or ""),
+                "parent_section_id": str(unit.get("parent_section_id") or ""),
+                "section_no": str(unit.get("section_no") or ""),
+                "section_title": str(unit.get("section_title") or ""),
+                "section_level": _safe_int(unit.get("section_level"), default=0),
+                "title_path": _string_list_payload(unit.get("title_path")),
+                "continuity": dict(unit.get("continuity") or {}),
                 "page_span": list(_page_span_from_payload(unit.get("page_span"), fallback_page=1)),
                 "text": str(unit.get("text") or ""),
                 "source_item_ids": _string_list_payload(unit.get("source_item_ids")),
@@ -1800,6 +1820,8 @@ def _reader_unit_payloads(units: Sequence[Mapping[str, Any]]) -> list[dict[str, 
                 "embedding_state": str(unit.get("embedding_state") or "pending"),
                 "embedding_error_category": unit.get("embedding_error_category"),
                 "coverage_state": str(unit.get("coverage_state") or ""),
+                "processing_status": str(unit.get("processing_status") or ""),
+                "processing_reason": str(unit.get("processing_reason") or ""),
                 "missing_reason": unit.get("missing_reason"),
                 "quality_signal_codes": _string_list_payload(unit.get("quality_signal_codes")),
             }
@@ -3755,6 +3777,15 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
             "cells_truncated",
             "cells_total",
             "cells_preview_rows",
+            "page_span",
+            "continuation_group_id",
+            "table_group_id",
+            "continued_table_id",
+            "is_continuation",
+            "continued",
+            "continues_from",
+            "continues_to",
+            "continuation_kind",
         ):
             if key in metadata:
                 table[key] = metadata[key]
@@ -4740,6 +4771,12 @@ def _part_coverage_summary(
         skipped_unit_count = len(skipped_units)
         embedded_unit_count = len(embedded_units)
         unembedded_unit_count = len(unembedded_units)
+        processing_status_counts = {
+            status: sum(1 for unit in relevant_units if str(unit.get("processing_status") or "") == status)
+            for status in ("pending", "processed", "skipped", "failed", "reviewed")
+        }
+        unknown_status_count = max(0, total_unit_count - sum(processing_status_counts.values()))
+        processing_status_counts["pending"] += unknown_status_count
     else:
         total_unit_count = sum(len(_string_list_payload(page.get("unit_ids"))) for page in relevant_pages)
         skipped_unit_count = sum(len(_string_list_payload(page.get("skipped_unit_ids"))) for page in relevant_pages)
@@ -4757,6 +4794,15 @@ def _part_coverage_summary(
         gap_unit_ids = sorted(dict.fromkeys(unchunked_unit_ids + unembedded_unit_ids))
         unembedded_unit_count = len(unembedded_unit_ids)
         embedded_unit_count = max(indexable_unit_count - len(unchunked_unit_ids) - unembedded_unit_count, 0)
+        failed_unit_count = len(set(unchunked_unit_ids + unembedded_unit_ids))
+        processing_status_counts = {
+            "pending": 0,
+            "processed": max(0, total_unit_count - skipped_unit_count - failed_unit_count),
+            "skipped": skipped_unit_count,
+            "failed": failed_unit_count,
+            "reviewed": 0,
+        }
+    accounted_unit_count = sum(processing_status_counts.values())
     summary = {
         "total_pages": len(relevant_pages),
         "pages_with_parsed_text": pages_with_parsed_text,
@@ -4770,6 +4816,9 @@ def _part_coverage_summary(
         "total_indexable_units": total_indexable_units,
         "total_chunked_units": total_chunked_units,
         "total_unit_count": total_unit_count,
+        "accounted_unit_count": accounted_unit_count,
+        "unaccounted_unit_count": max(0, total_unit_count - accounted_unit_count),
+        "processing_status_counts": processing_status_counts,
         "skipped_unit_count": skipped_unit_count,
         "embedded_unit_count": embedded_unit_count,
         "unembedded_unit_count": unembedded_unit_count,

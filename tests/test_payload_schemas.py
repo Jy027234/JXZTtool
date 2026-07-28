@@ -266,12 +266,12 @@ class PayloadSchemaTests(unittest.TestCase):
 
     def test_all_registered_schemas_are_valid_json_schema(self) -> None:
         expected_versions = {
-            "document-coverage": "2026-06-coverage",
-            "document-ir": "2026-06-ir",
+            "document-coverage": "2026-07-coverage",
+            "document-ir": "2026-07-ir",
             "document-parts": "2026-06",
             "document-providers": "2026-06-provider-usage",
             "document-quality": "2026-06",
-            "document-reader": "2026-06-reader",
+            "document-reader": "2026-07-reader",
         }
         for name, schema_version in expected_versions.items():
             with self.subTest(name=name):

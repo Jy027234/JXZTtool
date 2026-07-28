@@ -207,7 +207,7 @@ Skill 不应：
 
 ```json
 {
-  "schema_version": "2026-06-ir",
+  "schema_version": "2026-07-ir",
   "doc_id": "doc_xxx",
   "parse_run_id": "job_xxx",
   "profile": "table-heavy",

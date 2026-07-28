@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
+import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -101,6 +103,84 @@ _QUALITY_SUMMARY_METRICS = {
     "quality_signal_count": "parse_document_quality_signal_count",
     "provider_warning_count": "parse_document_provider_warning_count",
 }
+
+_SOURCE_INTEGRITY_OPTION_KEYS = {
+    "source_hash",
+    "source_hash_algorithm",
+    "source_hash_status",
+    "source_size_bytes",
+    "source_mtime_ns",
+    "parser_config_fingerprint",
+}
+_VOLATILE_CONFIG_OPTION_KEYS = {
+    "job_id",
+    "parent_job_id",
+    "source_job_id",
+    "claim_token",
+    "next_attempt_at",
+    "retry_delay_s",
+    "last_error",
+    "rerun_previous_part_observation",
+}
+
+
+def _stable_config_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _stable_config_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _SOURCE_INTEGRITY_OPTION_KEYS
+            and str(key) not in _VOLATILE_CONFIG_OPTION_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_config_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _parser_config_fingerprint(options: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        _stable_config_value(options),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _request_with_source_integrity(request: ParseRequest) -> ParseRequest:
+    options = dict(request.options or {})
+    source_path = Path(str(request.file_path or ""))
+    try:
+        stat = source_path.stat()
+        if not source_path.is_file():
+            raise FileNotFoundError(str(source_path))
+        digest = hashlib.sha256()
+        with source_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        options.update(
+            {
+                "source_hash": digest.hexdigest(),
+                "source_hash_algorithm": "sha256",
+                "source_hash_status": "verified",
+                "source_size_bytes": int(stat.st_size),
+                "source_mtime_ns": int(stat.st_mtime_ns),
+            }
+        )
+    except (OSError, ValueError):
+        options.update(
+            {
+                "source_hash": "",
+                "source_hash_algorithm": "",
+                "source_hash_status": "missing",
+                "source_size_bytes": 0,
+                "source_mtime_ns": 0,
+            }
+        )
+    options["parser_config_fingerprint"] = _parser_config_fingerprint(options)
+    return replace(request, options=options)
 
 
 def _prometheus_label_value(value: object) -> str:
@@ -531,6 +611,7 @@ class ParseRuntime:
 
     def start(self, request: ParseRequest):
         self._check_quota_limit(request)
+        request = _request_with_source_integrity(request)
         job = self.job_store.create(request)
         self.product_adapter.before_parse(request=request, job=job)
 
@@ -569,6 +650,7 @@ class ParseRuntime:
             quota_units=job.quota_units,
         )
         request, job = self._prepare_request_for_execution(request=request, job=job)
+        previous_knowledge_snapshot = self._previous_knowledge_unit_snapshot(current_job=job)
         started_at = time.monotonic()
         stage_timer = ParseStageTimer(
             self.event_logger,
@@ -656,7 +738,10 @@ class ParseRuntime:
                     request=request,
                     job_id=job.job_id,
                     document=document,
+                    blocks=blocks,
                     chunks=chunks,
+                    previous_units=previous_knowledge_snapshot.get("units") or (),
+                    previous_parse_run_id=str(previous_knowledge_snapshot.get("parse_run_id") or ""),
                 )
                 self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
                 self.job_store.save_chunks(
@@ -2307,6 +2392,32 @@ class ParseRuntime:
             "pipeline_name": pipeline_name,
             "options_hash": options_hash,
             "index_version": job.job_id,
+            "source_hash": str((getattr(job, "options", {}) or {}).get("source_hash") or ""),
+            "source_hash_algorithm": str(
+                (getattr(job, "options", {}) or {}).get("source_hash_algorithm") or ""
+            ),
+            "source_hash_status": str(
+                (getattr(job, "options", {}) or {}).get("source_hash_status") or "missing"
+            ),
+            "source_size_bytes": int(
+                (getattr(job, "options", {}) or {}).get("source_size_bytes") or 0
+            ),
+            "source_mtime_ns": int(
+                (getattr(job, "options", {}) or {}).get("source_mtime_ns") or 0
+            ),
+            "parser_schema_version": "2026-07-ir",
+            "parser_config_fingerprint": str(
+                (getattr(job, "options", {}) or {}).get("parser_config_fingerprint")
+                or _parser_config_fingerprint(getattr(job, "options", {}) or {})
+            ),
+            "provider_fingerprint": hashlib.sha256(
+                json.dumps(
+                    {"pipeline_name": pipeline_name, "semantic_roles": semantic_roles},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
             "embedding_tiers": embedding_tiers,
             "layers": layers,
         }
@@ -3432,13 +3543,77 @@ class ParseRuntime:
         pipeline = self._resolve_pipeline(request, purpose=purpose)
         return pipeline.build_chunks(request=request, blocks=blocks)
 
+    def _previous_knowledge_unit_snapshot(self, *, current_job: Any) -> dict[str, Any]:
+        previous_job = next(
+            (
+                job
+                for job in self.list_jobs(
+                    doc_id=str(getattr(current_job, "doc_id", "") or ""),
+                    tenant_id=getattr(current_job, "tenant_id", None),
+                )
+                if str(getattr(job, "job_id", "") or "") != str(getattr(current_job, "job_id", "") or "")
+                and getattr(job, "state", None) in {ParseJobState.DONE, ParseJobState.PARTIAL}
+            ),
+            None,
+        )
+        if previous_job is None:
+            return {"parse_run_id": "", "units": ()}
+        try:
+            doc_id = str(getattr(current_job, "doc_id", "") or "")
+            tenant_id = str(getattr(current_job, "tenant_id", "default") or "default")
+            blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=tenant_id))
+            chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=tenant_id))
+            describe_document = getattr(self.index, "describe_document", None)
+            index_manifest = (
+                describe_document(doc_id=doc_id, tenant_id=tenant_id)
+                if callable(describe_document)
+                else None
+            )
+            from .api_payloads import _structured_tables
+            from .ir import _ir_block, _ir_tables, _knowledge_units
+
+            source_version_key = str((getattr(previous_job, "options", {}) or {}).get("source_hash") or "")
+            ir_blocks = [
+                _ir_block(block, index=index, source_version_key=source_version_key)
+                for index, block in enumerate(blocks, start=1)
+            ]
+            tables = _structured_tables(blocks, doc_id=doc_id)
+            ir_tables = _ir_tables(
+                tables=tables,
+                blocks=blocks,
+                source_version_key=source_version_key,
+            )
+            units = _knowledge_units(
+                doc_id=doc_id,
+                ir_blocks=ir_blocks,
+                ir_tables=ir_tables,
+                chunks=chunks,
+                index_manifest=index_manifest,
+                source_version_key=source_version_key,
+            )
+            return {
+                "parse_run_id": str(getattr(previous_job, "job_id", "") or ""),
+                "units": tuple(units),
+            }
+        except Exception as exc:  # pragma: no cover - defensive compatibility path
+            self.event_logger.log(
+                "knowledge_unit_previous_snapshot_failed",
+                job_id=str(getattr(current_job, "job_id", "") or ""),
+                doc_id=str(getattr(current_job, "doc_id", "") or ""),
+                error=str(exc),
+            )
+            return {"parse_run_id": str(getattr(previous_job, "job_id", "") or ""), "units": ()}
+
     def _build_index_manifest(
         self,
         *,
         request: ParseRequest,
         job_id: str,
         document: ParsedDocumentArtifact | None,
+        blocks: Sequence[Any],
         chunks: Sequence[Chunk],
+        previous_units: Sequence[Mapping[str, Any]] = (),
+        previous_parse_run_id: str = "",
     ) -> dict[str, Any]:
         pipeline_name = str(getattr(document, "pipeline_name", "") or "")
         options_hash = str(getattr(document, "options_hash", "") or "")
@@ -3481,21 +3656,85 @@ class ParseRuntime:
                     "chunk_ids": [chunk.chunk_id for chunk in high_precision_chunks],
                 }
             )
+        runtime_rag_coverage = _runtime_rag_coverage_manifest(
+            doc_id=request.doc_id,
+            document=document,
+            chunks=chunks,
+        )
+        from .api_payloads import _structured_tables
+        from .ir import (
+            IR_SCHEMA_VERSION,
+            _ir_block,
+            _ir_tables,
+            _knowledge_units,
+            build_knowledge_unit_diff,
+        )
+
+        source_version_key = str(request.options.get("source_hash") or "")
+        ir_blocks = [
+            _ir_block(block, index=index, source_version_key=source_version_key)
+            for index, block in enumerate(blocks, start=1)
+        ]
+        ir_tables = _ir_tables(
+            tables=_structured_tables(blocks, doc_id=request.doc_id),
+            blocks=blocks,
+            source_version_key=source_version_key,
+        )
+        contract_units = _knowledge_units(
+            doc_id=request.doc_id,
+            ir_blocks=ir_blocks,
+            ir_tables=ir_tables,
+            chunks=chunks,
+            index_manifest={"rag_coverage": runtime_rag_coverage},
+            source_version_key=source_version_key,
+        )
+        runtime_rag_coverage["units"] = [
+            {key: value for key, value in unit.items() if key != "text"}
+            for unit in contract_units
+        ]
+        parser_config_fingerprint = str(
+            request.options.get("parser_config_fingerprint")
+            or _parser_config_fingerprint(request.options)
+        )
+        provider_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "pipeline_name": pipeline_name,
+                    "structure_roles": structure_roles,
+                    "chunk_roles": chunk_roles,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        knowledge_unit_diff = build_knowledge_unit_diff(
+            previous_units=previous_units,
+            current_units=contract_units,
+            previous_parse_run_id=previous_parse_run_id,
+            current_parse_run_id=job_id,
+        )
         manifest = {
             "doc_id": request.doc_id,
             "tenant_id": request.tenant_id,
             "pipeline_name": pipeline_name,
             "options_hash": options_hash,
             "index_version": index_version,
+            "source_hash": source_version_key,
+            "source_hash_algorithm": str(request.options.get("source_hash_algorithm") or ""),
+            "source_hash_status": str(request.options.get("source_hash_status") or "missing"),
+            "source_size_bytes": int(request.options.get("source_size_bytes") or 0),
+            "source_mtime_ns": int(request.options.get("source_mtime_ns") or 0),
+            "parser_schema_version": IR_SCHEMA_VERSION,
+            "parser_config_fingerprint": parser_config_fingerprint,
+            "provider_fingerprint": provider_fingerprint,
+            "previous_parse_run_id": str(previous_parse_run_id or ""),
+            "knowledge_unit_diff": knowledge_unit_diff,
             "embedding_tiers": embedding_tiers,
             "layers": layers,
             "manual_anatomy": dict((getattr(document, "metadata", {}) or {}).get("manual_anatomy") or {}),
             "structure_quality": dict((getattr(document, "metadata", {}) or {}).get("structure_quality") or {}),
-            "rag_coverage": _runtime_rag_coverage_manifest(
-                doc_id=request.doc_id,
-                document=document,
-                chunks=chunks,
-            ),
+            "rag_coverage": runtime_rag_coverage,
         }
         if _is_pdf_part_request(request):
             manifest["part"] = _pdf_part_index_manifest(
@@ -4336,6 +4575,8 @@ def _runtime_unit_type(*, item: Any, semantic_role: str) -> str:
         return "figure_caption"
     if block_type == "title" or semantic_role == "title":
         return "title"
+    if semantic_role in {"clause", "definition", "list_item", "procedure", "procedure_step"}:
+        return semantic_role
     return "paragraph"
 
 

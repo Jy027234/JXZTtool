@@ -212,7 +212,7 @@ class ExportPackageTests(unittest.TestCase):
 
     def test_custom_export_package_can_filter_reader_blocks(self) -> None:
         payload = {
-            "schema_version": "2026-06-reader",
+            "schema_version": "2026-07-reader",
             "doc_id": "doc-reader",
             "reader": [
                 {

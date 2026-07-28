@@ -1144,6 +1144,39 @@ gate_status = "pending"
             with self.assertRaises(LookupError):
                 runtime.restart_latest(doc_id="doc-tenant-iso", tenant_id="tenant-iso-b")
 
+    def test_reparse_persists_source_integrity_and_unit_diff(self) -> None:
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx(
+                "unit-diff.docx",
+                ["1 General", "The organization shall retain the record."],
+            )
+            runtime = build_runtime(workspace.config_path)
+            first = runtime.submit(
+                ParseRequest(
+                    doc_id="doc-unit-diff",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            )
+            second_job = runtime.restart_latest(doc_id="doc-unit-diff")
+            second = runtime.execute(job_id=second_job.job_id)
+            projection = _document_projection(
+                runtime.get_document(doc_id="doc-unit-diff"),
+                projection="ir",
+            )
+
+        integrity = projection["source_integrity"]
+        self.assertEqual(integrity["status"], "verified")
+        self.assertEqual(len(integrity["source_hash"]), 64)
+        self.assertEqual(integrity["source_hash"], second.job.options["source_hash"])
+        diff = projection["knowledge_unit_diff"]
+        self.assertEqual(diff["previous_parse_run_id"], first.job.job_id)
+        self.assertEqual(diff["current_parse_run_id"], second.job.job_id)
+        self.assertFalse(diff["baseline"])
+        self.assertGreater(diff["counts"]["unchanged"], 0)
+        self.assertEqual(diff["counts"]["added"], 0)
+        self.assertEqual(diff["counts"]["removed"], 0)
+
     def test_runtime_metrics_returns_failure_rate_and_duration_summary(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)

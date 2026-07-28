@@ -35,6 +35,14 @@ _DOCX_GROUPABLE_ROLES = {
     "front_matter",
 }
 
+_STRUCTURED_UNIT_ROLES = {
+    "clause",
+    "definition",
+    "list_item",
+    "procedure",
+    "procedure_step",
+}
+
 _MANUAL_NUMBERED_HEADING_PATTERN = re.compile(
     r"^(?:\d+(?:\.\d+)*|第[\d一二三四五六七八九十百千]+[章节条款]|chapter\s+[a-z0-9ivxlcdm]+|section\s+[a-z0-9ivxlcdm]+)\b",
     re.IGNORECASE,
@@ -678,6 +686,8 @@ def _knowledge_unit_type(*, item: DocumentArtifactItem, semantic_role: str) -> s
         return "figure_caption"
     if block_type == "title" or semantic_role == "title":
         return "title"
+    if semantic_role in _STRUCTURED_UNIT_ROLES:
+        return semantic_role
     return "paragraph"
 
 

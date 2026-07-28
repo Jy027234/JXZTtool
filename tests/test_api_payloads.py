@@ -710,7 +710,7 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(structured["local_provider_routing"]["selected_provider_id"], "pdf-text")
         self.assertEqual(coverage_projection["local_provider_routing"]["route_status"], "selected")
         self.assertEqual(quality_projection["local_provider_routing"]["primary_provider_id"], "pdf-text")
-        self.assertEqual(payload["schema_version"], "2026-06-ir")
+        self.assertEqual(payload["schema_version"], "2026-07-ir")
         self.assertEqual(payload["projection"], "ir")
         self.assertEqual(payload["local_provider_routing"]["selected_provider_id"], "pdf-text")
         self.assertEqual(payload["provider_registry"]["summary"]["total"], 2)
@@ -777,7 +777,7 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(payload["quality_gate"]["action_suggestions"], [])
 
         reader = _document_projection(snapshot, projection="reader")
-        self.assertEqual(reader["schema_version"], "2026-06-reader")
+        self.assertEqual(reader["schema_version"], "2026-07-reader")
         self.assertEqual(reader["projection"], "reader")
         self.assertEqual(reader["local_provider_routing"]["route_status"], "selected")
         self.assertEqual(reader["reader_summary"]["block_count"], 4)
@@ -1362,7 +1362,7 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
             projection="coverage",
         )
 
-        self.assertEqual(payload["schema_version"], "2026-06-coverage")
+        self.assertEqual(payload["schema_version"], "2026-07-coverage")
         self.assertEqual(payload["projection"], "coverage")
         page = payload["coverage"]["pages"][0]
         self.assertEqual(page["page_number"], 3)
