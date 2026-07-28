@@ -225,6 +225,44 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0]["reading_order_confidence"], 0.6)
 
+    def test_project_pages_preserves_ocr_content_blocks_and_page_lines(self) -> None:
+        source_line = {
+            "line_id": "p2:ocr-p1-l1",
+            "page_number": 2,
+            "text": "Recovered OCR text",
+            "bbox": (10.0, 20.0, 80.0, 36.0),
+            "confidence": 0.93,
+            "source_kind": "pdf_ocr_fallback",
+        }
+        pages = _project_pages(
+            (
+                Block(
+                    block_id="blk-ocr-compat-1",
+                    doc_id="doc-ocr-compat-1",
+                    type=BlockType.PARAGRAPH,
+                    content="Recovered OCR text",
+                    metadata={
+                        "page": 2,
+                        "page_type": "body",
+                        "position": 3,
+                        "page_position": 1,
+                        "semantic_role": SemanticRole.PARAGRAPH.value,
+                        "source_kind": "pdf_ocr_fallback",
+                        "bbox": (10.0, 20.0, 80.0, 36.0),
+                        "lines": [source_line],
+                    },
+                ),
+            )
+        )
+
+        self.assertEqual(pages[0]["lines"], [source_line])
+        self.assertEqual(len(pages[0]["content_blocks"]), 1)
+        content_block = pages[0]["content_blocks"][0]
+        self.assertEqual(content_block["kind"], "paragraph")
+        self.assertEqual(content_block["bbox"], (10.0, 20.0, 80.0, 36.0))
+        self.assertEqual(content_block["lines"], [source_line])
+        self.assertEqual(content_block["source_kind"], "pdf_ocr_fallback")
+
     def test_table_metadata_becomes_quality_signals(self) -> None:
         job = SimpleNamespace(
             job_id="job-quality-001",

@@ -5243,8 +5243,61 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "artifacts": [],
                 "image_descriptions": [],
                 "confidence_parts": [],
+                "content_blocks": [],
+                "lines": [],
+                "words": [],
             },
         )
+        source_lines = [
+            dict(line)
+            for line in block.metadata.get("lines", ()) or ()
+            if isinstance(line, Mapping)
+        ]
+        source_words = [
+            dict(word)
+            for word in block.metadata.get("words", ()) or ()
+            if isinstance(word, Mapping)
+        ]
+        if block.type != BlockType.TABLE and block.content.strip():
+            content_block: dict[str, Any] = {
+                "kind": block.type.value,
+                "text": block.content,
+                "semantic_role": role,
+            }
+            for source_key, target_key in (
+                ("display_kind", "display_kind"),
+                ("reader_policy", "reader_policy"),
+                ("source_kind", "source_kind"),
+            ):
+                value = block.metadata.get(source_key)
+                if isinstance(value, str) and value.strip():
+                    content_block[target_key] = value.strip()
+            for source_key, target_key in (
+                ("position", "position"),
+                ("page_position", "page_position"),
+                ("ordinal", "ordinal"),
+            ):
+                value = block.metadata.get(source_key)
+                if isinstance(value, int):
+                    content_block[target_key] = value
+            bbox = block.metadata.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                content_block["bbox"] = bbox
+            confidence = block.metadata.get("confidence")
+            if isinstance(confidence, (int, float)):
+                content_block["confidence"] = round(float(confidence), 4)
+            should_index = block.metadata.get("should_index_for_rag")
+            if isinstance(should_index, bool):
+                content_block["should_index_for_rag"] = should_index
+            if source_lines:
+                content_block["lines"] = source_lines
+            if source_words:
+                content_block["words"] = source_words
+            entry["content_blocks"].append(content_block)
+        if source_lines:
+            entry["lines"].extend(source_lines)
+        if source_words:
+            entry["words"].extend(source_words)
         if role in _ARTIFACT_SEMANTIC_ROLES:
             artifact_entry: dict[str, Any] = {
                 "text": block.content,
@@ -5306,6 +5359,9 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
                 "artifacts": [],
                 "image_descriptions": [],
                 "confidence_parts": [],
+                "content_blocks": [],
+                "lines": [],
+                "words": [],
             },
         )
         text = "\n\n".join(item for item in entry.pop("text_parts") if item.strip())
@@ -5346,6 +5402,12 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
         ]
         if image_descriptions:
             page_entry["image_descriptions"] = image_descriptions
+        if entry.get("content_blocks"):
+            page_entry["content_blocks"] = entry["content_blocks"]
+        if entry.get("lines"):
+            page_entry["lines"] = entry["lines"]
+        if entry.get("words"):
+            page_entry["words"] = entry["words"]
         cid_total = sum(sig.get("cid_token_counts", []))
         if cid_total > 0:
             page_entry["cid_token_count"] = cid_total
