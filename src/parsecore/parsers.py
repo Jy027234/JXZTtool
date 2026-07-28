@@ -1874,13 +1874,17 @@ class PdfTextParser(ParserAdapter):
         column_count_hint: int,
         extracted_text: str | None,
         *,
-        force_empty_page: bool = False,
+        force_full_page: bool = False,
     ) -> tuple[str | None, str | None, str | None, _OcrStageTimings]:
         timings = _OcrStageTimings()
-        reason = _ocr_fallback_reason_for_page(
-            extracted_text or "",
-            min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
-            min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
+        reason = (
+            "forced_full_page"
+            if force_full_page
+            else _ocr_fallback_reason_for_page(
+                extracted_text or "",
+                min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
+                min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
+            )
         )
         # A pure image page has no CID/garble tokens for the normal detector
         # to match.  When pdfplumber confirms that the page carries an image,
@@ -1893,7 +1897,7 @@ class PdfTextParser(ParserAdapter):
                 has_page_image = False
             if has_page_image:
                 reason = "native_text_empty"
-            elif force_empty_page:
+            elif force_full_page:
                 # Some scan producers encode the full-page raster in a form
                 # that pdfplumber does not expose through ``page.images``.
                 # An explicit force-OCR request must therefore render every
@@ -2098,7 +2102,7 @@ class PdfTextParser(ParserAdapter):
             ocr_page_text_fn = (
                 partial(
                     self._maybe_recover_page_with_ocr,
-                    force_empty_page=request_enable_ocr is True,
+                    force_full_page=request_enable_ocr is True,
                 )
                 if effective_ocr_bad_pages_enabled
                 else None
@@ -4837,13 +4841,23 @@ def _extract_pdfplumber_layout(
                 and index not in table_page_numbers
                 and index not in figure_page_numbers
             ):
-                cached_ocr_text = ocr_cache.get(
+                cached_ocr_entry = ocr_cache.get_entry(
                     file_path=file_path,
                     page_number=index,
                     provider_tag="rapidocr",
                     options_repr="",
                 )
-                if cached_ocr_text is not None:
+                cached_ocr_text = (
+                    cached_ocr_entry.get("text")
+                    if cached_ocr_entry is not None
+                    else None
+                )
+                cached_ocr_lines = (
+                    cached_ocr_entry.get("lines")
+                    if cached_ocr_entry is not None
+                    else None
+                )
+                if isinstance(cached_ocr_text, str) and isinstance(cached_ocr_lines, list) and cached_ocr_lines:
                     token_count = _estimate_token_count(cached_ocr_text)
                     layouts.append(
                         _PageLayout(
@@ -4858,6 +4872,11 @@ def _extract_pdfplumber_layout(
                             ocr_acceptance_reason="cache_hit",
                             native_text_token_count=token_count,
                             final_text_token_count=token_count,
+                            ocr_lines=[
+                                dict(line)
+                                for line in cached_ocr_lines
+                                if isinstance(line, Mapping)
+                            ],
                         )
                     )
                     continue
@@ -4949,15 +4968,27 @@ def _extract_pdfplumber_layout(
             if ocr_page_text_fn is not None:
                 # Check page-level OCR cache before running expensive OCR.
                 _cache_hit_text: str | None = None
+                _cache_hit_lines: list[dict[str, Any]] = []
                 if ocr_cache is not None and ocr_cache.enabled:
-                    _cache_hit_text = ocr_cache.get(
+                    _cache_hit_entry = ocr_cache.get_entry(
                         file_path=file_path,
                         page_number=index,
                         provider_tag="rapidocr",
                         options_repr="",
                     )
+                    if _cache_hit_entry is not None:
+                        cached_text = _cache_hit_entry.get("text")
+                        cached_lines = _cache_hit_entry.get("lines")
+                        if isinstance(cached_text, str) and isinstance(cached_lines, list) and cached_lines:
+                            _cache_hit_text = cached_text
+                            _cache_hit_lines = [
+                                dict(line)
+                                for line in cached_lines
+                                if isinstance(line, Mapping)
+                            ]
                 if _cache_hit_text is not None:
                     text_without_tables = _cache_hit_text
+                    ocr_lines = _cache_hit_lines
                     ocr_attempt_reason = "cid_dense"
                     ocr_fallback_reason = "cid_dense"
                     ocr_acceptance_reason = "cache_hit"
@@ -4983,6 +5014,7 @@ def _extract_pdfplumber_layout(
                                 page_number=index,
                                 provider_tag="rapidocr",
                                 text=recovered_text,
+                                lines=ocr_lines,
                                 options_repr="",
                             )
                     elif ocr_attempt_reason is not None:

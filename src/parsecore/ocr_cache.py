@@ -7,8 +7,10 @@ The cache is disabled when:
 - ``ocr_cache_dir`` is falsy or the target directory cannot be created.
 - TTL is 0.
 
-This module is intentionally small; it only caches the extracted text string
-for a single page, not the full layout structure.
+The cache stores the extracted text plus optional OCR line locators.  Keeping
+the line records is required for citation bbox fidelity on warm-cache parses.
+Legacy text-only entries remain readable, but callers that require locators
+can treat them as a cache miss and refresh them.
 """
 
 from __future__ import annotations
@@ -92,6 +94,28 @@ class PageOcrCache:
         file_bytes: bytes | None = None,
     ) -> str | None:
         """Return cached OCR text or ``None`` on miss/expiry."""
+        entry = self.get_entry(
+            file_path=file_path,
+            page_number=page_number,
+            provider_tag=provider_tag,
+            options_repr=options_repr,
+            file_bytes=file_bytes,
+        )
+        if entry is None:
+            return None
+        text = entry.get("text")
+        return text if isinstance(text, str) else None
+
+    def get_entry(
+        self,
+        *,
+        file_path: str,
+        page_number: int,
+        provider_tag: str,
+        options_repr: str = "",
+        file_bytes: bytes | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a complete cache entry or ``None`` on miss/expiry."""
         if not self.enabled:
             return None
         k = _key(file_bytes, file_path, page_number, provider_tag, options_repr)
@@ -107,7 +131,7 @@ class PageOcrCache:
             except OSError:
                 pass
             return None
-        return entry.get("text")
+        return entry
 
     def put(
         self,
@@ -116,10 +140,11 @@ class PageOcrCache:
         page_number: int,
         provider_tag: str,
         text: str,
+        lines: list[dict[str, Any]] | None = None,
         options_repr: str = "",
         file_bytes: bytes | None = None,
     ) -> None:
-        """Write OCR text to cache; silently ignores write failures."""
+        """Write OCR text and optional line locators; ignore write failures."""
         if not self.enabled:
             return
         k = _key(file_bytes, file_path, page_number, provider_tag, options_repr)
@@ -127,7 +152,10 @@ class PageOcrCache:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps({"ts": time.time(), "text": text}, ensure_ascii=False),
+                json.dumps(
+                    {"ts": time.time(), "text": text, "lines": lines or []},
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
         except OSError:

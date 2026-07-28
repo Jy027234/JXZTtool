@@ -1186,6 +1186,45 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(timings.total_elapsed_s, 0.0)
 
+    def test_explicit_ocr_forces_nonempty_native_text_page(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True}},
+        )
+        extract_timings = SimpleNamespace(
+            render_elapsed_s=0.0,
+            input_prepare_elapsed_s=0.0,
+            engine_exec_elapsed_s=0.0,
+            call_elapsed_s=0.0,
+            provider_elapsed_s=0.0,
+            provider_det_elapsed_s=0.0,
+            provider_cls_elapsed_s=0.0,
+            provider_rec_elapsed_s=0.0,
+            postprocess_elapsed_s=0.0,
+            ocr_lines=[],
+        )
+
+        with patch.object(
+            parser,
+            "_ensure_pdf_ocr_engine",
+            return_value=(object(), None, 0.0),
+        ), patch(
+            "parsecore.parsers._extract_ocr_text_from_page",
+            return_value=("OCR replacement", None, extract_timings),
+        ):
+            recovered, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                SimpleNamespace(images=[]),
+                [],
+                1,
+                "misleading native text",
+                force_full_page=True,
+            )
+
+        self.assertEqual(recovered, "OCR replacement")
+        self.assertEqual(reason, "forced_full_page")
+        self.assertIsNone(error)
+
     def test_empty_image_page_is_ocr_candidate(self) -> None:
         parser = PdfTextParser(
             media_types=["application/pdf"],
