@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -81,12 +82,22 @@ class OpenAiCompatibleEmbeddingProvider(EmbeddingProvider):
                     raw = response.read().decode("utf-8")
                 data = json.loads(raw)
                 items = data.get("data") or []
+                if any(isinstance(item, dict) and "index" in item for item in items):
+                    indexes = [item.get("index") if isinstance(item, dict) else None for item in items]
+                    if any(type(index) is not int for index in indexes) or set(indexes) != set(range(len(chunks))):
+                        raise EmbeddingRequestError("embedding response indexes invalid")
+                    items = sorted(items, key=lambda item: item["index"])
                 vectors: list[list[float]] = []
                 for item in items:
                     embedding = item.get("embedding")
                     if not isinstance(embedding, list):
                         raise EmbeddingRequestError("embedding response item missing vector")
-                    vectors.append([float(value) for value in embedding])
+                    vector = [float(value) for value in embedding]
+                    if not vector or any(not math.isfinite(value) for value in vector):
+                        raise EmbeddingRequestError("embedding response vector invalid")
+                    if vectors and len(vector) != len(vectors[0]):
+                        raise EmbeddingRequestError("embedding response dimensions inconsistent")
+                    vectors.append(vector)
                 return vectors
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc

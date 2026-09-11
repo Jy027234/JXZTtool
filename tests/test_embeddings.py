@@ -95,6 +95,28 @@ class OpenAiCompatibleEmbeddingProviderTests(unittest.TestCase):
         payload = json.loads(captured_body[0].decode("utf-8"))
         self.assertEqual(payload["dimensions"], 256)
 
+    def test_provider_indexes_bind_vectors_to_the_correct_source_chunks(self) -> None:
+        provider = OpenAiCompatibleEmbeddingProvider(self._settings())
+        chunks = [Chunk(chunk_id=str(i), doc_id="d", block_ids=(str(i),), text=str(i)) for i in range(2)]
+        payload = {"data": [{"index": 1, "embedding": [0., 1.]}, {"index": 0, "embedding": [1., 0.]}]}
+        with patch("urllib.request.urlopen", return_value=_FakeHttpResponse(payload)):
+            result = provider.embed(doc_id="d", chunks=chunks)
+        self.assertEqual(result[0].embedding, (1., 0.))
+        self.assertEqual(result[1].embedding, (0., 1.))
+
+    def test_duplicate_indexes_and_nonfinite_vectors_are_not_accepted(self) -> None:
+        from parsecore.embeddings import EmbeddingRequestError
+        provider = OpenAiCompatibleEmbeddingProvider(self._settings())
+        chunks = [Chunk(chunk_id="c1", doc_id="d", block_ids=("b1",), text="fact")]
+        for payload in (
+            {"data": [{"index": 1, "embedding": [1.]}]},
+            {"data": [{"index": 0, "embedding": [float("nan")]}]},
+            {"data": [{"index": 0, "embedding": []}]},
+        ):
+            with self.subTest(payload=payload), patch("urllib.request.urlopen", return_value=_FakeHttpResponse(payload)):
+                with self.assertRaises(EmbeddingRequestError):
+                    provider.embed(doc_id="d", chunks=chunks)
+
     def test_build_embedding_provider_supports_fake_provider(self) -> None:
         provider = build_embedding_provider(
             EmbeddingProviderSettings(
