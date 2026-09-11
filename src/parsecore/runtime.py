@@ -43,6 +43,7 @@ _ACTIVE_PART_STATES = {
     ParseJobState.EMBEDDING,
 }
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
+_CJK_RUN_PATTERN = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f]+)")
 _SEMANTIC_ROLE_WEIGHTS: dict[str, float] = {
     "title": 1.35,
     "body_section": 1.3,
@@ -5087,11 +5088,18 @@ def _keyword_match_score(*, query: str, text: str) -> float:
 
 
 def _tokenize(text: str) -> tuple[str, ...]:
-    return tuple(
-        token.lower()
-        for token in _TOKEN_PATTERN.findall(str(text or ""))
-        if token.strip()
-    )
+    # Word-boundary tokenization treats a whole Chinese sentence as one word.
+    # Overlapping bigrams provide phrase recall without a language-model service
+    # or dictionary; non-CJK words and identifiers keep their previous behavior.
+    tokens: list[str] = []
+    for part in _CJK_RUN_PATTERN.split(str(text or "")):
+        if _CJK_RUN_PATTERN.fullmatch(part):
+            tokens.extend(part[i:i + 2] for i in range(len(part) - 1))
+            if len(part) == 1:
+                tokens.append(part)
+        else:
+            tokens.extend(token.lower() for token in _TOKEN_PATTERN.findall(part))
+    return tuple(tokens)
 
 
 def _is_task_like_entry(text: str, semantic_role: str, tags: Sequence[str]) -> bool:
