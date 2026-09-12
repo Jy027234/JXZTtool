@@ -1168,6 +1168,21 @@ class TextParser(ParserAdapter):
 
     def parse(self, request: ParseRequest) -> Sequence[Block]:
         text = Path(request.file_path).read_text(encoding="utf-8")
+        if Path(request.file_path).suffix.lower() in {".md", ".markdown"} or request.media_type == "text/markdown":
+            lines = text.lstrip("\ufeff").splitlines(keepends=True)
+            frontmatter_removed = False
+            if lines and lines[0].strip() == "---":
+                closing = next((i for i in range(1, len(lines)) if lines[i].strip() in {"---", "..."}), None)
+                if closing is None:
+                    raise ValueError("markdown_frontmatter_unclosed")
+                lines = lines[closing + 1:]
+                frontmatter_removed = True
+            return _build_markdown_provider_blocks(
+                request=request, provider_name=self.name, provider_version="markdown-v1",
+                page_chunks=[(1, "".join(lines))], detect_tables=True,
+                source_kind="markdown_native",
+                provider_runtime_metadata={"frontmatter_removed": frontmatter_removed, "page_mapping": "text_document"},
+            )
         paragraphs = [item.strip() for item in text.split("\n\n") if item.strip()]
         blocks: list[Block] = [
             Block(
@@ -1658,17 +1673,11 @@ class PdfTextParser(ParserAdapter):
         source_path: str,
         stat: Any,
     ) -> str | None:
-        """Return a cached content digest for one immutable file snapshot."""
-        fingerprint_key = (
-            source_path,
-            int(stat.st_size),
-            int(stat.st_mtime_ns),
-        )
-        with self._parse_cache_lock:
-            cached = self._source_fingerprint_cache.pop(fingerprint_key, None)
-            if cached is not None:
-                self._source_fingerprint_cache[fingerprint_key] = cached
-                return cached
+        """Hash bytes before reusing parsed content, with bounded read memory.
+
+        Size/mtime can remain identical after a replacement (including coarse
+        filesystem clocks); they cannot establish that source bytes are equal.
+        """
         try:
             digest = hashlib.sha256()
             with Path(source_path).open("rb") as source:
@@ -1677,11 +1686,6 @@ class PdfTextParser(ParserAdapter):
             fingerprint = digest.hexdigest()
         except OSError:
             return None
-        with self._parse_cache_lock:
-            self._source_fingerprint_cache[fingerprint_key] = fingerprint
-            self._source_fingerprint_cache.move_to_end(fingerprint_key)
-            while len(self._source_fingerprint_cache) > self._source_fingerprint_cache_max_entries:
-                self._source_fingerprint_cache.popitem(last=False)
         return fingerprint
 
     def _parse_cache_key(self, request: ParseRequest) -> tuple[Any, ...] | None:
@@ -4667,8 +4671,9 @@ def _select_pdf_layout_work(
         column_like_lines = sum(
             1
             for line in lines
-            if len(_PDF_LAYOUT_COLUMN_SPLIT_PATTERN.split(line)) >= 3
+            if len(_PDF_LAYOUT_COLUMN_SPLIT_PATTERN.split(line)) >= 2
         )
+        table_like_lines = sum(1 for line in lines if len(_PDF_LAYOUT_COLUMN_SPLIT_PATTERN.split(line)) >= 3)
         normalized_lines = [line.casefold() for line in lines]
         has_units_per_assy_header = any(
             line in {"units per assy", "units per assembly"}
@@ -4691,6 +4696,13 @@ def _select_pdf_layout_work(
             )
         )
         has_figure_marker = _PDF_FIGURE_LAYOUT_HINT_PATTERN.search(raw_text) is not None
+        # Some CJK PDFs emit each draw operation as a short line, without any
+        # textual column-gap marker. Their coordinates need the layout pass.
+        fragmented_native = (
+            len(lines) >= 40
+            and sum(len(line) <= 12 for line in lines) >= len(lines) * 0.5
+            and len(re.findall(r"[\u4e00-\u9fff]", raw_text)) >= 80
+        )
 
         # Empty pages with an embedded image can be scanned/image-only pages,
         # so they stay on the layout route.  Truly empty pages without an
@@ -4701,6 +4713,7 @@ def _select_pdf_layout_work(
             or has_layout_marker
             or image_count >= 5
             or column_like_lines >= 2
+            or fragmented_native
         ):
             selected.add(page_number)
         # Generic words such as ``Table 602`` occur throughout narrative
@@ -4709,7 +4722,7 @@ def _select_pdf_layout_work(
         # but invoke ``find_tables`` only for stronger table markers or clear
         # multi-column evidence.  The latter remains conservative for ruled
         # tables whose native text has weak marker vocabulary.
-        if has_strong_table_marker or column_like_lines >= 4:
+        if has_strong_table_marker or table_like_lines >= 4:
             table_pages.add(page_number)
         if has_figure_marker or image_count >= 5 or (not stripped and image_count > 0):
             figure_pages.add(page_number)
@@ -5666,11 +5679,10 @@ def _estimate_column_count(
     *,
     words: Sequence[Mapping[str, Any]] | None = None,
 ) -> int:
-    """Return a conservative page-level column count hint from word x positions.
+    """Detect a repeated central gutter before merging words into wide lines.
 
-    This is intentionally informational only. It does not change parse order or
-    splitting behaviour; it merely tags pages that look strongly two-column so
-    the regression report can surface them for human inspection.
+    Aligned left/right Chinese columns share the same y position; merging them
+    first incorrectly treated every row as a single wide line.
     """
 
     if words is None:
@@ -5683,6 +5695,30 @@ def _estimate_column_count(
     width = float(page.width or 0.0)
     if width <= 0.0 or height <= 0.0:
         return 1
+
+    rows: dict[int, list[tuple[float, float]]] = {}
+    for word in words:
+        try:
+            if not str(word.get("text") or "").strip():
+                continue
+            x0, x1, top = float(word["x0"]), float(word["x1"]), float(word["top"])
+            rows.setdefault(round(top / 3.0), []).append((x0, x1))
+        except (KeyError, TypeError, ValueError):
+            continue
+    gutter_bands: set[int] = set()
+    gutter_rows = 0
+    for row, spans in rows.items():
+        spans.sort()
+        for left, right in zip(spans, spans[1:]):
+            if (left[1] <= width * 0.52 and right[0] >= width * 0.48
+                    and right[0] - left[1] >= width * 0.035
+                    and left[1] - spans[0][0] >= width * 0.18
+                    and spans[-1][1] - right[0] >= width * 0.18):
+                gutter_rows += 1
+                gutter_bands.add(int((row * 3.0 / height) * 20))
+                break
+    if gutter_rows >= 8 and len(gutter_bands) >= 6:
+        return 2
 
     lines: list[dict[str, float | int]] = []
     for word in words:
