@@ -20,15 +20,33 @@ def plan_pdf_parts(
     total_pages: int,
     target_pages_per_part: int | None = None,
     ocr_heavy_pages_per_part: int | None = None,
+    part_context_pages: int = 0,
     profile: str | None = None,
     options: dict[str, Any] | None = None,
     *,
+    page_start: int = 1,
+    page_end: int | None = None,
     file_size_bytes: int | None = None,
     ocr_page_ratio: float | None = None,
     historical_failure_rate: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Plan 1-based inclusive PDF page ranges for child parse parts."""
+    """Plan owned and input PDF ranges for child parse parts.
+
+    ``page_start``/``page_end`` and the legacy ``page_start``/``page_end``
+    fields in every returned spec describe the non-overlapping *owned* range.
+    ``input_page_start``/``input_page_end`` include a bounded preceding context
+    window.  Consumers must emit records only for the owned range.
+    """
     pages = _positive_int(total_pages, "invalid_total_pages")
+    owned_range_start = _positive_int(page_start, "invalid_page_range")
+    owned_range_end = (
+        pages
+        if page_end is None
+        else _positive_int(page_end, "invalid_page_range")
+    )
+    if owned_range_end < owned_range_start or owned_range_end > pages:
+        raise ValueError("invalid_page_range")
+    context_pages = _non_negative_int(part_context_pages, "invalid_part_context_pages")
     pages_per_part = _pages_per_part(
         target_pages_per_part=target_pages_per_part,
         ocr_heavy_pages_per_part=ocr_heavy_pages_per_part,
@@ -40,27 +58,35 @@ def plan_pdf_parts(
     )
 
     parts: list[dict[str, Any]] = []
-    page_start = 1
+    owned_page_start = owned_range_start
     part_index = 1
     source_doc_id = str(doc_id)
-    while page_start <= pages:
-        page_end = min(page_start + pages_per_part - 1, pages)
+    while owned_page_start <= owned_range_end:
+        owned_page_end = min(owned_page_start + pages_per_part - 1, owned_range_end)
+        input_page_start = max(owned_range_start, owned_page_start - context_pages)
+        input_page_end = owned_page_end
         part_id = child_doc_id(source_doc_id, part_index)
         parts.append(
             {
                 "part_id": part_id,
                 "part_doc_id": part_id,
                 "part_index": part_index,
-                "page_start": page_start,
-                "page_end": page_end,
-                "page_count": page_end - page_start + 1,
+                "page_start": owned_page_start,
+                "page_end": owned_page_end,
+                "page_count": owned_page_end - owned_page_start + 1,
+                "owned_page_start": owned_page_start,
+                "owned_page_end": owned_page_end,
+                "input_page_start": input_page_start,
+                "input_page_end": input_page_end,
+                "input_page_count": input_page_end - input_page_start + 1,
+                "context_page_count": owned_page_start - input_page_start,
                 "state": "pending",
                 "source_doc_id": source_doc_id,
                 "doc_id": source_doc_id,
                 "profile": profile,
             }
         )
-        page_start = page_end + 1
+        owned_page_start = owned_page_end + 1
         part_index += 1
     return parts
 
@@ -203,6 +229,18 @@ def _positive_int(value: Any, error: str) -> int:
     except (TypeError, ValueError) as exc:
         raise ValueError(error) from exc
     if integer < 1:
+        raise ValueError(error)
+    return integer
+
+
+def _non_negative_int(value: Any, error: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(error)
+    try:
+        integer = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
+    if integer < 0:
         raise ValueError(error)
     return integer
 

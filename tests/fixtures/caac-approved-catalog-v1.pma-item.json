@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "caac-approved-catalog.v1",
+  "recordId": "run_caac_gold_20260815_001:pma_item:35",
+  "sectionKey": "pma_item",
+  "approvalType": "pma",
+  "recordKind": "approved_item",
+  "rowNumber": 35,
+  "approval": {
+    "numberOriginal": "PMA0005-ZN-001",
+    "numberNormalized": "PMA0005-ZN-001",
+    "latestApprovedOn": null,
+    "expiresOn": null
+  },
+  "holder": {
+    "nameOriginal": "新乡平原航空器材有限公司",
+    "nameNormalized": "新乡平原航空器材有限公司"
+  },
+  "item": {
+    "nameOriginal": "过滤器组件",
+    "modelOriginal": "",
+    "partNumberOriginal": "412A1600-41PY",
+    "replacedManufacturerOriginal": "BOEING",
+    "replacedPartNumberOriginal": "412A1600-41",
+    "ctsoCodesOriginal": [],
+    "ctsoCodesNormalized": []
+  },
+  "source": {
+    "pdfPageStart": 164,
+    "pdfPageEnd": 164,
+    "printedPageLabel": "3",
+    "rawText": "35 PMA0005-ZN-001 新乡平原航空器材有限公司 过滤器组件 412A1600-41PY BOEING 412A1600-41",
+    "cells": [],
+    "sourceSnapshotSha256": "625aa540fd47b09cd95f1dfa9ccd2cdf5da447dfd83120ac7ed099c7a9a11a06"
+  },
+  "quality": {
+    "status": "candidate",
+    "confidence": 0.99,
+    "signals": []
+  },
+  "fieldEvidence": [
+    {
+      "fieldPath": "approval.numberOriginal",
+      "textOriginal": "PMA0005-ZN-001",
+      "pdfPage": 164,
+      "bbox": [60.0, 96.0, 145.0, 108.0],
+      "sourceWordIds": ["p164w002"],
+      "sourceCellId": null,
+      "parserVersion": "0.1.0",
+      "extractorVersion": "1.0.0",
+      "confidence": 0.99,
+      "reviewStatus": "unreviewed"
+    }
+  ]
+}

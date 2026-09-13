@@ -55,6 +55,16 @@ min_reading_order_confidence = 0.8
 allow_local_rerun = false
 allow_manual_review = true
 
+[profiles.large-pdf-catalog]
+target_pages_per_part = 200
+part_context_pages = 1
+stream_pages = true
+stream_lines = true
+stream_records = true
+enable_record_fts = true
+record_schema = "caac-approved-catalog.v1"
+enable_ocr = false
+
 [providers.embedding]
 enabled = true
 provider = "openai-compatible"
@@ -200,6 +210,18 @@ class LoadSettingsParserOptionsTests(unittest.TestCase):
         self.assertEqual(settings.quality_gate.min_reading_order_confidence, 0.8)
         self.assertFalse(settings.quality_gate.allow_local_rerun)
         self.assertTrue(settings.quality_gate.allow_manual_review)
+        catalog_profile = settings.profiles["large-pdf-catalog"]
+        self.assertEqual(catalog_profile.target_pages_per_part, 200)
+        self.assertEqual(catalog_profile.part_context_pages, 1)
+        self.assertTrue(catalog_profile.stream_pages)
+        self.assertTrue(catalog_profile.stream_lines)
+        self.assertTrue(catalog_profile.stream_records)
+        self.assertTrue(catalog_profile.enable_record_fts)
+        self.assertEqual(
+            catalog_profile.record_schema,
+            "caac-approved-catalog.v1",
+        )
+        self.assertFalse(catalog_profile.enable_ocr)
 
         self.assertEqual(
             dict(settings.providers.ocr.options),
@@ -436,6 +458,30 @@ name = "pdf-text"
             settings = load_settings(path)
 
         self.assertEqual(settings.product_adapter, "embedded")
+
+    def test_profile_unknown_fields_fail_closed(self) -> None:
+        config = _TOML.replace(
+            'enable_ocr = false',
+            'enable_ocr = false\nsilently_ignored = true',
+            1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(config, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown fields: silently_ignored"):
+                load_settings(path)
+
+    def test_profile_unknown_record_schema_fails_closed(self) -> None:
+        config = _TOML.replace(
+            'record_schema = "caac-approved-catalog.v1"',
+            'record_schema = "caac-approved-catalog.v999"',
+            1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parsecore.toml"
+            path.write_text(config, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "record_schema is unsupported"):
+                load_settings(path)
 
 
 if __name__ == "__main__":

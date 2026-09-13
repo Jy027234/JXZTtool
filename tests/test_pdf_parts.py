@@ -57,6 +57,43 @@ class PdfPartsPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid_pages_per_part"):
             plan_pdf_parts("doc", 1, target_pages_per_part=0)
 
+    def test_plans_preceding_context_without_overlapping_owned_ranges(self) -> None:
+        parts = plan_pdf_parts(
+            "catalog",
+            1000,
+            target_pages_per_part=200,
+            part_context_pages=1,
+            page_start=162,
+            page_end=565,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    part["owned_page_start"],
+                    part["owned_page_end"],
+                    part["input_page_start"],
+                    part["input_page_end"],
+                    part["context_page_count"],
+                )
+                for part in parts
+            ],
+            [
+                (162, 361, 162, 361, 0),
+                (362, 561, 361, 561, 1),
+                (562, 565, 561, 565, 1),
+            ],
+        )
+        self.assertEqual(sum(part["page_count"] for part in parts), 404)
+
+    def test_rejects_invalid_context_and_source_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_part_context_pages"):
+            plan_pdf_parts("doc", 10, part_context_pages=-1)
+        with self.assertRaisesRegex(ValueError, "invalid_page_range"):
+            plan_pdf_parts("doc", 10, page_start=5, page_end=4)
+        with self.assertRaisesRegex(ValueError, "invalid_page_range"):
+            plan_pdf_parts("doc", 10, page_end=11)
+
     def test_child_doc_id_is_stable_and_safe(self) -> None:
         first = child_doc_id("客户 文档/Alpha#1", 2)
         second = child_doc_id("客户 文档/Alpha#1", 2)

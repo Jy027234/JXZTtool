@@ -1,0 +1,39 @@
+[project]
+name = "parsecore-caac-approved-catalog-2025"
+mode = "embedded-sdk"
+
+[runtime]
+execution_mode = "queue-worker"
+max_workers = 2
+max_active_parts_per_doc = 2
+part_timeout_seconds = 1800
+poll_interval_ms = 500
+
+[storage]
+database_url = "sqlite:///./var/caac-approved-catalog-2025.db"
+object_store = "local://./var/caac-approved-catalog-2025"
+
+[profiles.large-pdf-catalog]
+target_pages_per_part = 200
+part_context_pages = 1
+stream_pages = true
+stream_lines = true
+stream_records = true
+enable_record_fts = true
+record_schema = "caac-approved-catalog.v1"
+enable_ocr = false
+
+[profiles.large-pdf-catalog-v2]
+target_pages_per_part = 200
+part_context_pages = 1
+stream_pages = true
+stream_lines = true
+stream_records = true
+enable_record_fts = true
+record_schema = "caac-approved-catalog.v2"
+enable_ocr = false
+
+[[parsers]]
+name = "pdf-text"
+media_types = ["application/pdf"]
+extensions = [".pdf"]

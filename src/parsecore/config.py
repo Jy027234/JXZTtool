@@ -20,6 +20,20 @@ class ParserSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class ParseProfileSettings:
+    """Strict, named execution profile for bounded large-document runs."""
+
+    target_pages_per_part: int = 50
+    part_context_pages: int = 0
+    stream_pages: bool = False
+    stream_lines: bool = False
+    stream_records: bool = False
+    enable_record_fts: bool = False
+    record_schema: str = ""
+    enable_ocr: bool = True
+
+
+@dataclass(slots=True, frozen=True)
 class RuntimeSettings:
     execution_mode: str
     max_workers: int
@@ -166,6 +180,9 @@ class ParseCoreSettings:
     runtime: RuntimeSettings
     parsers: tuple[ParserSettings, ...]
     providers: ProviderSettings
+    profiles: Mapping[str, ParseProfileSettings] = field(
+        default_factory=lambda: _EMPTY_MAPPING
+    )
     index_embedding_dimension: int = 1536
     quality_gate: QualityGateSettings = field(default_factory=QualityGateSettings)
 
@@ -198,6 +215,80 @@ def _freeze_int_mapping(value: Any) -> Mapping[str, int]:
         except (TypeError, ValueError):
             continue
     return MappingProxyType(normalized)
+
+
+_PROFILE_KEYS = frozenset(
+    {
+        "target_pages_per_part",
+        "part_context_pages",
+        "stream_pages",
+        "stream_lines",
+        "stream_records",
+        "enable_record_fts",
+        "record_schema",
+        "enable_ocr",
+    }
+)
+
+
+def _profile_integer(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        comparator = "positive" if minimum == 1 else "non-negative"
+        raise ValueError(f"profiles.{field_name} must be a {comparator} integer")
+    return value
+
+
+def _load_profiles(value: Any) -> Mapping[str, ParseProfileSettings]:
+    if value in (None, {}):
+        return _EMPTY_MAPPING
+    if not isinstance(value, dict):
+        raise ValueError("profiles must be a table")
+    profiles: dict[str, ParseProfileSettings] = {}
+    for raw_name, raw_profile in value.items():
+        name = str(raw_name or "").strip()
+        if not name or not isinstance(raw_profile, dict):
+            raise ValueError("each profiles entry must be a named table")
+        unknown = sorted(set(raw_profile) - _PROFILE_KEYS)
+        if unknown:
+            raise ValueError(
+                f"profiles.{name} contains unknown fields: {', '.join(unknown)}"
+            )
+        target_pages = _profile_integer(
+            raw_profile.get("target_pages_per_part", 50),
+            field_name=f"{name}.target_pages_per_part",
+            minimum=1,
+        )
+        context_pages = _profile_integer(
+            raw_profile.get("part_context_pages", 0),
+            field_name=f"{name}.part_context_pages",
+            minimum=0,
+        )
+        record_schema = str(raw_profile.get("record_schema") or "").strip()
+        if record_schema:
+            from .catalog_extractors import default_catalog_extractor_registry
+
+            try:
+                default_catalog_extractor_registry().get(record_schema)
+            except KeyError as exc:
+                raise ValueError(
+                    f"profiles.{name}.record_schema is unsupported: {record_schema}"
+                ) from exc
+        profiles[name] = ParseProfileSettings(
+            target_pages_per_part=target_pages,
+            part_context_pages=context_pages,
+            stream_pages=bool(raw_profile.get("stream_pages", False)),
+            stream_lines=bool(raw_profile.get("stream_lines", False)),
+            stream_records=bool(raw_profile.get("stream_records", False)),
+            enable_record_fts=bool(raw_profile.get("enable_record_fts", False)),
+            record_schema=record_schema,
+            enable_ocr=bool(raw_profile.get("enable_ocr", True)),
+        )
+    return MappingProxyType(profiles)
 
 
 def _plain_value(value: Any) -> Any:
@@ -508,6 +599,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
     translation = data.get("translation", {})
     product = data.get("product", {})
     runtime = data.get("runtime", {})
+    profiles = _load_profiles(data.get("profiles", {}))
     quality_gate_raw = data.get("quality_gate", {}) or {}
     providers_raw = data.get("providers", {}) or {}
     llm_raw = providers_raw.get("llm", {}) or {}
@@ -650,6 +742,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             staged_upload_api_key_env=str(runtime.get("staged_upload_api_key_env", "")),
         ),
         parsers=parser_settings,
+        profiles=profiles,
         providers=ProviderSettings(
             llm=llm_settings,
             embedding=embedding_settings,
