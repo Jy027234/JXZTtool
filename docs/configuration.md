@@ -141,6 +141,8 @@ allow_mock_providers = false
 | 字段 | 默认值 | 可选值/范围 | 说明 |
 | --- | ---: | --- | --- |
 | `allow_mock_providers` | `false` | 布尔 | 允许 `fake`/`test`/`stub` provider。它们产出非正式结果，只用于联调与冒烟；开启后 `/health` 会把这些能力列进 `mock_capabilities`。生产必须保持 `false`。 |
+| `run_publication_enabled` | `true` | 布尔 | P0-03：允许通过 run store 发布文档版本。仅当存储后端能原子切换 active 指针（当前为 SQLite）时生效；否则 `publish_run()` 返回 `run_store_not_ready`，`/v1/parse/documents/{doc_id}/publication` 报 `not_ready`，绝不降级为非原子发布。设为 `false` 即退回本批次之前的单版本行为。 |
+| `run_artifact_profile` | `default` | `default` / `rag` / `records` / `assets-only` | 封存时按哪个 profile 判定必需产物。`default` 要求 blocks 与 reader 页视图，RAG 为 optional；`rag` 额外要求 RAG 产物且需要持久索引；`records`/`assets-only` 要求 export/assets，当前尚无 staged 通道，会封存失败。 |
 | `capability_optional` | `[]` | 能力名列表 | 声明哪些能力允许降级而不阻塞交付。默认 `rerank`、`ocr`、`index` 为 optional；`embedding`/`llm` 未启用时为 `disabled`（合法关闭，不算故障），显式启用后若初始化失败或缺少凭据则视为 required 并阻止受理。也可写 `parser:<name>`。 |
 | `execution_mode` | `inline` | `inline` / `queue-worker` | `inline` 由 API 进程执行后台 job；`queue-worker` 由 API 提交 job、Worker 独立消费。 |
 | `max_workers` | `2` | 正整数 | inline 后台 job 执行线程数。同步 `/parse` 和 `/parse/batch` 仍在请求内完成。 |

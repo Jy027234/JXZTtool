@@ -4,7 +4,9 @@ from copy import deepcopy
 from typing import Any
 
 from .api_payloads import (
+    DOCUMENT_PUBLICATION_SCHEMA_VERSION,
     DOCUMENT_SCHEMA_VERSION,
+    PARSE_RUN_SCHEMA_VERSION,
     PROVIDER_USAGE_SCHEMA_VERSION,
     QUALITY_GATE_SCHEMA_VERSION,
     READER_SCHEMA_VERSION,
@@ -21,10 +23,6 @@ from .publication import (
 
 JSON_SCHEMA_DRAFT = "https://json-schema.org/draft/2020-12/schema"
 PAYLOAD_SCHEMA_REGISTRY_VERSION = "2026-06-payload-schema-registry"
-#: P0-02 run/publication contracts, versioned separately from the document
-#: projections so a run-contract change does not renumber reader/IR payloads.
-PARSE_RUN_SCHEMA_VERSION = "2026-09-parse-run-v1"
-DOCUMENT_PUBLICATION_SCHEMA_VERSION = "2026-09-document-publication-v1"
 _SCHEMA_BASE_URI = "https://parsecore.local/schemas"
 
 

@@ -12,6 +12,12 @@ from .models import Block, BlockType, ParseOutcome
 from .ocr_trace import build_ocr_decision_trace, ocr_decision_trace_payload
 from .parts import document_parts_projection
 from .profiles import resolve_parse_profile
+from .publication import (
+    CONCURRENT_PUBLICATION_POLICY,
+    DEFAULT_VALIDATION_POLICY,
+    PARSE_RUN_ID_ALIAS,
+    SCHEMA_VERSION as RUN_CONTRACT_VERSION,
+)
 from .record_filters import collect_record_page
 from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 
@@ -39,6 +45,10 @@ _IDENTIFIER_FIELD_HINTS = ("certificate", "project", "编号", "证件", "项目
 # backwards-incompatible way.  Consumers can gate on this string.
 PAYLOAD_SCHEMA_VERSION = "2026-04"
 DOCUMENT_SCHEMA_VERSION = "2026-06"
+#: P0-02 run/publication contracts, versioned separately from the document
+#: projections.
+DOCUMENT_PUBLICATION_SCHEMA_VERSION = "2026-09-document-publication-v1"
+PARSE_RUN_SCHEMA_VERSION = "2026-09-parse-run-v1"
 PROVIDER_USAGE_SCHEMA_VERSION = "2026-06-provider-usage"
 PROVIDER_COMPARISON_SCHEMA_VERSION = "2026-06-provider-comparison"
 QUALITY_GATE_SCHEMA_VERSION = "2026-06-quality-gate"
@@ -160,6 +170,85 @@ def _parse_success_response(
         "output_quality": _quality_payload(output_qs),
     }
     _attach_placeholder_result(payload, outcome)
+    return payload
+
+
+def build_document_publication_payload(
+    *,
+    state: Mapping[str, Any],
+    tenant_id: str,
+    doc_id: str,
+    profile: str = "default",
+    readiness: Mapping[str, Any] | None = None,
+    runs: Sequence[Mapping[str, Any]] = (),
+    diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Formal read contract for one document (P0-03).
+
+    ``consumer_signal`` is the authoritative field for downstream ingest:
+    ``published`` means a complete validated version is available, ``not_ready``
+    means no formal version exists yet.  A caller that used to treat
+    ``job.state = done`` as permission to ingest must read this instead.
+    """
+
+    active_run = state.get("run")
+    run_payload = (
+        active_run.as_payload() if hasattr(active_run, "as_payload") else active_run
+    )
+    publication_status = str(state.get("publication_status") or "unpublished")
+    formal_available = bool(state.get("formal_version_available"))
+    payload: dict[str, Any] = {
+        "schema_version": DOCUMENT_PUBLICATION_SCHEMA_VERSION,
+        "contract_version": RUN_CONTRACT_VERSION,
+        "tenant_id": str(tenant_id),
+        "doc_id": str(doc_id),
+        "active_run_id": state.get("active_run_id"),
+        "publication_generation": int(state.get("publication_generation") or 0),
+        "publication_status": publication_status,
+        "formal_version_available": formal_available,
+        "consumer_signal": str(
+            state.get("consumer_signal")
+            or ("published" if formal_available else "not_ready")
+        ),
+        "source_version": state.get("source_version"),
+        "profile": str(state.get("profile") or profile),
+        "validation": (
+            dict((run_payload or {}).get("validation_report") or {})
+            if isinstance(run_payload, Mapping)
+            and (run_payload or {}).get("validation_report")
+            else {
+                "status": str(
+                    (run_payload or {}).get("validation_status", "not_run")
+                    if isinstance(run_payload, Mapping)
+                    else "not_run"
+                ),
+                "reason": "",
+                "policy_version": str(state.get("policy_version") or ""),
+                "rule_version": "",
+                "warning_codes": [],
+                "metrics": {},
+            }
+        ),
+        "readiness": {
+            "accepting_jobs": bool((readiness or {}).get("accepting_jobs", True)),
+            "formal_parse_ready": bool((readiness or {}).get("formal_parse_ready", True)),
+            "blocking_reasons": list((readiness or {}).get("blocking_reasons") or []),
+        },
+        "policy": {
+            **DEFAULT_VALIDATION_POLICY.as_payload(),
+            "concurrent_publication": dict(CONCURRENT_PUBLICATION_POLICY),
+        },
+        "runs": [dict(item) for item in runs],
+        "legacy": {
+            "formal_signal": "publication_status == 'published'",
+            "legacy_formal_signal": "job.state == 'done'",
+            "legacy_formal_signal_sufficient": False,
+            "preview_endpoint_required_for_partial": True,
+            "parse_run_id_alias": PARSE_RUN_ID_ALIAS,
+        },
+    }
+    if diagnostics:
+        payload["diagnostics"] = dict(diagnostics)
     return payload
 
 

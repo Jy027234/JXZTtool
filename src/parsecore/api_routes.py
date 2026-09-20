@@ -22,6 +22,7 @@ from .api_payloads import (
     _document_view_rows,
     _parse_success_response,
     _to_payload,
+    build_document_publication_payload,
 )
 from .api_responses import batch_error_response as _batch_error_response
 from .api_responses import error_response as _error_response
@@ -99,6 +100,7 @@ class ApiRoutes:
             Route("/v1/parse/dashboard", self.tenant_dashboard, methods=["GET"]),
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
+            Route("/v1/parse/documents/{doc_id}/publication", self.get_document_publication, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/coverage", self.get_document_coverage, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/providers", self.get_document_providers, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/reader", self.get_document_reader, methods=["GET"]),
@@ -946,6 +948,48 @@ class ApiRoutes:
                     detail={"allowed": ["compat", "structured", "full", "ir", "coverage", "reader"]},
                 )
             raise
+
+    async def get_document_publication(self, request: Request) -> JSONResponse:
+        """Formal read contract: which run is published, or an explicit not-ready."""
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        doc_id = str(request.path_params["doc_id"])
+        state = runtime_obj.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        capabilities = runtime_obj.capability_report()
+        runs = [
+            {
+                "parse_run_id": record.parse_run_id,
+                "execution_status": record.execution_status,
+                "validation_status": record.validation_status,
+                "publication_status": record.publication_status,
+                "created_at": record.created_at,
+            }
+            for record in runtime_obj.list_runs(doc_id=doc_id, tenant_id=tenant_id)
+        ]
+        diagnostics: dict[str, Any] = {
+            "publication_ready": runtime_obj.run_publication_ready,
+            "run_store_backend": type(runtime_obj.run_store).__name__
+            if runtime_obj.run_store is not None
+            else None,
+            "latest_job_used_for_publication": False,
+        }
+        if not runtime_obj.run_publication_ready:
+            diagnostics["reason"] = str(
+                state.get("publication_unavailable_reason")
+                or "run_store_capabilities_incomplete"
+            )
+        return JSONResponse(
+            build_document_publication_payload(
+                state=state,
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                profile=str(runtime_obj.settings.runtime.run_artifact_profile),
+                readiness=capabilities,
+                runs=runs,
+                diagnostics=diagnostics,
+            )
+        )
 
     async def get_document_coverage(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime

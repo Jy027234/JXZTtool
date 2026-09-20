@@ -29,6 +29,12 @@ from .profiles import describe_parse_profiles
 from .provider_failures import PROVIDER_FAILURE_CATEGORIES, classify_provider_failure
 from .private_files import ensure_private_directory
 from .quality import evaluate_parse_quality
+from .run_store import (
+    PublishError,
+    RunArtifacts,
+    publication_ready,
+    run_store_for,
+)
 from .stores import PgVectorIndex
 from .stubs import NullEmbeddingProvider, NullRerankProvider
 
@@ -529,6 +535,10 @@ class ParseRuntime:
         # Placeholder results are recorded per job so API projections can expose
         # them without re-reading parser state.
         self._placeholder_job_notes: dict[str, dict[str, Any]] = {}
+        # P0-03: run-scoped artifact storage and atomic publication.  Only a
+        # backend that advertises the required capabilities is used; otherwise
+        # this stays None and the run-publication API reports ``not_ready``.
+        self.run_store = run_store_for(settings.database_url)
         self._search_layer_query_hits: dict[tuple[str, str], list[int]] = {}
         # Part jobs are created and executed by this runtime instance. Keep a
         # parent-scoped latest-child map so every completed part does not scan
@@ -609,6 +619,189 @@ class ParseRuntime:
         return local_provider_registry_payload(self.settings.providers)
 
     # ------------------------------------------------------------------
+    # P0-03: run-scoped publication
+    # ------------------------------------------------------------------
+
+    @property
+    def run_publication_ready(self) -> bool:
+        """Whether this runtime may treat a published run as authoritative."""
+
+        if not bool(getattr(self.settings.runtime, "run_publication_enabled", True)):
+            return False
+        return publication_ready(self.run_store)
+
+    def publication_state(
+        self, *, doc_id: str, tenant_id: str | None = None
+    ) -> dict[str, Any]:
+        """Pointer state for one document.
+
+        When no run has been published this returns an explicit ``not_ready``
+        state rather than an empty but successful-looking document.
+        """
+
+        if self.run_store is None:
+            return {
+                "active_run_id": None,
+                "publication_generation": 0,
+                "publication_status": "unpublished",
+                "formal_version_available": False,
+                "consumer_signal": "not_ready",
+                "source_version": None,
+                "profile": self.settings.runtime.run_artifact_profile,
+                "policy_version": None,
+                "published_at": None,
+                "run": None,
+                "publication_ready": False,
+                "publication_unavailable_reason": "run_store_backend_unsupported",
+            }
+        state = self.run_store.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        state["publication_ready"] = self.run_publication_ready
+        if not state["publication_ready"]:
+            state["publication_unavailable_reason"] = "run_store_capabilities_incomplete"
+        return state
+
+    def list_runs(
+        self, *, doc_id: str, tenant_id: str | None = None, limit: int = 50
+    ) -> tuple[Any, ...]:
+        """Run history for diagnostics.  Never used to decide publication."""
+
+        if self.run_store is None:
+            return ()
+        return tuple(self.run_store.list_runs(doc_id=doc_id, tenant_id=tenant_id, limit=limit))
+
+    def publish_run(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        artifacts: RunArtifacts,
+        job_id: str = "",
+        claim_token: str | None = None,
+        source_version: str | None = None,
+        source_bytes: int = 0,
+        profile: str | None = None,
+        validation_status: Any = "passed",
+        validation_reason: str = "",
+        validation_metrics: Mapping[str, Any] | None = None,
+        expected_generation: int | None = None,
+        expected_source_version: str | None = None,
+        version_sources: Mapping[str, Any] | None = None,
+        attempt_count: int = 0,
+        base_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the full begin → stage → seal → validate → publish sequence.
+
+        Returns the publish result, or a structured rejection when the backend
+        cannot publish atomically or a precondition fails.  A rejection never
+        changes the previously published version.
+        """
+
+        if not self.run_publication_ready:
+            return {
+                "published": False,
+                "reason": "run_store_not_ready",
+                "consumer_signal": "not_ready",
+                "doc_id": doc_id,
+                "tenant_id": str(tenant_id or "default"),
+                "parse_run_id": None,
+            }
+        assert self.run_store is not None
+        profile_name = str(profile or self.settings.runtime.run_artifact_profile or "default")
+        run = self.run_store.begin_run(
+            job_id=job_id or doc_id,
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            source_version=source_version,
+            source_bytes=source_bytes,
+            profile=profile_name,
+            artifact_profile=profile_name,
+            claim_token=claim_token,
+            expected_generation=expected_generation,
+            version_sources=version_sources,
+            attempt_count=attempt_count,
+            base_run_id=base_run_id,
+        )
+        try:
+            self.run_store.set_execution_status(
+                parse_run_id=run.parse_run_id, status="running", claim_token=claim_token
+            )
+            self.run_store.save_run_artifacts(
+                parse_run_id=run.parse_run_id, artifacts=artifacts, claim_token=claim_token
+            )
+            self.run_store.set_execution_status(
+                parse_run_id=run.parse_run_id, status="succeeded", claim_token=claim_token
+            )
+            seal = self.run_store.seal_run(
+                parse_run_id=run.parse_run_id, claim_token=claim_token
+            )
+            self.run_store.record_validation(
+                parse_run_id=run.parse_run_id,
+                status=validation_status,
+                reason=validation_reason,
+                metrics=validation_metrics or {},
+            )
+            result = self.run_store.publish_run(
+                parse_run_id=run.parse_run_id,
+                expected_source_version=expected_source_version,
+                expected_generation=expected_generation,
+                claim_token=claim_token,
+                durable_index=isinstance(self.index, PgVectorIndex),
+                profile=profile_name,
+            )
+        except PublishError as exc:
+            self.event_logger.log(
+                "run_publication_rejected",
+                doc_id=doc_id,
+                parse_run_id=run.parse_run_id,
+                error_code=exc.code,
+                error=str(exc),
+            )
+            state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+            return {
+                "published": False,
+                "reason": exc.code,
+                "message": str(exc),
+                "parse_run_id": run.parse_run_id,
+                "doc_id": doc_id,
+                "tenant_id": str(tenant_id or "default"),
+                "execution_status": "succeeded",
+                "validation_status": self._run_validation_status(run.parse_run_id),
+                "consumer_signal": "not_ready",
+                "active_run_id": state.get("active_run_id"),
+                "publication_generation": state.get("publication_generation", 0),
+            }
+        payload = result.as_payload()
+        payload["sealed_manifest"] = dict(seal.manifest)
+        payload["degraded_artifacts"] = [dict(item) for item in seal.degraded_artifacts]
+        return payload
+
+    def _run_validation_status(self, parse_run_id: str) -> str:
+        if self.run_store is None:
+            return "not_run"
+        record = self.run_store.get_run(parse_run_id=parse_run_id)
+        return str(record.validation_status) if record is not None else "not_run"
+
+    def provider_route_plan(
+        self,
+        *,
+        media_type: str | None = None,
+        extension: str | None = None,
+        file_name: str | None = None,
+        profile: str | None = None,
+        required_capabilities: Sequence[str] = (),
+        include_disabled: bool = True,
+    ) -> dict[str, Any]:
+        return local_provider_route_plan_payload(
+            self.settings.providers,
+            media_type=media_type,
+            extension=extension,
+            file_name=file_name,
+            profile=profile,
+            required_capabilities=required_capabilities,
+            include_disabled=include_disabled,
+        )
+
+    # ------------------------------------------------------------------
     # P0-01: capability truthfulness
     # ------------------------------------------------------------------
 
@@ -643,6 +836,10 @@ class ParseRuntime:
             self.settings.providers.rerank.enabled
             and not isinstance(self.rerank_provider, NullRerankProvider)
         )
+        capabilities_getter = getattr(self.run_store, "run_store_capabilities", None)
+        run_store_report = (
+            capabilities_getter().as_payload() if callable(capabilities_getter) else {}
+        )
         return build_capability_report(
             self.settings,
             parser_names=tuple(str(parser.name) for parser in self.parsers),
@@ -652,6 +849,8 @@ class ParseRuntime:
             rerank_provider=type(self.rerank_provider).__name__,
             embedding_configured=embedding_configured,
             rerank_configured=rerank_configured,
+            run_store=run_store_report,
+            run_publication_ready=self.run_publication_ready,
             degraded=self._capability_degradations,
         )
 
@@ -712,26 +911,6 @@ class ParseRuntime:
             error_code="placeholder_parsers_not_allowed",
         )
         return job
-
-    def provider_route_plan(
-        self,
-        *,
-        media_type: str | None = None,
-        extension: str | None = None,
-        file_name: str | None = None,
-        profile: str | None = None,
-        required_capabilities: Sequence[str] = (),
-        include_disabled: bool = True,
-    ) -> dict[str, Any]:
-        return local_provider_route_plan_payload(
-            self.settings.providers,
-            media_type=media_type,
-            extension=extension,
-            file_name=file_name,
-            profile=profile,
-            required_capabilities=required_capabilities,
-            include_disabled=include_disabled,
-        )
 
     def quality_gate_config(self) -> dict[str, Any]:
         return quality_gate_payload(self.settings.quality_gate)

@@ -310,10 +310,13 @@ CREATE TABLE publication_events (
 - 停止新路由与新发布，切回上一个完整 active run。
 - 迁移观察期保留全部旧快照；清理 staged 与过期产物时必须保护 active run、回滚保留版本、在途导出以及被父/派生 manifest 引用的快照。
 - 保留能读取新存储的兼容版本作为回滚版本；旧程序若不理解 run 表，**不能直接写入新版数据**。
+- 第 1 批已提供回滚原语 `SQLiteRunStore.restore_live_from_run(doc_id, tenant_id)`：用 active run 的**已封存** staged 产物重建活层，重建前重新校验清单数量与内容哈希，且**不切换指针**；没有 active run 时返回 `no_active_run` 且不写入任何数据。staged 被篡改时拒绝重建（`SealError`）。
 
 ---
 
 ## 9. 失败场景清单（P0-05 转为回归）
+
+> 实施状态（P0-03 第 1 批）：下表中 SQLite 可覆盖的行已转为 `tests/test_run_store.py` 的自动化回归；索引三层、素材隔离、派生 run、通知派发与 Postgres 相关行仍待第 2 批。
 
 | 场景 | 期望结果 |
 | --- | --- |

@@ -203,16 +203,25 @@ class ArtifactProfileTests(unittest.TestCase):
         )
         # A deployment without embedding must not be rejected.
         self.assertEqual(profile.requirement_for("rag"), ArtifactRequirement.OPTIONAL)
-        self.assertEqual(profile.required_artifacts(), ("reader",))
+        # A run must produce blocks and a reader-visible page view to be sealed.
+        self.assertEqual(profile.required_artifacts(), ("blocks", "reader"))
 
     def test_rag_profile_requires_rag_and_records_profile_disables_it(self) -> None:
         self.assertEqual(
-            set(artifact_profile("rag").required_artifacts()), {"reader", "rag"}
+            set(artifact_profile("rag").required_artifacts()),
+            {"blocks", "reader", "rag"},
         )
         records = artifact_profile("records")
         self.assertEqual(records.requirement_for("rag"), ArtifactRequirement.DISABLED)
         self.assertIn("rag", records.disabled_artifacts())
         self.assertIn("export", records.required_artifacts())
+
+    def test_profiles_requiring_unstaged_artifacts_are_documented_as_such(self) -> None:
+        # ``export`` and ``assets`` have no staging surface until P0-03 stages
+        # them, so a profile that requires them cannot be sealed yet. Recording
+        # that here stops the gap from being discovered as a production failure.
+        self.assertIn("export", artifact_profile("records").required_artifacts())
+        self.assertIn("assets", artifact_profile("assets-only").required_artifacts())
 
     def test_unknown_artifact_defaults_to_optional_and_profile_lookup_is_strict(self) -> None:
         self.assertEqual(
@@ -301,10 +310,18 @@ class ValidationPolicyTests(unittest.TestCase):
 
 
 class StoreCapabilityTests(unittest.TestCase):
-    def test_no_shipped_backend_is_strict_publication_ready_yet(self) -> None:
-        # P0-02 records the gap; P0-03 closes it. Until then a store must not be
-        # able to claim it can publish atomically.
-        for backend in ("sqlite", "postgres", "memory"):
+    def test_sqlite_is_strict_publication_ready_after_p0_03(self) -> None:
+        capabilities = run_store_capabilities("sqlite")
+        self.assertTrue(capabilities.strict_publication_ready)
+        self.assertEqual(
+            capabilities.missing(STRICT_PUBLICATION_REQUIRED_CAPABILITIES), ()
+        )
+
+    def test_backends_without_run_isolation_are_not_ready(self) -> None:
+        # Postgres and the in-memory store still serve the legacy
+        # single-version path; claiming otherwise would be exactly the
+        # capability lie P0-01 forbids.
+        for backend in ("postgres", "memory"):
             with self.subTest(backend=backend):
                 capabilities = run_store_capabilities(backend)
                 self.assertFalse(capabilities.strict_publication_ready)
@@ -314,7 +331,7 @@ class StoreCapabilityTests(unittest.TestCase):
                 )
 
     def test_capability_lookup_normalizes_database_urls(self) -> None:
-        self.assertFalse(run_store_capabilities("sqlite:///./var/x.db").strict_publication_ready)
+        self.assertTrue(run_store_capabilities("sqlite:///./var/x.db").strict_publication_ready)
         self.assertFalse(run_store_capabilities("postgresql://h/db").strict_publication_ready)
         self.assertFalse(run_store_capabilities("").strict_publication_ready)
         self.assertFalse(run_store_capabilities("mysql://h/db").strict_publication_ready)
@@ -344,6 +361,7 @@ class StoreCapabilityTests(unittest.TestCase):
             "seal_run",
             "get_active_run",
             "publish_run",
+            "restore_live_from_run",
         ):
             with self.subTest(operation=operation):
                 self.assertIn(operation, RUN_STORE_OPERATIONS)

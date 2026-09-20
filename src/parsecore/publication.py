@@ -118,13 +118,27 @@ class RunEvent(str, Enum):
 # ---------------------------------------------------------------------------
 
 class RequiredArtifact(str, Enum):
-    """Artifact families a profile may declare as required."""
+    """Artifact families a profile may declare as required.
+
+    A family is satisfied by the staged artifacts that carry it:
+
+    * ``blocks`` / ``chunks`` — the staged block and chunk rows;
+    * ``reader`` — the ``pages`` document view the reader projection reads;
+    * ``records`` — the ``records`` document view;
+    * ``rag`` — chunks that reached the index tier;
+    * ``assets`` / ``export`` — asset and export packages (no staging surface
+      yet, so a profile requiring them cannot seal until P0-03 stages them).
+    """
 
     READER = "reader"
     RECORDS = "records"
     RAG = "rag"
     ASSETS = "assets"
     EXPORT = "export"
+    BLOCKS = "blocks"
+    CHUNKS = "chunks"
+    PAGES = "pages"
+    LINES = "lines"
     RECORD_FTS = "record_fts"
 
 
@@ -185,6 +199,7 @@ ARTIFACT_PROFILES: Mapping[str, ArtifactProfile] = {
     "default": ArtifactProfile(
         name="default",
         requirements={
+            RequiredArtifact.BLOCKS.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.READER.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.RECORDS.value: ArtifactRequirement.OPTIONAL,
             RequiredArtifact.RAG.value: ArtifactRequirement.OPTIONAL,
@@ -195,9 +210,10 @@ ARTIFACT_PROFILES: Mapping[str, ArtifactProfile] = {
     "rag": ArtifactProfile(
         name="rag",
         requirements={
+            RequiredArtifact.BLOCKS.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.READER.value: ArtifactRequirement.REQUIRED,
-            RequiredArtifact.RECORDS.value: ArtifactRequirement.OPTIONAL,
             RequiredArtifact.RAG.value: ArtifactRequirement.REQUIRED,
+            RequiredArtifact.RECORDS.value: ArtifactRequirement.OPTIONAL,
             RequiredArtifact.ASSETS.value: ArtifactRequirement.OPTIONAL,
             RequiredArtifact.EXPORT.value: ArtifactRequirement.OPTIONAL,
         },
@@ -205,20 +221,22 @@ ARTIFACT_PROFILES: Mapping[str, ArtifactProfile] = {
     "records": ArtifactProfile(
         name="records",
         requirements={
+            RequiredArtifact.BLOCKS.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.READER.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.RECORDS.value: ArtifactRequirement.REQUIRED,
+            RequiredArtifact.EXPORT.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.RAG.value: ArtifactRequirement.DISABLED,
             RequiredArtifact.ASSETS.value: ArtifactRequirement.OPTIONAL,
-            RequiredArtifact.EXPORT.value: ArtifactRequirement.REQUIRED,
         },
     ),
     "assets-only": ArtifactProfile(
         name="assets-only",
         requirements={
+            RequiredArtifact.BLOCKS.value: ArtifactRequirement.REQUIRED,
+            RequiredArtifact.ASSETS.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.READER.value: ArtifactRequirement.DISABLED,
             RequiredArtifact.RECORDS.value: ArtifactRequirement.DISABLED,
             RequiredArtifact.RAG.value: ArtifactRequirement.DISABLED,
-            RequiredArtifact.ASSETS.value: ArtifactRequirement.REQUIRED,
             RequiredArtifact.EXPORT.value: ArtifactRequirement.OPTIONAL,
         },
     ),
@@ -527,6 +545,7 @@ RUN_STORE_OPERATIONS: tuple[str, ...] = (
     "get_run",
     "get_active_run",
     "publish_run",
+    "restore_live_from_run",
     "list_runs",
     "record_validation",
     "record_publication_event",
@@ -602,10 +621,25 @@ class RunStoreCapabilities:
         }
 
 
-#: Capabilities of the stores shipped today.  Neither participates in strict
-#: publication until P0-03 adds run isolation and the CAS pointer switch.
+#: Capabilities of the stores shipped today.  Saying a backend is ready here is
+#: a claim that must be backed by tests: the SQLite store implements run
+#: isolation, staging, the CAS pointer switch and claim fencing (P0-03), while
+#: Postgres and the in-memory store still serve the legacy single-version path.
+SQLITE_RUN_STORE_CAPABILITIES = RunStoreCapabilities(
+    supported=(
+        RunStoreCapability.RUN_ISOLATED_ARTIFACTS.value,
+        RunStoreCapability.STAGED_ARTIFACTS.value,
+        RunStoreCapability.ATOMIC_ACTIVE_POINTER.value,
+        RunStoreCapability.COMPARE_AND_SET_ACTIVE_POINTER.value,
+        RunStoreCapability.CLAIM_FENCING.value,
+        RunStoreCapability.SOURCE_VERSION_CHECK.value,
+        RunStoreCapability.PUBLICATION_GENERATIONS.value,
+        RunStoreCapability.VALIDATION_PERSISTENCE.value,
+    )
+)
+
 CURRENT_STORE_CAPABILITIES: Mapping[str, RunStoreCapabilities] = {
-    "sqlite": RunStoreCapabilities(supported=()),
+    "sqlite": SQLITE_RUN_STORE_CAPABILITIES,
     "postgres": RunStoreCapabilities(supported=()),
     "memory": RunStoreCapabilities(supported=()),
 }
@@ -736,6 +770,7 @@ __all__ = [
     "RunStoreCapabilities",
     "RunStoreCapability",
     "SCHEMA_VERSION",
+    "SQLITE_RUN_STORE_CAPABILITIES",
     "STRICT_PUBLICATION_REQUIRED_CAPABILITIES",
     "TransitionError",
     "VALIDATION_TRANSITIONS",

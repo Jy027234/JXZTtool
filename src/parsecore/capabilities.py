@@ -57,6 +57,11 @@ SCHEMA_VERSION = "2026-09-capability-report-v1"
 # every job.  ``pgvector`` without PostgreSQL is rejected outright at load time.
 DEFAULT_OPTIONAL_CAPABILITIES: tuple[str, ...] = ("rerank", "ocr", "index")
 
+#: Capabilities that report whether a formal published version can be produced.
+#: ``run_publication`` is P0-03: without a store that can switch the active
+#: pointer atomically, ParseCore must not claim it publishes formal versions.
+RUN_PUBLICATION_CAPABILITIES: tuple[str, ...] = ("run_store", "run_publication")
+
 STRICTNESS_MODES: tuple[str, ...] = ("strict", "lenient")
 
 # ``<capability>.<name>`` -> stable error code.  These codes are part of the
@@ -83,7 +88,7 @@ _MOCKABLE_CAPABILITIES: frozenset[str] = frozenset({"llm", "embedding", "rerank"
 
 # Capability names accepted in ``[runtime] capability_optional``.
 _KNOWN_CAPABILITY_NAMES: frozenset[str] = frozenset(
-    {"llm", "embedding", "rerank", "ocr", "index", "translation"}
+    {"llm", "embedding", "rerank", "ocr", "index", "translation", "run_publication"}
 )
 
 
@@ -451,7 +456,15 @@ def _provider_requirement(capability: str, *, optional: frozenset[str]) -> str:
 
     if capability == "translation":
         return "required"
+    if capability == "run_publication":
+        # P0-03: a deployment may legitimately run without formal publication
+        # (the run is then reported as not_ready instead of published).
+        return "optional"
     return "optional" if capability in optional else "disabled"
+
+
+def _run_publication_enabled(settings: ParseCoreSettings) -> bool:
+    return bool(getattr(settings.runtime, "run_publication_enabled", True))
 
 
 def _entry(
@@ -579,6 +592,8 @@ def build_capability_report(
     rerank_provider: str | None = None,
     embedding_configured: bool | None = None,
     rerank_configured: bool | None = None,
+    run_store: Mapping[str, Any] | None = None,
+    run_publication_ready: bool | None = None,
     degraded: tuple[dict[str, str], ...] = (),
 ) -> dict[str, Any]:
     """Build the capability report exposed to health/readiness consumers.
@@ -709,6 +724,34 @@ def build_capability_report(
             detail={"strategy": settings.translation_strategy},
         )
     )
+
+    # P0-03: can this deployment produce a formally published version at all?
+    publication_ready = bool(run_publication_ready)
+    publication_enabled = _run_publication_enabled(settings)
+    run_store_detail: dict[str, Any] = dict(run_store or {})
+    if run_publication_ready is not None:
+        entries.append(
+            _entry(
+                name="run_publication",
+                kind="publication",
+                enabled=publication_enabled,
+                available=publication_ready,
+                requirement=(
+                    "optional"
+                    if publication_enabled
+                    else "disabled"
+                ),
+                reason="ok"
+                if publication_ready
+                else "run_store_capabilities_incomplete",
+                detail={
+                    **run_store_detail,
+                    "artifact_profile": str(
+                        getattr(settings.runtime, "run_artifact_profile", "default")
+                    ),
+                },
+            )
+        )
 
     for item in degraded:
         capability = str(item.get("capability") or "").strip()

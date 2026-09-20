@@ -1040,6 +1040,7 @@ class SQLiteJobStore(JobStore):
                     block_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
                     tenant_id TEXT NOT NULL DEFAULT 'default',
+                    run_id TEXT NOT NULL DEFAULT 'legacy',
                     position INTEGER NOT NULL,
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
@@ -1053,6 +1054,7 @@ class SQLiteJobStore(JobStore):
                     chunk_id TEXT PRIMARY KEY,
                     doc_id TEXT NOT NULL,
                     tenant_id TEXT NOT NULL DEFAULT 'default',
+                    run_id TEXT NOT NULL DEFAULT 'legacy',
                     position INTEGER NOT NULL,
                     block_ids_json TEXT NOT NULL,
                     text TEXT NOT NULL,
@@ -1123,6 +1125,13 @@ class SQLiteJobStore(JobStore):
                 )
             if "tenant_id" not in chunk_columns:
                 conn.execute("ALTER TABLE chunks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            # P0-03: record which run produced the live artifacts. Existing rows
+            # are stamped 'legacy' because the run that wrote them is unknown and
+            # must not be presented as a published run.
+            if "run_id" not in block_columns:
+                conn.execute("ALTER TABLE blocks ADD COLUMN run_id TEXT NOT NULL DEFAULT 'legacy'")
+            if "run_id" not in chunk_columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN run_id TEXT NOT NULL DEFAULT 'legacy'")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_parse_jobs_tenant_doc_created ON parse_jobs (tenant_id, doc_id, created_at DESC)"
             )

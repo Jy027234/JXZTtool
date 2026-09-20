@@ -26,6 +26,13 @@ poll_interval_ms = 500
 # Mock providers (provider = "fake"/"test"/"stub") produce non-production
 # results and are rejected unless this is true. Never enable it in production.
 allow_mock_providers = false
+# P0-03: publish a document version through the run store when the backend can
+# switch the active pointer atomically (SQLite can). When it cannot, the run
+# stays unpublished and /v1/parse/documents/{doc_id}/publication reports
+# not_ready instead of pretending a formal version exists.
+run_publication_enabled = true
+# Artifact profile the run is sealed against: default | rag | records | assets-only
+run_artifact_profile = "default"
 # Capabilities that may degrade without blocking delivery. rerank, ocr and index
 # are optional by default; embedding and llm follow whether they are enabled.
 # Example: capability_optional = ["embedding", "parser:docx-native"]

@@ -65,6 +65,13 @@ class RuntimeSettings:
     # They produce non-production results, so they are rejected unless the
     # deployment states that it is not serving formal results.
     allow_mock_providers: bool = False
+    # P0-03: drive the run store and publish a document version when the
+    # configured storage backend can do it atomically.  When the backend cannot,
+    # the run stays unpublished and ``/v1/parse/documents/{doc_id}/publication``
+    # reports ``not_ready`` instead of pretending a formal version exists.
+    run_publication_enabled: bool = True
+    # Artifact profile the run store seals against (see ARTIFACT_PROFILES).
+    run_artifact_profile: str = "default"
 
 
 @dataclass(slots=True, frozen=True)
@@ -763,6 +770,8 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             api_key_env=str(runtime.get("api_key_env", "")),
             staged_upload_api_key_env=str(runtime.get("staged_upload_api_key_env", "")),
             allow_mock_providers=bool(runtime.get("allow_mock_providers", False)),
+            run_publication_enabled=bool(runtime.get("run_publication_enabled", True)),
+            run_artifact_profile=str(runtime.get("run_artifact_profile", "default")),
         ),
         parsers=parser_settings,
         profiles=profiles,

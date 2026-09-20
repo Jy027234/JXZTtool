@@ -34,6 +34,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可选 DashScope-compatible 二阶段 rerank provider，支持阿里 Qwen 排序模型与安全降级
 - 启动期能力真实性校验：未知 parser / index / provider 名称、mock provider 与占位解析器默认被拒绝，能力状态通过 `/health` 与 `/v1/runtime` 的 `capabilities` 报告暴露（`accepting_jobs` / `formal_parse_ready` / `degraded_capabilities`）
+- run 级产物快照与原子发布（P0-03 第 1 批，SQLite）：`begin_run → staged → seal → publish` 在单个事务内切换 active 指针，失败时旧正式版本保持完整；未发布时 `/v1/parse/documents/{doc_id}/publication` 返回明确 `not_ready`
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
 - `profile=auto` 自动路由，支持大文件、表格密集、OCR 密集、Excel 台账等解析策略分流
@@ -54,9 +55,10 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 文档导航
 
-- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（方案阶段；P0-01、P0-02 已实施，其余待实施）
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（P0-01、P0-02 已实施，P0-03 第 1 批已实施，其余待实施）
 - [docs/adr-p0-02-run-publication-contract.md](docs/adr-p0-02-run-publication-contract.md)：run / 状态 / 发布指针契约冻结（P0-02）；明确 `done` 不等于 `published`、三套状态机、存储能力与 SQLite/Postgres 迁移设计
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
+- [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、22 项故障注入验证与未完成范围
 - [docs/release-notes.md](docs/release-notes.md)：当前版本定位、交付范围、验证结果、已知限制与发版检查
 - [docs/user-guide.md](docs/user-guide.md)：面向宿主产品开发/测试/运维的使用说明、推荐流程和验收口径
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径

@@ -149,7 +149,9 @@
 - 明确记录当前 SQLite / Postgres / memory 三个后端的 `strict_publication_ready` 均为 `false`，`latest_job` 不参与发布决策。
 - 本项**不改变运行时行为**：没有运行路径读写新状态，没有 store 实现 run 协议。存储与原子发布属于 P0-03，校验与发布门禁属于 P0-04。
 
-#### [ ] P0-03 实现快照存储与原子发布（大）
+#### [~] P0-03 实现快照存储与原子发布（大）
+
+状态：**第 1 批已实施（2026-09-20）**，其余待实施。交付报告见 [docs/p0-03-run-store-batch1-20260920.md](p0-03-run-store-batch1-20260920.md)。
 
 - 修改位置：`stores.py`、`stubs.py`、`contracts.py`、`runtime.py`、`exports.py`、`export_jobs.py`、检索与 records 读取路径。
 - Blocks、Chunks、document views、素材、索引和 manifest 按 `tenant/doc/run` 隔离；索引主层、高精层及 structure entries 均纳入，不能只给 Blocks 增加 run 字段。
@@ -159,6 +161,13 @@
 - 覆盖 full、parent/part、part rerun、rechunk、reembed，派生 run 可复用不可变基础快照；部分失败不得覆盖旧版。
 - 验收：在 blocks、chunks、views、embedding、index、seal、publish 前后分别注入故障，旧正式版本始终完整；并发 A/B 完成逆序、取消/超时后的旧 worker 不得发布；分页与导出不混版。先验证 SQLite，再以真实 Postgres/pgvector 验收。
 - 依赖：P0-02。该项是 P0 的主要工程量，不能用移动 DONE 一行代替。
+
+第 1 批已完成（SQLite 垂直闭环）：
+
+- 新增 `src/parsecore/run_store.py`：staged 产物表 + `parse_runs` / `document_publication` / `publication_events`；`begin_run → save_run_artifacts → seal_run → record_validation → publish_run`，发布事务以 `BEGIN IMMEDIATE` 原子完成状态、策略、claim、源版本、世代、清单校验与 active 指针切换。
+- 发布事务内从 staged 重写活层（blocks/chunks/document_views），因此**既有读路径无需改动**；`blocks`/`chunks` 增加 `run_id`（旧行回填 `legacy`）用于审计。
+- 新增只读端点 `/v1/parse/documents/{doc_id}/publication`；未发布时返回明确 `not_ready`，`/health` 与 `/v1/runtime` 的 `run_publication` 能力项说明当前后端能否原子发布。
+- 未完成（第 2 批）：索引三层与素材/manifest 的 run 隔离、Reader/Records/RAG/Export 正式读路径固定 run、full/parent-part/rechunk/reembed 派生 run 的接入、通知异步派发消费端、真实 Postgres/pgvector 验收、旧数据回填脚本。
 
 #### [ ] P0-04 将质量规则接入发布准入（中）
 
