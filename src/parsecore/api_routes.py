@@ -51,6 +51,12 @@ from .private_files import (
 )
 from .profiles import describe_parse_profiles, resolve_parse_profile
 from .runtime import ParseRuntime, QuotaExceededError
+from .tenant_scope import (
+    SOURCE_DEFAULT,
+    explicit_request_tenant_id,
+    request_tenant_id,
+    tenant_matches,
+)
 
 
 _SYNC_ASYNC_RECOMMENDATION_MESSAGE = (
@@ -71,6 +77,38 @@ class ApiRoutes:
         self.health_services = health_services
         self.health_service_details = health_service_details
         self.health_capabilities = health_capabilities
+
+    # -- P0-07: tenant boundary ------------------------------------------
+
+    def _resource_tenant_error(
+        self, request: Request, *, code: str, message: str
+    ) -> JSONResponse:
+        """Refuse to serve a resource that belongs to another tenant.
+
+        The response is the same 404 a genuinely missing resource produces, so
+        the boundary does not leak whether the id exists elsewhere.
+        """
+
+        return _error_response(request, code=code, message=message, status_code=404)
+
+    def _job_for_request(self, request: Request, job_id: str):
+        """Load a job only when it belongs to the resolved tenant.
+
+        Returns ``(job, tenant_id)``; ``job`` is ``None`` when the caller must not
+        see it.  A request that claims a tenant only sees that tenant's jobs.  A
+        request that makes no claim at all — the embedded host forwarding an id it
+        already learned — is answered from the job's persisted tenant, which keeps
+        the pre-boundary behaviour without letting a parameter widen the view.
+        """
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = request_tenant_id(request)
+        job = runtime_obj.get_job(job_id=job_id)
+        if job is None:
+            return None, tenant_id
+        if _request_claims_tenant(request) and not tenant_matches(job, tenant_id):
+            return None, tenant_id
+        return job, tenant_id
 
     def routes(self) -> list[Route]:
         return [
@@ -788,7 +826,12 @@ class ApiRoutes:
     async def list_jobs(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         doc_id = request.query_params.get("doc_id")
-        tenant_id = request.query_params.get("tenant_id")
+        # P0-07: an explicit tenant claim filters the list; a request that claims
+        # nothing keeps the historical document-scoped view instead of being
+        # narrowed to an implicit "default" tenant.
+        tenant_id = explicit_request_tenant_id(
+            request, request.query_params.get("tenant_id")
+        )
         quota_key = request.query_params.get("quota_key")
         return JSONResponse(
             {
@@ -805,7 +848,9 @@ class ApiRoutes:
 
     async def quota_usage(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = request.query_params.get("tenant_id")
+        tenant_id = explicit_request_tenant_id(
+            request, request.query_params.get("tenant_id")
+        )
         since_hours_raw = request.query_params.get("since_hours")
         since_hours: float | None = None
         if since_hours_raw is not None:
@@ -826,7 +871,7 @@ class ApiRoutes:
 
     async def runtime_metrics(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = request.query_params.get("tenant_id")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         sample_size_raw = request.query_params.get("sample_size", "200")
         since_hours_raw = request.query_params.get("since_hours")
         try:
@@ -853,7 +898,7 @@ class ApiRoutes:
 
     async def tenant_dashboard(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = request.query_params.get("tenant_id")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         sample_size_raw = request.query_params.get("sample_size", "200")
         recent_limit_raw = request.query_params.get("recent_limit", "5")
         since_hours_raw = request.query_params.get("since_hours")
@@ -895,7 +940,9 @@ class ApiRoutes:
         runtime_obj: ParseRuntime = request.app.state.runtime
         limit_raw = request.query_params.get("limit", "100")
         event_type_filter = request.query_params.get("event_type")
-        tenant_id_filter = request.query_params.get("tenant_id")
+        tenant_id_filter = explicit_request_tenant_id(
+            request, request.query_params.get("tenant_id")
+        )
         try:
             limit = max(1, min(1000, int(limit_raw)))
         except (TypeError, ValueError):
@@ -915,23 +962,27 @@ class ApiRoutes:
         })
 
     async def get_job(self, request: Request) -> JSONResponse:
-        runtime_obj: ParseRuntime = request.app.state.runtime
-        job = runtime_obj.get_job(job_id=request.path_params["job_id"])
+        job, _tenant_id = self._job_for_request(request, request.path_params["job_id"])
         if job is None:
-            return _error_response(request, code="job_not_found", message="Parse job not found", status_code=404)
+            # P0-07: another tenant's job is reported exactly like a missing one.
+            return self._resource_tenant_error(
+                request, code="job_not_found", message="Parse job not found"
+            )
         return JSONResponse(_to_payload(job))
 
     async def cancel_job(self, request: Request) -> JSONResponse:
-        try:
-            result = request.app.state.runner.cancel_job(job_id=request.path_params["job_id"])
-        except LookupError:
-            return _error_response(request, code="job_not_found", message="Parse job not found", status_code=404)
+        job, _tenant_id = self._job_for_request(request, request.path_params["job_id"])
+        if job is None:
+            return self._resource_tenant_error(
+                request, code="job_not_found", message="Parse job not found"
+            )
+        result = request.app.state.runner.cancel_job(job_id=job.job_id)
         status_code = 202 if result.get("cancelled") else 409
         return JSONResponse(_to_payload(result), status_code=status_code)
 
     async def get_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         projection = str(request.query_params.get("projection") or "full").strip().lower()
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
@@ -953,7 +1004,7 @@ class ApiRoutes:
         """Formal read contract: which run is published, or an explicit not-ready."""
 
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         doc_id = str(request.path_params["doc_id"])
         state = runtime_obj.publication_state(doc_id=doc_id, tenant_id=tenant_id)
         capabilities = runtime_obj.capability_report()
@@ -993,7 +1044,7 @@ class ApiRoutes:
 
     async def get_document_coverage(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1001,7 +1052,7 @@ class ApiRoutes:
 
     async def get_document_reader(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1009,7 +1060,7 @@ class ApiRoutes:
 
     async def get_document_providers(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1017,7 +1068,7 @@ class ApiRoutes:
 
     async def get_document_quality(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1025,7 +1076,7 @@ class ApiRoutes:
 
     async def get_document_records(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         try:
             limit = max(1, min(1000, int(request.query_params.get("limit", "100"))))
             offset = max(0, int(request.query_params.get("offset", "0")))
@@ -1064,7 +1115,7 @@ class ApiRoutes:
 
     async def export_document(self, request: Request) -> Response:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         dataset = str(request.query_params.get("dataset") or "tables")
         export_format = str(request.query_params.get("format") or "jsonl")
         normalized_dataset = dataset.strip().lower()
@@ -1160,7 +1211,7 @@ class ApiRoutes:
 
     async def get_document_parts(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         state_filter = request.query_params.getlist("state")
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
@@ -1187,7 +1238,10 @@ class ApiRoutes:
 
     async def plan_document_parts(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
-        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(
+            request,
+            request.query_params.get("tenant_id") or payload.get("tenant_id"),
+        )
         try:
             result = request.app.state.runner.plan_pdf_parts(
                 doc_id=request.path_params["doc_id"],
@@ -1224,7 +1278,10 @@ class ApiRoutes:
 
     async def rerun_document_part(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
-        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(
+            request,
+            request.query_params.get("tenant_id") or payload.get("tenant_id"),
+        )
         try:
             result = request.app.state.runner.rerun_pdf_part(
                 doc_id=request.path_params["doc_id"],
@@ -1254,7 +1311,10 @@ class ApiRoutes:
 
     async def rerun_document_parts(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
-        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(
+            request,
+            request.query_params.get("tenant_id") or payload.get("tenant_id"),
+        )
         failed_only = _coerce_bool(payload.get("failed_only"), default=True)
         try:
             result = request.app.state.runner.rerun_pdf_parts(
@@ -1290,7 +1350,10 @@ class ApiRoutes:
 
     async def cancel_document_part(self, request: Request) -> JSONResponse:
         payload = await _optional_json_payload(request)
-        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(
+            request,
+            request.query_params.get("tenant_id") or payload.get("tenant_id"),
+        )
         try:
             result = request.app.state.runner.cancel_pdf_part(
                 doc_id=request.path_params["doc_id"],
@@ -1305,7 +1368,10 @@ class ApiRoutes:
     async def create_export_job(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         payload = await _optional_json_payload(request)
-        tenant_id = str(request.query_params.get("tenant_id") or payload.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(
+            request,
+            request.query_params.get("tenant_id") or payload.get("tenant_id"),
+        )
         try:
             includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
             formats = _formats_payload(payload.get("formats"))
@@ -1372,11 +1438,25 @@ class ApiRoutes:
         manifest["download_endpoint"] = f"/v1/parse/export-jobs/{manifest['export_id']}/download"
         return JSONResponse(manifest, status_code=202)
 
+    def _export_manifest_for_request(self, request: Request, export_id: str):
+        """Load an export manifest only when it belongs to the resolved tenant."""
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        manifest = load_export_manifest(_export_root(runtime_obj), export_id)
+        if not _export_belongs_to_tenant(manifest, request_tenant_id(request)):
+            return None
+        return manifest
+
     async def get_export_job(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         try:
-            manifest = load_export_manifest(_export_root(runtime_obj), request.path_params["export_id"])
+            manifest = self._export_manifest_for_request(
+                request, request.path_params["export_id"]
+            )
         except (FileNotFoundError, ValueError):
+            manifest = None
+        if manifest is None:
+            # P0-07: another tenant's export is reported like a missing one.
             return _error_response(request, code="export_not_found", message="Export job not found", status_code=404)
         manifest["download_endpoint"] = f"/v1/parse/export-jobs/{manifest['export_id']}/download"
         return JSONResponse(manifest)
@@ -1386,9 +1466,11 @@ class ApiRoutes:
         export_id = request.path_params["export_id"]
         filename = str(request.query_params.get("file") or "manifest.json")
         try:
-            manifest = load_export_manifest(_export_root(runtime_obj), export_id)
+            manifest = self._export_manifest_for_request(request, export_id)
             path = export_file_path(_export_root(runtime_obj), export_id, filename)
         except (FileNotFoundError, ValueError):
+            return _error_response(request, code="export_not_found", message="Export file not found", status_code=404)
+        if manifest is None:
             return _error_response(request, code="export_not_found", message="Export file not found", status_code=404)
         if not path.exists() or not path.is_file():
             return _error_response(request, code="export_not_found", message="Export file not found", status_code=404)
@@ -1406,7 +1488,7 @@ class ApiRoutes:
     async def search_document(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         doc_id = request.path_params["doc_id"]
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=doc_id, tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1445,7 +1527,7 @@ class ApiRoutes:
     async def search_document_structure(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         doc_id = request.path_params["doc_id"]
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=doc_id, tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1482,7 +1564,7 @@ class ApiRoutes:
     async def search_document_tasks(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
         doc_id = request.path_params["doc_id"]
-        tenant_id = str(request.query_params.get("tenant_id") or "default")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         snapshot = runtime_obj.get_document(doc_id=doc_id, tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1512,7 +1594,7 @@ class ApiRoutes:
 
     async def index_metrics(self, request: Request) -> JSONResponse:
         runtime_obj: ParseRuntime = request.app.state.runtime
-        tenant_id = request.query_params.get("tenant_id")
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
         since_hours_raw = request.query_params.get("since_hours")
         trend_windows_raw = request.query_params.getlist("trend_window_hours")
         since_hours: float | None = None
@@ -1556,7 +1638,7 @@ class ApiRoutes:
 
     async def reparse_document(self, request: Request) -> JSONResponse:
         try:
-            tenant_id = str(request.query_params.get("tenant_id") or "default")
+            tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
             job = request.app.state.runner.restart_latest(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1588,7 +1670,7 @@ class ApiRoutes:
 
     async def rechunk_document(self, request: Request) -> JSONResponse:
         try:
-            tenant_id = str(request.query_params.get("tenant_id") or "default")
+            tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
             job = request.app.state.runner.rechunk_latest(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1620,7 +1702,7 @@ class ApiRoutes:
 
     async def reembed_document(self, request: Request) -> JSONResponse:
         try:
-            tenant_id = str(request.query_params.get("tenant_id") or "default")
+            tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
             job = request.app.state.runner.reembed_latest(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1935,6 +2017,34 @@ def _export_root(runtime_obj: ParseRuntime) -> Path:
     if root is None:
         raise ValueError("export_requires_local_object_store")
     return ensure_private_directory(root / "_exports", allowed_root=root)
+
+
+def _request_claims_tenant(request: Request) -> bool:
+    """Whether the request (or its host) actually claimed a tenant.
+
+    A bare request that resolved to the default tenant made no claim, so resource
+    ownership has to come from the persisted resource.  Once a claim exists —
+    identity header or parameter — ownership is enforced against it.
+    """
+
+    resolution = getattr(request.state, "tenant_resolution", None)
+    source = getattr(resolution, "source", None)
+    if source is None:
+        return False
+    return source != SOURCE_DEFAULT
+
+
+def _export_belongs_to_tenant(manifest: Mapping[str, Any], tenant_id: str) -> bool:
+    """Whether an export manifest belongs to the resolved tenant (P0-07).
+
+    The manifest records ``tenant_id``.  A package without one is treated as the
+    default tenant's, matching how the stores normalise a missing tenant, so a
+    non-default caller cannot read it.
+    """
+
+    normalized = str(tenant_id or "").strip() or "default"
+    recorded = str(manifest.get("tenant_id") or "").strip() or "default"
+    return recorded == normalized
 
 
 def _resolve_request_profile(

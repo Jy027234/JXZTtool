@@ -220,13 +220,24 @@
 - 发布门禁实测非零退出（`EXIT=1`，`reason=regression_suite_failed`），并把既有真实回归如实暴露：`numeric_heavy_total +38`、`suspected_header_footer_total +39`、`total_blocks +6.88%`、`heading_body_binding_rate -0.0909`。未修改任何 baseline 或阈值，未删除/禁用难样本。
 - 未完成：可随仓库分发的最小脱敏核心样本；perf 缺样本补齐；P0-05 故障回归纳入发布门禁。
 
-#### [ ] P0-07 明确宿主身份与租户边界（条件前置，中）
+#### [x] P0-07 明确宿主身份与租户边界（条件前置，中）
+
+状态：**已实施（2026-09-20）**。交付报告见 [docs/p0-07-tenant-boundary-20260920.md](p0-07-tenant-boundary-20260920.md)。
 
 - 修改位置：`api_support.py`、`api_routes.py`、宿主注入协议及鉴权测试。
 - 嵌入/可信内网模式：记录谁认证用户、谁注入 tenant，禁止把外部请求任意 tenant 参数当可信身份。
 - 独立多租户模式：由认证上下文解析 tenant，覆盖 job 查询/取消、文档与原件、parts/rerun、records/search、导出创建/下载及诊断接口；资源授权以持久化所属租户为准。
 - 验收：租户 A 不能通过 B 的 doc/job/export/run ID 或请求参数越界；内部 worker 和宿主代理的授权路径可审计。
 - 依赖：P0-02；对外多租户开放前完成。若部署仅为受信单宿主，可先定边界，不为本轮另建账号系统。
+
+实施说明：
+
+- 新增 `src/parsecore/tenant_scope.py`：单一归属决策点（宿主注入身份 > 请求参数 > 默认租户），两种模式 `trusted`（默认，保持既有宿主语义）与 `enforced`（要求宿主注入身份，参数只能复述）。
+- 新增 `TenantScopeMiddleware`：在鉴权之后、任何 handler 之前完成归属；身份与参数不一致返回 `403 tenant_mismatch`，`enforced` 模式缺少身份返回 `403 tenant_identity_required`；响应头 `x-parsecore-tenant` / `x-parsecore-tenant-source` 暴露归属来源供审计。
+- 全部 23 处 `tenant_id = request.query_params.get(...)` 改为经决策点解析。
+- 资源授权：job 查询/取消与 export 创建/下载按持久化租户校验，越界返回与"不存在"相同的 404，不泄露资源是否存在；document/records/search/metrics/events 走已按租户过滤的读路径。
+- 兼容性：无任何租户声明的请求保持既有文档维度视图（不隐式收窄到 `default`）；一旦请求声明了租户，即按声明强制归属。
+- 未完成：真实宿主注入协议的联调（本轮只定义并实现了 header 约定）；"内部 worker 与宿主代理授权路径可审计"目前以响应头与事件为准，尚未落到审计日志表。
 
 ### P1：MinerU 接入、事实模型收敛与并发
 

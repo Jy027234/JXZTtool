@@ -15,6 +15,7 @@ from .api_payloads import _project_pages as _project_pages
 from .api_routes import ApiRoutes
 from .api_support import (
     ApiKeyMiddleware,
+    TenantScopeMiddleware,
     TraceIdMiddleware,
     _resolve_required_api_key,
     _resolve_staged_upload_api_key,
@@ -290,6 +291,10 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
     app.add_middleware(TraceIdMiddleware)
     if required_api_key is not None:
         app.add_middleware(ApiKeyMiddleware, api_key=required_api_key)
+    # P0-07: middleware order is outer-to-inner as added, so the tenant boundary
+    # is resolved after authentication and before any handler.
+    app.add_middleware(TenantScopeMiddleware)
+    app.state.runtime = runtime
     app.state.upload_bridge_api_key = staged_upload_api_key
     return app
 

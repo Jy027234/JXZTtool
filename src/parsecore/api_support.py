@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,71 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         if _extract_api_key(request) != self.api_key:
             return _api_key_unauthorized_response(request)
         return await call_next(request)
+
+
+class TenantScopeMiddleware(BaseHTTPMiddleware):
+    """Resolve and enforce the tenant boundary before any handler runs.
+
+    Doing this once, in middleware, is what keeps the two scope modes from
+    drifting: a handler never reads a raw tenant parameter without the resolved
+    identity being attached to the request first.  A request that cannot be
+    attributed is refused here, so no handler can accidentally serve it.
+    """
+
+    def __init__(self, app, *, public_paths: tuple[str, ...] = ("/health",)):
+        super().__init__(app)
+        self.public_paths = frozenset(public_paths)
+
+    async def dispatch(self, request: Request, call_next):
+        from .tenant_scope import (
+            TenantScopeError,
+            resolve_request_tenant,
+            tenant_error_response,
+        )
+
+        if request.url.path in self.public_paths:
+            return await call_next(request)
+        try:
+            resolution = resolve_request_tenant(
+                request,
+                requested_tenant_id=await _peek_requested_tenant(request),
+            )
+        except TenantScopeError as exc:
+            return tenant_error_response(request, exc)
+        request.state.tenant_resolution = resolution
+        response = await call_next(request)
+        # Record the attribution so an operator can audit which path decided the
+        # tenant for this response.
+        response.headers.setdefault("x-parsecore-tenant", resolution.tenant_id)
+        response.headers.setdefault("x-parsecore-tenant-source", resolution.source)
+        return response
+
+
+async def _peek_requested_tenant(request: Request) -> str | None:
+    """Best-effort read of a tenant the *caller* asked for.
+
+    Query parameters cover the read endpoints.  For JSON bodies the raw bytes are
+    cached by Starlette, so peeking does not consume the stream the handler will
+    read.  Multipart and form bodies are left to the handler, which calls
+    :func:`~parsecore.tenant_scope.request_tenant_id` with the value it parsed;
+    that call re-checks the value against this middleware's attribution.
+    """
+
+    requested = str(request.query_params.get("tenant_id") or "").strip()
+    if requested:
+        return requested
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return None
+    try:
+        raw = await request.body()
+        payload = json.loads(raw or b"{}")
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        candidate = str(payload.get("tenant_id") or "").strip()
+        return candidate or None
+    return None
 
 
 def _trace_id_for_request(request: Request) -> str:

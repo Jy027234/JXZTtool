@@ -36,6 +36,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - 启动期能力真实性校验：未知 parser / index / provider 名称、mock provider 与占位解析器默认被拒绝，能力状态通过 `/health` 与 `/v1/runtime` 的 `capabilities` 报告暴露（`accepting_jobs` / `formal_parse_ready` / `degraded_capabilities`）
 - run 级产物快照与原子发布（P0-03 第 1 批，SQLite）：`begin_run → staged → seal → publish` 在单个事务内切换 active 指针，失败时旧正式版本保持完整；未发布时 `/v1/parse/documents/{doc_id}/publication` 返回明确 `not_ready`
 - 发布准入校验（P0-04）：必需产物、占位结果、CID 乱码、OCR 失败页、error 级质量信号与阅读顺序阈值共同决定 run 的 `validation_status`；必需产物写入失败即任务失败（检查发生在 `DONE` 之前），可选产物失败只产生降级
+- 租户边界（P0-07）：`tenant_scope = "enforced"` 时由宿主注入的已认证租户决定归属，请求参数只能复述；job / 导出 / 文档资源按持久化租户授权，越界返回与"不存在"相同的响应
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
 - `profile=auto` 自动路由，支持大文件、表格密集、OCR 密集、Excel 台账等解析策略分流
@@ -61,6 +62,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、25 项故障注入验证与未完成范围
 - [docs/p0-04-validation-gate-20260920.md](docs/p0-04-validation-gate-20260920.md)：P0-04 交付报告，质量规则接入发布准入、规则与阈值表、DONE 顺序修正
+- [docs/p0-07-tenant-boundary-20260920.md](docs/p0-07-tenant-boundary-20260920.md)：P0-07 交付报告，租户归属决策点、`trusted`/`enforced` 两种模式与跨租户越界探针结果
 - [docs/release-notes.md](docs/release-notes.md)：当前版本定位、交付范围、验证结果、已知限制与发版检查
 - [docs/user-guide.md](docs/user-guide.md)：面向宿主产品开发/测试/运维的使用说明、推荐流程和验收口径
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径

@@ -72,6 +72,13 @@ class RuntimeSettings:
     run_publication_enabled: bool = True
     # Artifact profile the run store seals against (see ARTIFACT_PROFILES).
     run_artifact_profile: str = "default"
+    # P0-07: who is trusted to decide which tenant a request belongs to.
+    # ``trusted`` keeps the historical behaviour (the caller's tenant_id
+    # parameter is the tenant).  ``enforced`` requires a host-authenticated
+    # tenant and rejects a mismatch instead of letting a request parameter
+    # choose the tenant.
+    tenant_scope: str = "trusted"
+    tenant_header: str = "x-parsecore-tenant"
 
 
 @dataclass(slots=True, frozen=True)
@@ -772,6 +779,8 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             allow_mock_providers=bool(runtime.get("allow_mock_providers", False)),
             run_publication_enabled=bool(runtime.get("run_publication_enabled", True)),
             run_artifact_profile=str(runtime.get("run_artifact_profile", "default")),
+            tenant_scope=str(runtime.get("tenant_scope", "trusted") or "trusted").strip().lower(),
+            tenant_header=str(runtime.get("tenant_header", "x-parsecore-tenant") or "x-parsecore-tenant").strip().lower(),
         ),
         parsers=parser_settings,
         profiles=profiles,
