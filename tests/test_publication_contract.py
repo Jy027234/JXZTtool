@@ -88,8 +88,22 @@ class StateMachineTests(unittest.TestCase):
         self.assertNotIn(ValidationStatus.NOT_RUN, VALIDATION_TRANSITIONS[ValidationStatus.PASSED])
         self.assertEqual(
             sorted(state.value for state in VALIDATION_TRANSITIONS[ValidationStatus.NOT_RUN]),
-            ["error", "needs_review", "passed", "rejected", "warning"],
+            ["error", "info", "needs_review", "passed", "rejected", "warning"],
         )
+
+    def test_info_carries_no_gate_consequence(self) -> None:
+        # ``info`` records non-gating observations, so it is publishable exactly
+        # when a clean pass is, and never counts as a warning.
+        allowed, reason = DEFAULT_VALIDATION_POLICY.may_publish(
+            validation_status=ValidationStatus.INFO
+        )
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "policy_allows_info")
+
+        blocking = ValidationPolicy(publish_on_passed=False)
+        allowed, reason = blocking.may_publish(validation_status=ValidationStatus.INFO)
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "policy_blocks_info")
 
     def test_publication_requires_unpublished_start(self) -> None:
         self.assertEqual(

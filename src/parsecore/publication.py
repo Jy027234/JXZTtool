@@ -69,9 +69,15 @@ class ValidationStatus(str, Enum):
     ``NOT_RUN`` is the default for a run that has artifacts but no recorded
     validation conclusion.  Unknown or failed validation must never collapse to
     :attr:`PASSED`.
+
+    ``INFO`` records a rule observation that carries no gate consequence: an
+    empty optional artifact, for example.  It exists so a normal deployment with
+    embedding disabled is not turned into ``warning`` (which the policy would
+    then have to allow explicitly).
     """
 
     NOT_RUN = "not_run"
+    INFO = "info"
     PASSED = "passed"
     WARNING = "warning"
     NEEDS_REVIEW = "needs_review"
@@ -274,6 +280,16 @@ EXECUTION_TRANSITIONS: Mapping[ExecutionStatus, frozenset[ExecutionStatus]] = {
 VALIDATION_TRANSITIONS: Mapping[ValidationStatus, frozenset[ValidationStatus]] = {
     ValidationStatus.NOT_RUN: frozenset(
         {
+            ValidationStatus.INFO,
+            ValidationStatus.PASSED,
+            ValidationStatus.WARNING,
+            ValidationStatus.NEEDS_REVIEW,
+            ValidationStatus.REJECTED,
+            ValidationStatus.ERROR,
+        }
+    ),
+    ValidationStatus.INFO: frozenset(
+        {
             ValidationStatus.PASSED,
             ValidationStatus.WARNING,
             ValidationStatus.NEEDS_REVIEW,
@@ -283,14 +299,15 @@ VALIDATION_TRANSITIONS: Mapping[ValidationStatus, frozenset[ValidationStatus]] =
     ),
     ValidationStatus.PASSED: frozenset(
         {ValidationStatus.WARNING, ValidationStatus.NEEDS_REVIEW, ValidationStatus.REJECTED}
-    ),
-    ValidationStatus.WARNING: frozenset(
+    ),    ValidationStatus.WARNING: frozenset(
         {ValidationStatus.PASSED, ValidationStatus.NEEDS_REVIEW, ValidationStatus.REJECTED}
     ),
     ValidationStatus.NEEDS_REVIEW: frozenset(
         {ValidationStatus.PASSED, ValidationStatus.WARNING, ValidationStatus.REJECTED}
     ),
-    ValidationStatus.REJECTED: frozenset({ValidationStatus.NEEDS_REVIEW, ValidationStatus.ERROR}),
+    ValidationStatus.REJECTED: frozenset(
+        {ValidationStatus.NEEDS_REVIEW, ValidationStatus.WARNING, ValidationStatus.ERROR}
+    ),
     ValidationStatus.ERROR: frozenset(
         {ValidationStatus.NOT_RUN, ValidationStatus.NEEDS_REVIEW, ValidationStatus.REJECTED}
     ),
@@ -483,6 +500,11 @@ class ValidationPolicy:
         if status is ValidationStatus.PASSED:
             allowed = bool(self.publish_on_passed)
             reason = "policy_allows_passed" if allowed else "policy_blocks_passed"
+        elif status is ValidationStatus.INFO:
+            # Informational findings carry no gate consequence, so they are
+            # publishable exactly when a clean pass is.
+            allowed = bool(self.publish_on_passed)
+            reason = "policy_allows_info" if allowed else "policy_blocks_info"
         elif status is ValidationStatus.WARNING:
             if not self.publish_on_warning:
                 allowed, reason = False, "policy_blocks_warning"

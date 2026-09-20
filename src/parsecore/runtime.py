@@ -18,6 +18,7 @@ from .config import (
     local_provider_route_plan_payload,
     quality_gate_payload,
 )
+from .publication import ARTIFACT_PROFILES
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, RerankProvider, TranslationAdapter
 from .events import JobEventLogger, ParseStageTimer
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
@@ -37,6 +38,7 @@ from .run_store import (
 )
 from .stores import PgVectorIndex
 from .stubs import NullEmbeddingProvider, NullRerankProvider
+from .validation import ValidationReport, validate_run
 
 
 _PDF_PARENT_JOB_KIND = "pdf_parent"
@@ -680,9 +682,12 @@ class ParseRuntime:
         source_version: str | None = None,
         source_bytes: int = 0,
         profile: str | None = None,
-        validation_status: Any = "passed",
+        validation_status: Any = None,
         validation_reason: str = "",
         validation_metrics: Mapping[str, Any] | None = None,
+        quality_signals: Sequence[Mapping[str, Any]] = (),
+        placeholder_parsers: Sequence[str] = (),
+        validate: bool = True,
         expected_generation: int | None = None,
         expected_source_version: str | None = None,
         version_sources: Mapping[str, Any] | None = None,
@@ -690,6 +695,11 @@ class ParseRuntime:
         base_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Run the full begin → stage → seal → validate → publish sequence.
+
+        Publication is gated by :func:`parsecore.validation.validate_run` unless
+        the caller passes an explicit ``validation_status``.  Passing a status
+        explicitly is what tests and hosts use; leaving it ``None`` means "run
+        the shared rules", which is the production path.
 
         Returns the publish result, or a structured rejection when the backend
         cannot publish atomically or a precondition fails.  A rejection never
@@ -721,6 +731,7 @@ class ParseRuntime:
             attempt_count=attempt_count,
             base_run_id=base_run_id,
         )
+        report: ValidationReport | None = None
         try:
             self.run_store.set_execution_status(
                 parse_run_id=run.parse_run_id, status="running", claim_token=claim_token
@@ -734,11 +745,34 @@ class ParseRuntime:
             seal = self.run_store.seal_run(
                 parse_run_id=run.parse_run_id, claim_token=claim_token
             )
+            if validation_status is None:
+                # P0-04: the shared rules decide, not the caller.
+                report = validate_run(
+                    blocks=artifacts.blocks,
+                    chunks=artifacts.chunks,
+                    views=artifacts.views,
+                    quality_signals=quality_signals,
+                    artifact_profile=profile_name,
+                    required_artifacts=seal.required_artifacts,
+                    options=self._validation_options(),
+                    placeholder_parsers=placeholder_parsers,
+                )
+                resolved_status = report.status
+                resolved_reason = report.reason
+                resolved_metrics: Mapping[str, Any] = report.metrics
+            elif not validate:
+                resolved_status = validation_status
+                resolved_reason = validation_reason
+                resolved_metrics = validation_metrics or {}
+            else:
+                resolved_status = validation_status
+                resolved_reason = validation_reason
+                resolved_metrics = validation_metrics or {}
             self.run_store.record_validation(
                 parse_run_id=run.parse_run_id,
-                status=validation_status,
-                reason=validation_reason,
-                metrics=validation_metrics or {},
+                status=resolved_status,
+                reason=resolved_reason,
+                metrics=resolved_metrics,
             )
             result = self.run_store.publish_run(
                 parse_run_id=run.parse_run_id,
@@ -757,7 +791,7 @@ class ParseRuntime:
                 error=str(exc),
             )
             state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
-            return {
+            rejection: dict[str, Any] = {
                 "published": False,
                 "reason": exc.code,
                 "message": str(exc),
@@ -770,10 +804,32 @@ class ParseRuntime:
                 "active_run_id": state.get("active_run_id"),
                 "publication_generation": state.get("publication_generation", 0),
             }
+            if report is not None:
+                rejection["validation_report"] = report.as_payload()
+            return rejection
         payload = result.as_payload()
         payload["sealed_manifest"] = dict(seal.manifest)
         payload["degraded_artifacts"] = [dict(item) for item in seal.degraded_artifacts]
+        if report is not None:
+            payload["validation_report"] = report.as_payload()
         return payload
+
+    def _validation_options(self) -> dict[str, Any]:
+        """Thresholds the shared validation rules should use.
+
+        They come from the same ``[quality_gate]`` block the API projects, so a
+        reader inspecting a run sees the thresholds the gate actually applied.
+        """
+
+        gate = self.settings.quality_gate
+        return {
+            "min_text_page_coverage": float(gate.min_text_page_coverage),
+            "min_table_unit_coverage": float(gate.min_table_unit_coverage),
+            "min_unit_chunk_coverage": float(gate.min_unit_chunk_coverage),
+            "min_reading_order_confidence": float(gate.min_reading_order_confidence),
+            "allow_local_rerun": bool(gate.allow_local_rerun),
+            "allow_manual_review": bool(gate.allow_manual_review),
+        }
 
     def _run_validation_status(self, parse_run_id: str) -> str:
         if self.run_store is None:
@@ -1074,6 +1130,15 @@ class ParseRuntime:
                     document=document,
                     index_manifest=index_manifest,
                 )
+                # P0-04: persist required artifacts *before* declaring the job
+                # done.  Marking DONE clears the claim, which would make a later
+                # required-artifact failure unretryable and turn the real error
+                # into "stale_claim" while the job still reads as done.
+                self._assert_required_view_delivery(
+                    job=job,
+                    persisted=self._persist_document_views(job=job, blocks=blocks),
+                    artifact="reader",
+                )
                 final_job = self._update_job_state(
                     job_id=job.job_id,
                     state=ParseJobState.DONE,
@@ -1081,7 +1146,6 @@ class ParseRuntime:
                     clear_claim=True,
                 )
                 self._remember_pdf_part_job(final_job)
-                self._persist_document_views(job=final_job, blocks=blocks)
                 completed_parent_job = None
                 if _is_pdf_part_request(request):
                     refreshed_parent = self.refresh_partitioned_parent(
@@ -1350,6 +1414,20 @@ class ParseRuntime:
         if current is None or current.claim_token != claim_token or current.state not in _ACTIVE_PART_STATES:
             raise RuntimeError("stale_claim")
 
+    def _artifact_requirement(self, artifact: str) -> str:
+        """Whether the configured artifact profile requires ``artifact``.
+
+        Returns ``required`` / ``optional`` / ``disabled``, using the same
+        profile the run store seals against so the two cannot disagree.
+        """
+
+        name = str(self.settings.runtime.run_artifact_profile or "default")
+        profile = ARTIFACT_PROFILES.get(name)
+        if profile is None:
+            return "optional"
+        requirement = profile.requirement_for(artifact)
+        return requirement.value if hasattr(requirement, "value") else str(requirement)
+
     def _persist_document_views(
         self,
         *,
@@ -1357,12 +1435,31 @@ class ParseRuntime:
         blocks: Sequence[Any],
         replace_prefix: str | None = None,
     ) -> bool:
+        """Persist the document views.
+
+        Returns whether the **reader-visible** views were written.  A failure to
+        write a required view must not be reported as success: P0-04 requires
+        that required artifacts gate delivery while optional ones only degrade
+        it.  The caller decides by comparing this result with
+        :meth:`_artifact_requirement`.
+        """
+
         save_document_views = getattr(self.job_store, "save_document_views", None)
         replace_document_views = getattr(self.job_store, "replace_document_views_by_prefix", None)
         if replace_prefix and not callable(replace_document_views):
+            self._record_view_persistence_failure(
+                job=job,
+                artifact="reader",
+                reason="replace_document_views_not_supported",
+            )
             return False
 
         if not replace_prefix and not callable(save_document_views):
+            self._record_view_persistence_failure(
+                job=job,
+                artifact="reader",
+                reason="save_document_views_not_supported",
+            )
             return False
         try:
             from .api_payloads import _document_view_rows
@@ -1393,21 +1490,65 @@ class ParseRuntime:
                     records=views.get("records", []),
                 )
             return True
-        except Exception as exc:  # pragma: no cover - defensive observability path
-            self.event_logger.log(
-                "document_views_persist_failed",
-                job_id=getattr(job, "job_id", ""),
-                doc_id=getattr(job, "doc_id", ""),
-                error=str(exc),
-            )
-            self.event_aggregator.record_event(
-                "document_views_persist_failed",
-                tenant_id=str(getattr(job, "tenant_id", "default") or "default"),
-                quota_key=str(getattr(job, "quota_key", "default") or "default"),
-                doc_id=str(getattr(job, "doc_id", "") or ""),
-                details={"error": str(exc)},
+        except Exception as exc:
+            self._record_view_persistence_failure(
+                job=job,
+                artifact="reader",
+                reason=f"{type(exc).__name__}: {exc}",
             )
             return False
+
+    def _record_view_persistence_failure(
+        self, *, job: Any, artifact: str, reason: str
+    ) -> None:
+        """Report a view write failure together with its delivery consequence."""
+
+        requirement = self._artifact_requirement(artifact)
+        details = {
+            "artifact": artifact,
+            "requirement": requirement,
+            "reason": reason,
+            "blocking": requirement == "required",
+        }
+        self.event_logger.log(
+            "document_views_persist_failed",
+            job_id=getattr(job, "job_id", ""),
+            doc_id=getattr(job, "doc_id", ""),
+            **details,
+        )
+        self.event_aggregator.record_event(
+            "document_views_persist_failed",
+            tenant_id=str(getattr(job, "tenant_id", "default") or "default"),
+            quota_key=str(getattr(job, "quota_key", "default") or "default"),
+            doc_id=str(getattr(job, "doc_id", "") or ""),
+            details=details,
+        )
+
+    def _assert_required_view_delivery(
+        self, *, job: Any, persisted: bool, artifact: str = "reader"
+    ) -> None:
+        """Fail the run when a *required* artifact could not be delivered.
+
+        This is the P0-04 replacement for "persist failure is only logged": an
+        optional view failure degrades the delivery, a required one must not be
+        reported as a successful parse.
+        """
+
+        if persisted:
+            return
+        requirement = self._artifact_requirement(artifact)
+        if requirement != "required":
+            self.event_logger.log(
+                "required_artifact_degraded",
+                job_id=getattr(job, "job_id", ""),
+                doc_id=getattr(job, "doc_id", ""),
+                artifact=artifact,
+                requirement=requirement,
+            )
+            return
+        raise RuntimeError(
+            f"required_artifact_not_persisted:{artifact}"
+        )
 
     def _record_document_quality_observability(
         self,

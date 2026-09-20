@@ -169,7 +169,9 @@
 - 新增只读端点 `/v1/parse/documents/{doc_id}/publication`；未发布时返回明确 `not_ready`，`/health` 与 `/v1/runtime` 的 `run_publication` 能力项说明当前后端能否原子发布。
 - 未完成（第 2 批）：索引三层与素材/manifest 的 run 隔离、Reader/Records/RAG/Export 正式读路径固定 run、full/parent-part/rechunk/reembed 派生 run 的接入、通知异步派发消费端、真实 Postgres/pgvector 验收、旧数据回填脚本。
 
-#### [ ] P0-04 将质量规则接入发布准入（中）
+#### [x] P0-04 将质量规则接入发布准入（中）
+
+状态：**已实施（2026-09-20）**。交付报告见 [docs/p0-04-validation-gate-20260920.md](p0-04-validation-gate-20260920.md)。
 
 - 修改位置：`runtime.py`、`quality.py`、`ir.py`、`api_payloads.py`、quality gate 配置。
 - 从现有 quality/coverage 规则抽取共享校验服务，使运行期和查询投影使用相同结果；校验报告持久化到 run。
@@ -178,6 +180,15 @@
 - `needs_review/rejected/error` 不自动发布；warning 是否可发布由版本化 policy 决定。执行成功且需复核不强行记作 parser 执行失败，也不无限自动重试。
 - 验收：占位、缺素材、缺页、断裂来源引用、校验异常被阻止发布；warning 策略可复现；状态 API、Reader 与 RAG 对同 run 的结论一致。
 - 依赖：P0-01～03；规则提取可在存储开发期间推进。
+
+实施说明：
+
+- 新增 `src/parsecore/validation.py`：把现有 quality 规则收敛为发布准入校验（必需产物、占位结果、CID 乱码、OCR 失败页、error 级质量信号、阅读顺序阈值），输出带 `policy_version` / `rule_version` / 证据引用的 `ValidationReport`，并持久化到 run。
+- 结论分级语义：`error`（校验自身失败）> `rejected` > `needs_review` > `warning` > `passed`；新增 `info` 仅记录不参与门禁，避免"未启用 embedding"把正常部署推上 warning 策略。
+- `runtime.publish_run()` 默认走共享规则（`validation_status=None`）；宿主与测试仍可显式传入结论。
+- `_persist_document_views()` 失败不再只记日志：必需产物（按 `run_artifact_profile`）失败即任务失败，可选/禁用产物失败只产生降级事件。
+- **顺序修正**：必需产物的持久化与校验被移到 `DONE` 之前。原先 `DONE` 先落地并清除 claim，导致后续必需产物失败既无法重试、又把真实错误变成 `stale_claim`，而任务仍读作 `done`。
+- 未完成：状态 API、Reader 与 RAG 对同 run 结论一致性的断言（需正式读路径固定 run，属 P0-03 第 2 批）；覆盖/表格阈值规则尚未接入（当前接的是结构性质量、OCR、CID 与阅读顺序）。
 
 #### [ ] P0-05 补故障回归、迁移及回滚演练（中）
 
