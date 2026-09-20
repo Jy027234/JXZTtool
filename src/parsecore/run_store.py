@@ -1148,6 +1148,117 @@ class SQLiteRunStore:
             )
             return cursor.rowcount > 0
 
+    def record_publication_event(
+        self,
+        *,
+        tenant_id: str,
+        doc_id: str,
+        parse_run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        publication_generation: int | None = None,
+    ) -> str:
+        """Append one event, returning its id.
+
+        The unique key is ``(tenant, doc, run, event_type)``, so a repeated
+        append is ignored rather than producing a second notification.
+        """
+
+        event_id = f"evt-{uuid4().hex[:16]}"
+        with self._write_transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO publication_events ("
+                " event_id, tenant_id, doc_id, parse_run_id, event_type,"
+                " publication_generation, payload_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    str(tenant_id or "default"),
+                    str(doc_id),
+                    str(parse_run_id),
+                    str(event_type),
+                    publication_generation,
+                    _canonical(dict(payload or {})),
+                    _utc_now(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT event_id FROM publication_events"
+                " WHERE tenant_id = ? AND doc_id = ? AND parse_run_id = ? AND event_type = ?",
+                (
+                    str(tenant_id or "default"),
+                    str(doc_id),
+                    str(parse_run_id),
+                    str(event_type),
+                ),
+            ).fetchone()
+            return str(row["event_id"]) if row is not None else event_id
+
+    def dispatch_pending_publication_events(
+        self,
+        *,
+        handler: Any,
+        limit: int = 100,
+        failure_retry_seconds: float = 0.0,
+    ) -> dict[str, Any]:
+        """Deliver pending events to ``handler`` and mark the successful ones.
+
+        The ordering is deliberate: the handler runs **first**, and only a
+        successful return marks the event dispatched.  A crash between the two
+        redelivers the event (at-least-once), which is why the uniqueness key is
+        ``(tenant, doc, run, event_type)`` and consumers are expected to be
+        idempotent.  A handler failure leaves the event pending and records the
+        attempt instead of dropping the notification.
+
+        A ``False`` return from the handler is treated as a delivery failure:
+        handlers must not report success for a notification they did not deliver.
+        """
+
+        pending = self.pending_publication_events(limit=limit)
+        delivered: list[str] = []
+        failed: list[dict[str, Any]] = []
+        for event in pending:
+            try:
+                outcome = handler(dict(event))
+            except Exception as exc:
+                outcome = False
+                error = f"{type(exc).__name__}: {exc}"
+            else:
+                error = ""
+            if outcome:
+                if self.mark_publication_event_dispatched(event_id=event["event_id"]):
+                    delivered.append(event["event_id"])
+                continue
+            failed.append(
+                {
+                    "event_id": event["event_id"],
+                    "event_type": event["event_type"],
+                    "error": error or "handler_returned_false",
+                }
+            )
+            self.record_publication_event(
+                tenant_id=event["tenant_id"],
+                doc_id=event["doc_id"],
+                parse_run_id=event["parse_run_id"],
+                event_type="publication_event_dispatch_failed",
+                payload={
+                    "failed_event_id": event["event_id"],
+                    "failed_event_type": event["event_type"],
+                    "error": error or "handler_returned_false",
+                    "retry_after_seconds": float(failure_retry_seconds),
+                },
+                publication_generation=event.get("publication_generation"),
+            )
+        return {
+            "schema_version": RUN_STORE_SCHEMA_VERSION,
+            "pending_count": len(pending),
+            "delivered_count": len(delivered),
+            "failed_count": len(failed),
+            "delivered_event_ids": delivered,
+            "failures": failed,
+            "remaining_pending": len(self.pending_publication_events(limit=limit)),
+        }
+
     def close(self) -> None:
         return None
 

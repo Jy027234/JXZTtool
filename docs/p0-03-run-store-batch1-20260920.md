@@ -112,7 +112,7 @@ Ran 770 tests / OK (skipped=6)
 1. **索引三层与素材/manifest 的 run 隔离**：`PgVectorIndex` 尚不能按 run 过滤，因此 `rag` profile 在非持久索引下不可发布已由 policy 拦住，但索引本身还没有 run 维度。
 2. **正式读路径固定 run**：Reader/Records/RAG/Export 目前读活层，等价于"读当前 active run"，但还没有携带 run 的分页游标与导出任务。
 3. **派生 run**：full / parent-part / rechunk / reembed 尚未接入 `base_run_id` 复用不可变基础快照。
-4. **通知异步派发消费端**：outbox 写入与 `pending_publication_events()` / `mark_publication_event_dispatched()` 已就绪，尚无后台派发器。
+4. ~~**通知异步派发消费端**：outbox 写入与 `pending_publication_events()` / `mark_publication_event_dispatched()` 已就绪，尚无后台派发器。~~ **已完成（P0-05）**：`dispatch_pending_publication_events()` 与 `parsecore dispatch-publication-events`（`--sink stdout|http`），先投递后标记，失败保持 pending 并记录 `publication_event_dispatch_failed`；`publication_outbox` 已计入 SQLite 能力声明。
 5. **真实 Postgres/pgvector 验收**与**旧数据回填脚本**：见 ADR 第 8 节设计。
 
 在这些完成之前，不应宣称已经保证端到端原子交付。

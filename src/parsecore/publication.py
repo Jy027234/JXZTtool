@@ -576,6 +576,7 @@ RUN_STORE_OPERATIONS: tuple[str, ...] = (
     "list_runs",
     "record_validation",
     "record_publication_event",
+    "dispatch_pending_publication_events",
 )
 
 #: Capability keys a store advertises through ``run_store_capabilities()``.
@@ -662,6 +663,9 @@ SQLITE_RUN_STORE_CAPABILITIES = RunStoreCapabilities(
         RunStoreCapability.SOURCE_VERSION_CHECK.value,
         RunStoreCapability.PUBLICATION_GENERATIONS.value,
         RunStoreCapability.VALIDATION_PERSISTENCE.value,
+        # The outbox is written inside the publish transaction and drained by
+        # `parsecore dispatch-publication-events`.
+        RunStoreCapability.PUBLICATION_OUTBOX.value,
     )
 )
 

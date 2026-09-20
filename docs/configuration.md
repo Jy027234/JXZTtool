@@ -879,8 +879,26 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/o
 
 `ocr_benchmark` 结果中的 `ocr_decision_trace` 字段可用于核验 OCR 决策口径（attempted / fallback / rejected / failed）以及 `native_text_token_count / final_text_token_count` 变化。
 
-## 验收命令
+## run 发布、迁移与通知
 
+P0-03～P0-05 引入的运维命令（均使用同一个 `--config`）：
+
+```powershell
+# 查看某文档的正式版本指针（未发布时返回 not_ready）
+#   GET /v1/parse/documents/{doc_id}/publication
+
+# 把 P0-03 之前的遗留产物导入为"未校验"的 legacy 快照（默认 dry-run）
+.\.venv\Scripts\python.exe -m parsecore.cli import-legacy-snapshots --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli import-legacy-snapshots --config parsecore.toml --apply
+
+# 派发待发送的发布事件（一行一个 JSON，或 POST 到宿主）
+.\.venv\Scripts\python.exe -m parsecore.cli dispatch-publication-events --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli dispatch-publication-events --config parsecore.toml --sink http --url https://host/parsecore/events
+```
+
+导入的 legacy run 记录 `validation_status = not_run`，且只能通过受限的 legacy 路径发布，永远不会被当作"校验通过"。派发是 at-least-once：宿主需按 `(tenant, doc, run, event_type)` 幂等消费。
+
+## 验收命令
 配置变更后建议至少执行：
 
 ```powershell

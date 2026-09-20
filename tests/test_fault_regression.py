@@ -13,6 +13,7 @@ stays complete and the new run stays unpublished.**
 from __future__ import annotations
 
 import unittest
+from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -437,6 +438,69 @@ class ConcurrentPartTests(FaultRegressionTestCase):
 
 
 class NotificationTests(FaultRegressionTestCase):
+    def test_dispatcher_delivers_and_marks_events(self) -> None:
+        self._publish_first()
+        seen: list[dict[str, Any]] = []
+
+        report = self.store.dispatch_pending_publication_events(
+            handler=lambda event: seen.append(event) or True
+        )
+
+        self.assertGreaterEqual(report["delivered_count"], 1)
+        self.assertEqual(report["failed_count"], 0)
+        published = [event for event in seen if event["event_type"] == "run_published"]
+        self.assertEqual(len(published), 1)
+        self.assertEqual(report["remaining_pending"], 0)
+
+    def test_dispatcher_redelivers_after_a_handler_failure(self) -> None:
+        self._publish_first()
+
+        first = self.store.dispatch_pending_publication_events(handler=lambda event: False)
+        self.assertGreaterEqual(first["failed_count"], 1)
+        # The notification is NOT dropped: the original event is still pending and
+        # the failure is recorded.
+        pending_types = [
+            event["event_type"] for event in self.store.pending_publication_events()
+        ]
+        self.assertIn("run_published", pending_types)
+        self.assertIn("publication_event_dispatch_failed", pending_types)
+
+        second = self.store.dispatch_pending_publication_events(handler=lambda event: True)
+        self.assertGreaterEqual(second["delivered_count"], 1)
+        self.assertEqual(second["remaining_pending"], 0)
+
+    def test_dispatcher_survives_a_raising_handler(self) -> None:
+        self._publish_first()
+
+        def boom(_event: dict[str, Any]) -> bool:
+            raise RuntimeError("downstream unavailable")
+
+        report = self.store.dispatch_pending_publication_events(handler=boom)
+
+        self.assertGreaterEqual(report["failed_count"], 1)
+        self.assertIn("downstream unavailable", report["failures"][0]["error"])
+        self.assertIn(
+            "run_published",
+            [event["event_type"] for event in self.store.pending_publication_events()],
+        )
+
+    def test_repeated_publish_does_not_duplicate_the_published_event(self) -> None:
+        first = self._publish_first()
+        # Re-recording the same event type for the same run must be ignored, so a
+        # retry cannot notify downstream twice.
+        self.store.record_publication_event(
+            tenant_id=self.tenant_id,
+            doc_id=self.doc_id,
+            parse_run_id=first,
+            event_type="run_published",
+        )
+        events = [
+            event
+            for event in self.store.pending_publication_events()
+            if event["event_type"] == "run_published"
+        ]
+        self.assertEqual(len(events), 1)
+
     def test_lost_notification_is_recoverable_from_the_outbox(self) -> None:
         self._publish_first()
         pending = self.store.pending_publication_events()

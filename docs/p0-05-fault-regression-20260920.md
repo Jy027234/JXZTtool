@@ -97,14 +97,29 @@ Ran 856 tests / OK (skipped=6)
 | 视图写入失败 → `done` + `pages=0` | 必需产物失败即任务 `failed`，且检查在 `DONE` 之前，真实原因不会被 `stale_claim` 掩盖 |
 | 失败重跑 → 新 Blocks + 旧 Chunks 并存 | run 隔离 + 原子发布 + 陈旧世代冲突；迁移与回滚均有回归 |
 
-## 6. 未完成
+## 6. 通知派发（P0-03 遗留项的收口）
+
+发布事务把待通知事件写入 outbox，P0-05 补上了消费端：`tools/dispatch_publication_events.py`，CLI 入口 `parsecore dispatch-publication-events`。
+
+```powershell
+# 打印每条事件（一行一个 JSON），供采集器 tail
+.\.venv\Scripts\python.exe -m parsecore.cli dispatch-publication-events --config parsecore.toml
+
+# POST 到宿主接收端
+.\.venv\Scripts\python.exe -m parsecore.cli dispatch-publication-events --config parsecore.toml --sink http --url https://host/parsecore/events
+```
+
+投递语义：**先调用 sink，成功后才标记已派发**，因此崩溃重跑会重投（at-least-once）；消费端需按 `(tenant, doc, run, event_type)` 幂等。sink 失败或返回 `False` 时事件保持 pending，并写入 `publication_event_dispatch_failed` 事件记录失败原因——通知不会因为下游不可用而丢失，也不会因为通知失败而重跑解析。CLI 在存在失败投递时返回 1。
+
+## 7. 未完成
 
 1. **真实 Postgres/pgvector 迁移与故障演练**：本轮全部在 SQLite 上验证；ADR 第 8 节的设计需要在真实 Postgres 上跑一遍（含 `FOR UPDATE` 版发布事务）。
 2. **生产数据演练报告**：验收要求"列明恢复点、恢复时间及无法恢复的既有历史数据"。本轮给出了工具与一致性校验口径，尚未在真实数据上产出该报告。
 3. **staged 产物清理作业**：清理时必须保护 active run、回滚保留版本、在途导出与被引用的快照；当前只有保留期配置，没有清理作业。
 4. **生产发布门禁纳入本回归**：P0-06 已建立 `--require-verified-corpus` 发布验收，把本模块加入其必需检查项仍待做。
+5. **常驻派发器**：目前是一次性 CLI（可由 cron/宿主定时调用），没有常驻进程或背压策略。
 
-## 7. 回滚
+## 8. 回滚
 
 - 代码回滚：`git revert` 本次提交（新增测试与工具，不改运行时默认行为，风险最低的一次）。
 - 迁移回滚：迁移只新增 `parse_runs` / `document_publication` / `publication_events` 行与 `blocks.run_id` 列，不改写原有产物；`restore_live_from_run()` 可从 active run 重建活层。
