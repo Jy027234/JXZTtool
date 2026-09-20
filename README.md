@@ -49,6 +49,8 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 当前交付状态：`0.1.0 可交付灰度版`。中小文档可直接试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版结论见 [docs/release-notes.md](docs/release-notes.md)。
 
+可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：P0-01 配置与能力真实性、P0-02 契约冻结、P0-04 发布准入、P0-07 租户边界已实施；P0-03 快照与原子发布已完成 SQLite 垂直闭环与读取身份一致性，索引层隔离待做；P0-05 故障回归与迁移工具已实施，Postgres 演练待做；P0-06 前半（corpus 校验与发布门禁）已实施。
+
 ## 建议演进路径
 
 1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
