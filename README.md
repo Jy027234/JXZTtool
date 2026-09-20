@@ -63,6 +63,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、25 项故障注入验证与未完成范围
 - [docs/p0-04-validation-gate-20260920.md](docs/p0-04-validation-gate-20260920.md)：P0-04 交付报告，质量规则接入发布准入、规则与阈值表、DONE 顺序修正
 - [docs/p0-07-tenant-boundary-20260920.md](docs/p0-07-tenant-boundary-20260920.md)：P0-07 交付报告，租户归属决策点、`trusted`/`enforced` 两种模式与跨租户越界探针结果
+- [docs/p0-05-fault-regression-20260920.md](docs/p0-05-fault-regression-20260920.md)：P0-05 交付报告，故障回归清单、legacy 快照迁移工具与 id 冲突风险修复
 - [docs/release-notes.md](docs/release-notes.md)：当前版本定位、交付范围、验证结果、已知限制与发版检查
 - [docs/user-guide.md](docs/user-guide.md)：面向宿主产品开发/测试/运维的使用说明、推荐流程和验收口径
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径

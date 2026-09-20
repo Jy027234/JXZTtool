@@ -361,16 +361,21 @@ def legal_transitions(machine: str) -> dict[str, list[str]]:
 
 
 def can_transition(machine: str, current: Any, target: Any) -> bool:
-    """Return whether ``current -> target`` is legal in the frozen table."""
+    """Return whether ``current -> target`` is legal in the frozen table.
+
+    States are compared by value, so an enum member and the equivalent string are
+    interchangeable; re-applying the current state is allowed because retries and
+    idempotent writers rely on it.
+    """
 
     table = _TRANSITIONS.get(str(machine or "").strip())
     if table is None:
         raise KeyError(f"unknown state machine: {machine!r}")
-    current_state, target_state = _coerce_state(table, current), _coerce_state(table, target)
+    current_state = _coerce_state(table, current)
+    target_state = _coerce_state(table, target)
     if current_state is None or target_state is None:
         return False
-    if current_state is target_state:
-        # Idempotent re-application is allowed; P0-03 relies on it for retries.
+    if _state_value(current_state) == _state_value(target_state):
         return True
     return target_state in table[current_state]
 

@@ -190,7 +190,9 @@
 - **顺序修正**：必需产物的持久化与校验被移到 `DONE` 之前。原先 `DONE` 先落地并清除 claim，导致后续必需产物失败既无法重试、又把真实错误变成 `stale_claim`，而任务仍读作 `done`。
 - 未完成：状态 API、Reader 与 RAG 对同 run 结论一致性的断言（需正式读路径固定 run，属 P0-03 第 2 批）；覆盖/表格阈值规则尚未接入（当前接的是结构性质量、OCR、CID 与阅读顺序）。
 
-#### [ ] P0-05 补故障回归、迁移及回滚演练（中）
+#### [~] P0-05 补故障回归、迁移及回滚演练（中）
+
+状态：**故障回归与迁移/回滚工具已实施（2026-09-20）**；真实 Postgres/生产数据演练待实施。交付报告见 [docs/p0-05-fault-regression-20260920.md](p0-05-fault-regression-20260920.md)。
 
 - 修改位置：`tests/test_runtime.py`、`tests/test_parts.py`、`tests/test_postgres_stores.py`、API/exports 测试、部署文档。
 - 将本次故障注入转为长期回归，覆盖进程在发布前后退出、重复请求、取消、租约失效、worker 重启、索引不可用、并发 part 更新及发布通知丢失/重复；验证幂等与旧 claim 不可回写。
@@ -199,6 +201,13 @@
 - 清理 staged 和过期产物时保护 active run、回滚保留版本、在途导出及被父/派生 manifest 引用的快照。
 - 验收：迁移前后文档计数、哈希、检索与导出一致；演练报告列明恢复点、恢复时间及无法恢复的既有历史数据；P0 三个核心故障探针全部通过新约束。
 - 依赖：P0-03～04。
+
+实施说明：
+
+- `tests/test_run_store.py`（33 项）覆盖发布事务本身；新增 `tests/test_fault_regression.py`（20 项）覆盖事务之外：发布边界前后进程退出、重复请求幂等、租约失效后新建 run、worker 重启、索引不可用按 profile 判定、并发 part 逆序完成、part 重跑只影响自身文档、通知丢失可恢复与重复投递幂等、事件唯一性、陈旧写者不可覆盖新版本、活层损坏后回滚、staged 被篡改时拒绝回滚。
+- 新增 `tools/legacy_snapshot_import.py`（CLI：`parsecore import-legacy-snapshots`）：默认 dry-run，`--apply` 才写入；导入的 run 记录 `validation_status = not_run`、policy `legacy-import-no-validation`，并在 `publish_run(legacy_import=True)` 的约束路径下发布（该路径要求 run **没有**校验结论，因此无法复用为绕过失败校验的后门）。报告包含 block/chunk/view 计数与内容哈希，可据此比对迁移前后一致。
+- **发现并显式处理的一处真实风险**：活层 `blocks`/`chunks` 的 `block_id`/`chunk_id` 是全局主键，而读取按 `tenant/doc` 过滤；两个文档复用同一 id（P0-03 之前的库可能出现）时无法同时持有。发布现在会在插入冲突时移除冲突行，并写入 `artifact_id_displaced` 事件而非静默丢内容；该行为有专门的回归测试。
+- 未完成：真实 Postgres/pgvector 的迁移与故障演练；生产数据演练报告（恢复点与恢复时间）；staged 产物清理任务的保留策略（当前由 `staged_upload_retention_seconds` 等配置描述，尚无清理作业）。
 
 #### [~] P0-06 修复 CI 样本探测并建立真正的发布门禁（中）
 

@@ -50,6 +50,11 @@ RUN_STORE_SCHEMA_VERSION = "2026-09-run-store-v1"
 #: Error code returned when a publish request lost a race or used stale inputs.
 PUBLICATION_REJECTED_STALE = "publication_rejected_stale"
 
+#: Policy version recorded on runs imported from pre-P0-03 artifacts.  A run
+#: carrying it has no validation conclusion and may only be published through the
+#: constrained ``legacy_import`` path.
+LEGACY_POLICY_VERSION = "legacy-import-no-validation"
+
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -788,6 +793,7 @@ class SQLiteRunStore:
         durable_index: bool = True,
         profile: str | None = None,
         actor: str = "runtime",
+        legacy_import: bool = False,
     ) -> PublishResult:
         """Atomically make ``parse_run_id`` the published version.
 
@@ -804,6 +810,14 @@ class SQLiteRunStore:
 
         Any failure rolls back, so the previously published version stays
         complete and the new run stays ``unpublished``.
+
+        ``legacy_import`` is the single documented exception to step 2, used by
+        ``tools/legacy_snapshot_import.py`` to give artifacts that were already
+        live before P0-03 an active pointer.  Such a run must carry
+        ``validation_status = not_run`` and its policy version must be
+        ``legacy-import-no-validation``; the flag republishes nothing that was
+        ever validated or rejected, and it cannot be used to bypass a failed
+        validation because a failed run is not ``not_run``.
         """
 
         with self._write_transaction() as conn:
@@ -848,14 +862,18 @@ class SQLiteRunStore:
             policy_version = (
                 str(report.get("policy_version") or "") if report else ""
             ) or DEFAULT_VALIDATION_POLICY.version
-            allowed, reason = self._policy_for(policy_version).may_publish(
-                validation_status=row["validation_status"],
-                warning_codes=tuple(
-                    str(code) for code in ((report or {}).get("warning_codes") or ())
-                ),
-                profile=str(profile or row["profile"] or "default"),
-                durable_index=durable_index,
-            )
+            if legacy_import:
+                self._assert_legacy_import_publishable(row=row, policy_version=policy_version)
+                allowed, reason = True, "legacy_import_exempt_from_validation_policy"
+            else:
+                allowed, reason = self._policy_for(policy_version).may_publish(
+                    validation_status=row["validation_status"],
+                    warning_codes=tuple(
+                        str(code) for code in ((report or {}).get("warning_codes") or ())
+                    ),
+                    profile=str(profile or row["profile"] or "default"),
+                    durable_index=durable_index,
+                )
             if not allowed:
                 raise PublishError(
                     f"run {parse_run_id} may not be published: {reason}"
@@ -1135,14 +1153,35 @@ class SQLiteRunStore:
 
     # -- internals --------------------------------------------------------
 
-    def _policy_for(self, policy_version: str):
-        # P0-04 will look policies up by version. Until then only the default
+    @staticmethod
+    def _assert_legacy_import_publishable(*, row: Mapping[str, Any], policy_version: str) -> None:
+        """Constrain the one documented bypass of the validation policy.
+
+        A legacy snapshot may be published only when it carries no validation
+        conclusion at all and declares the legacy policy.  A run that was
+        validated (passed, warning, needs_review, rejected or error) can never
+        take this path, so the bypass cannot republish a rejected document.
+        """
+
+        if policy_version != LEGACY_POLICY_VERSION:
+            raise PublishError(
+                "legacy_import publish requires the run's policy version to be "
+                f"{LEGACY_POLICY_VERSION!r}; run has {policy_version!r}"
+            )
+        if row["validation_status"] != ValidationStatus.NOT_RUN.value:
+            raise PublishError(
+                "legacy_import publish requires validation_status = 'not_run'; run has "
+                f"{row['validation_status']!r}"
+            )
+
+    def _policy_for(self, policy_version: str):        # P0-04 will look policies up by version. Until then only the default
         # policy exists, and an unknown version must not silently become it.
         if policy_version not in {"", DEFAULT_VALIDATION_POLICY.version, "legacy-import-no-validation"}:
             raise PublishError(f"unknown validation policy version: {policy_version!r}")
-        if policy_version == "legacy-import-no-validation":
+        if policy_version == LEGACY_POLICY_VERSION:
             raise PublishError(
-                "legacy imported runs carry no validation conclusion and may not be published"
+                "legacy imported runs carry no validation conclusion and may not be "
+                "published through the normal path; use the legacy snapshot import tool"
             )
         return DEFAULT_VALIDATION_POLICY
 
@@ -1296,8 +1335,21 @@ class SQLiteRunStore:
             "DELETE FROM document_views WHERE tenant_id = ? AND doc_id = ?",
             (tenant_id, doc_id),
         )
-
+        # ``block_id`` / ``chunk_id`` are globally unique in the live tier while
+        # readers scope by ``tenant/doc``. When an id collides across documents
+        # (which a pre-P0-03 database could produce, and which synthetic part
+        # documents do by construction), the colliding row is removed at the
+        # moment it would break the insert, so a document that is not being
+        # published keeps its artifacts. The displacement is logged as an event
+        # rather than silently ignored.
+        displaced: list[str] = []
         for row in block_rows:
+            removed = conn.execute(
+                "DELETE FROM blocks WHERE block_id = ? AND NOT (tenant_id = ? AND doc_id = ?)",
+                (row["block_id"], tenant_id, doc_id),
+            ).rowcount
+            if removed:
+                displaced.append(f"block:{row['block_id']}")
             payload = json.loads(row["payload_json"])
             conn.execute(
                 "INSERT INTO blocks (block_id, doc_id, tenant_id, run_id, position, type, content, metadata_json)"
@@ -1314,6 +1366,12 @@ class SQLiteRunStore:
                 ),
             )
         for row in chunk_rows:
+            removed = conn.execute(
+                "DELETE FROM chunks WHERE chunk_id = ? AND NOT (tenant_id = ? AND doc_id = ?)",
+                (row["chunk_id"], tenant_id, doc_id),
+            ).rowcount
+            if removed:
+                displaced.append(f"chunk:{row['chunk_id']}")
             payload = json.loads(row["payload_json"])
             conn.execute(
                 "INSERT INTO chunks ("
@@ -1353,11 +1411,29 @@ class SQLiteRunStore:
                     _utc_now(),
                 ),
             )
+        if displaced:
+            conn.execute(
+                "INSERT OR IGNORE INTO publication_events ("
+                " event_id, tenant_id, doc_id, parse_run_id, event_type,"
+                " publication_generation, payload_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"evt-{uuid4().hex[:16]}",
+                    tenant_id,
+                    doc_id,
+                    parse_run_id,
+                    "artifact_id_displaced",
+                    None,
+                    _canonical({"displaced": sorted(set(displaced))}),
+                    _utc_now(),
+                ),
+            )
         return {
             "blocks": len(block_rows),
             "chunks": len(chunk_rows),
             "views": len(view_rows),
             "manifest_blocks": int((manifest.get("counts") or {}).get("blocks", 0)),
+            "displaced_ids": sorted(set(displaced)),
         }
 
     @staticmethod
@@ -1476,6 +1552,7 @@ __all__ = [
     "RunNotFoundError",
     "RunNotSealableError",
     "RunRecord",
+    "LEGACY_POLICY_VERSION",
     "RunStoreError",
     "SQLITE_RUN_STORE_CAPABILITIES",
     "SQLiteRunStore",

@@ -82,6 +82,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     comparison_cleanup.add_argument("--out", default=None)
 
+    legacy_import = sub.add_parser(
+        "import-legacy-snapshots",
+        help="Import pre-P0-03 artifacts as unvalidated legacy snapshot runs",
+    )
+    legacy_import.add_argument("legacy_import_args", nargs=argparse.REMAINDER)
+
     return parser
 
 
@@ -117,6 +123,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
         from tools import large_pdf_stress
 
         return int(large_pdf_stress.main(raw_args[1:]))
+    if raw_args and raw_args[0] == "import-legacy-snapshots":
+        from tools import legacy_snapshot_import
+
+        return int(legacy_snapshot_import.main(raw_args[1:]))
 
     parser = _build_parser()
     args = parser.parse_args(raw_args)
