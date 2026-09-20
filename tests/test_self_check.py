@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -29,6 +30,8 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIsNone(args.provider_comparison_timeout_seconds)
         self.assertFalse(args.reuse_parser_instances)
         self.assertIsNone(args.large_pdf_benchmark)
+        self.assertFalse(args.require_verified_corpus)
+        self.assertIsNone(args.corpus_manifest_out)
 
     def test_default_out_for_profile_uses_separate_full_snapshot(self) -> None:
         self.assertTrue(self_check._default_out_for_profile(self_check.FAST_PROFILE).endswith("var\\self-check\\latest.json"))
@@ -86,6 +89,17 @@ class SelfCheckTests(unittest.TestCase):
                 "slow",
             ],
         )
+
+    def test_build_regression_suite_args_requires_verified_corpus_on_demand(self) -> None:
+        default_args = self_check._build_regression_suite_args("suite.json", ())
+        release_args = self_check._build_regression_suite_args(
+            "suite.json",
+            (),
+            require_verified_corpus=True,
+        )
+
+        self.assertNotIn("--require-verified-corpus", default_args)
+        self.assertEqual(release_args[-1], "--require-verified-corpus")
 
     def test_build_provider_comparison_args_passes_suite_fixture_root_and_profile(self) -> None:
         args = self_check._build_provider_comparison_args(
@@ -1064,6 +1078,293 @@ class SelfCheckTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         run_stress.assert_called_once_with(["--generate-pages", "3"])
+
+
+def _write_corpus_workspace(
+    root: Path,
+    *,
+    fixture_present: bool,
+    record_hash: bool = True,
+) -> Path:
+    """Build a minimal suite workspace (never touches var/regression)."""
+    fixture_root = root / "fixtures"
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    fixture = fixture_root / "sample.pdf"
+    fixture_record: dict[str, object] = {"fixture_relative_path": "fixtures/sample.pdf"}
+    if fixture_present:
+        payload = b"self-check-fixture"
+        fixture.write_bytes(payload)
+        if record_hash:
+            fixture_record.update(
+                {
+                    "fixture_sha256": hashlib.sha256(payload).hexdigest(),
+                    "fixture_size_bytes": len(payload),
+                }
+            )
+    baseline = root / "baseline.json"
+    baseline.write_text(json.dumps({"fixtures": [fixture_record]}), encoding="utf-8")
+    suite = root / "suite.json"
+    suite.write_text(json.dumps({"entries": [{"name": "temp", "baseline": "baseline.json"}]}), encoding="utf-8")
+    return suite
+
+
+def _passed_result(name: str, details: dict | None = None) -> self_check.CheckResult:
+    return self_check.CheckResult(
+        name=name,
+        status="passed",
+        exit_code=0,
+        elapsed_s=0.1,
+        summary=f"{name} passed",
+        details=details or {},
+        tail=[],
+    )
+
+
+class SelfCheckVerificationGateTests(unittest.TestCase):
+    def test_run_corpus_manifest_reports_unverified_without_failing_fast(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            suite = _write_corpus_workspace(Path(temp_dir), fixture_present=False)
+
+            fast_result, fast_report = self_check._run_corpus_manifest(str(suite))
+            release_result, _release_report = self_check._run_corpus_manifest(
+                str(suite),
+                require_verified=True,
+            )
+
+        self.assertEqual(fast_result.status, "unverified")
+        self.assertIsNone(fast_result.exit_code)
+        self.assertFalse(fast_report.verified)
+        self.assertEqual(release_result.status, "failed")
+        self.assertEqual(release_result.exit_code, 1)
+
+    def test_run_regression_suite_records_corpus_unverified_line(self) -> None:
+        output = "\n".join(
+            [
+                "[suite][corpus] status=missing available=false verified=false entries=1",
+                "[suite][corpus] CORPUS NOT VERIFIED: fixture_missing: 0/1 entries verified",
+                "[suite] OK: 0 baseline(s) passed; corpus NOT verified (fixture_missing)",
+            ]
+        )
+        with patch(
+            "tools.self_check._run_subprocess",
+            return_value=(
+                self_check.CheckResult(
+                    name="regression_suite",
+                    status="passed",
+                    exit_code=0,
+                    elapsed_s=0.5,
+                    summary="command completed",
+                    details={},
+                    tail=[],
+                ),
+                output,
+            ),
+        ) as run_subprocess:
+            result = self_check._run_regression_suite(
+                "suite.json",
+                120,
+                require_verified_corpus=True,
+            )
+
+        self.assertTrue(result.details["corpus_unverified"])
+        self.assertIn("CORPUS NOT VERIFIED", result.details["corpus_unverified_detail"])
+        self.assertTrue(result.details["require_verified_corpus"])
+        self.assertIn("--require-verified-corpus", run_subprocess.call_args.args[1])
+
+    def test_release_gate_fails_when_corpus_unverified_while_fast_gate_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = _write_corpus_workspace(root, fixture_present=False)
+            fast_out = root / "fast.json"
+            release_out = root / "release.json"
+            patches = (
+                patch("tools.self_check._run_unit_tests", return_value=_passed_result("unit_tests", {"tests_ran": 700, "skipped": 6})),
+                patch("tools.self_check._run_runtime_describe", return_value=_passed_result("runtime_describe")),
+                patch("tools.self_check._run_payload_contract_check", return_value=_passed_result("payload_contracts")),
+                patch(
+                    "tools.self_check._run_regression_suite",
+                    return_value=_passed_result("regression_suite", {"ok_count": 1, "skip_count": 0}),
+                ),
+                patch("tools.self_check._default_provider_suite_preflight", return_value=(False, {"reason": "missing_fixtures", "message": "no fixtures"})),
+                patch("tools.self_check._run_provider_comparison_suite"),
+                patch("tools.self_check._write_stdout"),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                fast_exit = self_check.main(
+                    ["--profile", "fast", "--suite", str(suite), "--out", str(fast_out)]
+                )
+                release_exit = self_check.main(
+                    [
+                        "--profile",
+                        "fast",
+                        "--suite",
+                        str(suite),
+                        "--out",
+                        str(release_out),
+                        "--require-verified-corpus",
+                    ]
+                )
+            fast_payload = json.loads(fast_out.read_text(encoding="utf-8"))
+            release_payload = json.loads(release_out.read_text(encoding="utf-8"))
+
+        # The fast gate keeps its PR semantics: it passes but says UNVERIFIED.
+        self.assertEqual(fast_exit, 0)
+        self.assertEqual(fast_payload["status"], "ok")
+        self.assertEqual(fast_payload["verification"]["status"], "unverified")
+        self.assertFalse(fast_payload["verification"]["verified"])
+        self.assertFalse(fast_payload["verification"]["enforced"])
+        self.assertIn("corpus_fixture_missing", fast_payload["verification"]["reasons"])
+        fast_manifest_check = next(
+            item for item in fast_payload["checks"] if item["name"] == "corpus_manifest"
+        )
+        self.assertEqual(fast_manifest_check["status"], "unverified")
+
+        # The release gate fails on exactly the same corpus.
+        self.assertEqual(release_exit, 1)
+        self.assertTrue(release_payload["verification"]["enforced"])
+        self.assertFalse(release_payload["verification"]["release_acceptance"])
+        release_check = next(
+            item for item in release_payload["checks"] if item["name"] == "release_acceptance"
+        )
+        self.assertEqual(release_check["status"], "failed")
+        self.assertIn("corpus_fixture_missing", release_check["details"]["reasons"])
+        self.assertIn("NOT verified", release_check["summary"])
+        release_manifest_check = next(
+            item for item in release_payload["checks"] if item["name"] == "corpus_manifest"
+        )
+        self.assertEqual(release_manifest_check["status"], "failed")
+
+    def test_release_gate_fails_when_regression_suite_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = _write_corpus_workspace(root, fixture_present=True)
+            out_path = root / "release.json"
+            patches = (
+                patch("tools.self_check._run_unit_tests", return_value=_passed_result("unit_tests")),
+                patch("tools.self_check._run_runtime_describe", return_value=_passed_result("runtime_describe")),
+                patch("tools.self_check._run_payload_contract_check", return_value=_passed_result("payload_contracts")),
+                patch("tools.self_check._default_provider_suite_preflight", return_value=(False, {"reason": "missing_fixtures", "message": "no fixtures"})),
+                patch("tools.self_check._run_provider_comparison_suite"),
+                patch("tools.self_check._write_stdout"),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                exit_code = self_check.main(
+                    [
+                        "--profile",
+                        "fast",
+                        "--suite",
+                        str(suite),
+                        "--skip-regression",
+                        "--skip-payload-contracts",
+                        "--require-verified-corpus",
+                        "--out",
+                        str(out_path),
+                    ]
+                )
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["verification"]["status"], "unverified")
+        self.assertIn("regression_skipped_by_flag", payload["verification"]["reasons"])
+        manifest_check = next(
+            item for item in payload["checks"] if item["name"] == "corpus_manifest"
+        )
+        # The corpus itself is verified; the failure is the skipped suite.
+        self.assertEqual(manifest_check["status"], "passed")
+        regression_check = next(
+            item for item in payload["checks"] if item["name"] == "regression_suite"
+        )
+        self.assertEqual(regression_check["status"], "skipped")
+        self.assertEqual(regression_check["details"]["reason"], "regression_skipped_by_flag")
+        release_check = next(
+            item for item in payload["checks"] if item["name"] == "release_acceptance"
+        )
+        self.assertEqual(release_check["status"], "failed")
+
+    def test_verification_block_records_commit_config_hashes_and_run_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = _write_corpus_workspace(root, fixture_present=True)
+            out_path = root / "fast.json"
+            manifest_out = root / "corpus.json"
+            patches = (
+                patch("tools.self_check._run_unit_tests", return_value=_passed_result("unit_tests", {"tests_ran": 702, "skipped": 6})),
+                patch("tools.self_check._run_runtime_describe", return_value=_passed_result("runtime_describe")),
+                patch("tools.self_check._run_payload_contract_check", return_value=_passed_result("payload_contracts")),
+                patch(
+                    "tools.self_check._run_regression_suite",
+                    return_value=_passed_result("regression_suite", {"ok_count": 2, "skip_count": 0}),
+                ),
+                patch("tools.self_check._default_provider_suite_preflight", return_value=(False, {"reason": "missing_fixtures", "message": "no fixtures"})),
+                patch("tools.self_check._run_provider_comparison_suite"),
+                patch("tools.self_check._write_stdout"),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                exit_code = self_check.main(
+                    [
+                        "--profile",
+                        "fast",
+                        "--suite",
+                        str(suite),
+                        "--out",
+                        str(out_path),
+                        "--corpus-manifest-out",
+                        str(manifest_out),
+                    ]
+                )
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+            manifest_exists = manifest_out.exists()
+
+        verification = payload["verification"]
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["status"], "verified")
+        self.assertEqual(verification["reasons"], [])
+        self.assertEqual(verification["counts"]["regression_ok_count"], 2)
+        self.assertEqual(verification["counts"]["regression_skip_count"], 0)
+        self.assertEqual(verification["counts"]["unit_tests_ran"], 702)
+        self.assertEqual(verification["counts"]["verified_entries"], 1)
+        self.assertEqual(verification["commit"], self_check._git_commit())
+        self.assertTrue(verification["config_sha256"])
+        self.assertEqual(verification["report_path"], str(out_path))
+        self.assertIsNotNone(verification["corpus_manifest_path"])
+        self.assertTrue(manifest_exists)
+        self.assertEqual(len(verification["sample_hashes"]), 1)
+        self.assertEqual(
+            verification["sample_hashes"][0]["sha256"],
+            hashlib.sha256(b"self-check-fixture").hexdigest(),
+        )
+        self.assertTrue(verification["sample_hashes"][0]["hash_verified"])
+        self.assertEqual(verification["warnings"], [])
+
+    def test_verification_warns_when_baseline_records_no_fixture_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = _write_corpus_workspace(root, fixture_present=True, record_hash=False)
+            out_path = root / "fast.json"
+            patches = (
+                patch("tools.self_check._run_unit_tests", return_value=_passed_result("unit_tests")),
+                patch("tools.self_check._run_runtime_describe", return_value=_passed_result("runtime_describe")),
+                patch("tools.self_check._run_payload_contract_check", return_value=_passed_result("payload_contracts")),
+                patch(
+                    "tools.self_check._run_regression_suite",
+                    return_value=_passed_result("regression_suite", {"ok_count": 1, "skip_count": 0}),
+                ),
+                patch("tools.self_check._default_provider_suite_preflight", return_value=(False, {"reason": "missing_fixtures", "message": "no fixtures"})),
+                patch("tools.self_check._run_provider_comparison_suite"),
+                patch("tools.self_check._write_stdout"),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                exit_code = self_check.main(
+                    ["--profile", "fast", "--suite", str(suite), "--out", str(out_path)]
+                )
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+
+        verification = payload["verification"]
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["warnings"], ["hash_unrecorded_fixtures:1"])
+        self.assertFalse(verification["sample_hashes"][0]["hash_recorded"])
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 文档导航
 
-- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（P0-01、P0-02 已实施，P0-03 第 1 批已实施，其余待实施）
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（P0-01、P0-02 已实施，P0-03 第 1 批与 P0-06 前半已实施，其余待实施）
 - [docs/adr-p0-02-run-publication-contract.md](docs/adr-p0-02-run-publication-contract.md)：run / 状态 / 发布指针契约冻结（P0-02）；明确 `done` 不等于 `published`、三套状态机、存储能力与 SQLite/Postgres 迁移设计
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、22 项故障注入验证与未完成范围

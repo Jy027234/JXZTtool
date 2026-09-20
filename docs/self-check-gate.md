@@ -59,16 +59,78 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 
 Provider comparison 工件不在 self-check 过程中自动删除。运维清理使用 `parsecore cleanup-provider-comparison-artifacts`，默认只输出 dry-run 清单；它只匹配 `provider-comparison.<profile>.json/.md`，不会匹配 self-check 主报告或其他审计工件。实际删除前必须审核清单并显式传入 `--execute`，具体保留期和命令见 [配置手册](configuration.md#runtime-配置)。
 
-CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径和 `fixture_relative_path` 元数据；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。若仍缺样本，workflow 才会把 fast 降级为 smoke-only，并跳过 full/perf 专项门禁，而不是直接失败。
+CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径、`fixture_relative_path` 元数据和样本 `fixture_sha256/fixture_size_bytes`；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。三个 job 不再各自内嵌样本探测脚本，而是统一调用 `tools/corpus_manifest.py`；若仍缺样本，workflow 会把 fast 降级为 smoke-only、跳过 full/perf 专项门禁，**并在 job summary、notice/warning 以及 self-check JSON 的 `verification` 字段中明确标记该次运行为“未验证”**，不再让 smoke 成功看起来像质量通过。发版验收由独立的 `release` job 承担（见下节）。
+
+## 样本清单校验与发布验收状态（P0-06）
+
+### `tools/corpus_manifest.py`
+
+suite → baseline → fixture 的解析与校验只有一份实现，供 `tools/self_check.py`、`tools/regression_baseline.py check-suite` 和 CI 三个 job 共同调用：
+
+```powershell
+# 仅报告（退出码始终为 0，除非 --require-verified）
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/corpus_manifest.py --suite var/regression/suite.fast.json --verbose
+
+# 发版验收（未验证时退出码 1），并写出完整 JSON 报告 / GitHub Outputs
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/corpus_manifest.py --suite var/regression/suite.full.json --require-verified --out var/self-check/corpus.full.json --github-output "$env:GITHUB_OUTPUT"
+```
+
+它统一处理以下情形，全部作为 finding 上报而不会抛异常：
+
+| 情形 | entry `status` / 报告 `reason` |
+| --- | --- |
+| suite 缺失 / 非法 JSON / entries 非数组 / 空 entries | 顶层 `reason`：`suite_missing` / `suite_invalid_json` / `suite_invalid_shape` / `suite_empty` |
+| 合法 `disabled`、`excluded`、`enabled=false` 条目 | `disabled` / `disabled_entry`（不读取其 baseline，不计入 missing） |
+| 被 tag（默认 `slow`）排除的条目 | `skipped` / `excluded_by_tag` |
+| baseline 为空/空白 | `unavailable` / `empty_baseline_path` |
+| baseline 是目录或非普通文件 | `unavailable` / `baseline_not_a_regular_file` |
+| baseline 文件缺失 / 不可读 / JSON 非法 | `unavailable` / `baseline_missing` / `baseline_unreadable` / `baseline_invalid_json` |
+| baseline 声明 0 个 fixture | `empty` / `empty_fixture_set` |
+| fixture 缺失 / 不是普通文件 | `missing` / `fixture_missing`、`error` / `fixture_not_a_regular_file` |
+| baseline 记录的 `fixture_sha256`/`fixture_size_bytes` 与磁盘不一致 | `hash_drift` / `fixture_hash_drift` |
+| 条目/路径类型非法（如 baseline 非字符串） | `error` / `invalid_baseline_path`、`invalid_path` |
+
+fixture 解析顺序：`fixture_relative_path` + `PARSECORE_REGRESSION_FIXTURE_ROOT`（或 baseline 中 `fixture_root_env` 指定的变量）→ `fixture`（支持 `/` 与 `~`/环境变量展开）→ fixture root 下的文件名；只记录相对路径且未配置 root 时按 baseline 同目录解析，不会把目录当作样本。
+
+两个聚合含义必须区分：
+
+| 字段 | 含义 |
+| --- | --- |
+| `available` | 所有被选中条目都可运行：baseline 可读、至少 1 个 fixture 且都存在。CI 沿用该键判断“本 runner 能否真正执行回归”（disabled/被 tag 排除的条目不再参与） |
+| `verified` | `available` 且条目数/样本数非 0 且无 hash 漂移。“样本没被换过”才是可复现的质量证据 |
+
+报告同时给出 `totals`（`verified/available/missing/skipped/disabled/empty/hash_drift/error` 条目数与 fixture 数）、`reasons`、`fixture_reasons` 与逐条目/逐 fixture 明细，可直接用于发版报告归档。
+
+### `tools/self_check.py --require-verified-corpus`
+
+`self-check` 现在每次都会运行 `corpus_manifest` 检查，并在 JSON 中写入 `verification` 块：
+
+| 字段 | 说明 |
+| --- | --- |
+| `verification.status` | `verified` / `unverified` |
+| `verification.reasons` | 机器可读原因，如 `corpus_fixture_missing`、`corpus_fixture_hash_drift`、`regression_skipped_by_flag`、`no_baselines_executed`、`baselines_skipped` |
+| `verification.counts` | 条目/样本计数 + 实际执行的 `regression_ok_count` / `regression_skip_count` / 单测数量 |
+| `verification.commit` / `config` / `config_sha256` | 本次运行的 commit 与配置指纹 |
+| `verification.sample_hashes` | 每个样本的路径、实际 sha256/大小、baseline 记录值、是否校验通过 |
+| `verification.report_path` / `corpus_manifest_path` | 报告与（可选）独立 manifest 路径 |
+
+`--require-verified-corpus` 是发版验收入口（release acceptance）：缺样本、空 fixture 集、hash 漂移、`--skip-regression`、回归套件未通过或没有任何 baseline 真正执行时，追加 `release_acceptance` 检查并以退出码 1 结束，summary 明确写出 “samples were NOT verified”。默认 `fast` profile 的 PR 语义不变：缺样本时仍以退出码 0 通过，但报告状态是 `verification.status = unverified`，CI 也会在 job summary 中标注 `UNVERIFIED`，不能再被当成质量通过。
+
+`tools/regression_baseline.py check-suite` 复用同一校验：默认会把不可用条目打印为 `[suite][corpus] UNVERIFIED: ...` 并以 `corpus NOT verified` 结尾（仍按历史语义返回 0），传入 `--require-verified-corpus` 时改为返回 1。fixture 哈希漂移也会打印 `[suite][corpus] HASH DRIFT: ...`。
+
+### 已知未通过项（真实样本，禁止靠删样本通过）
+
+`var/regression/suite.fast.json` 的 297 页样本 `36d65cd6b61346e28e97dbaf829646de.pdf`（sha256 `aaa5f0a3…78dcf`，2634672 字节）样本本身**校验通过**，但指标相对 baseline 已漂移：`numeric_heavy_total` 与 `suspected_header_footer_total` 超出预算（详见 [docs/p0-01-capability-truthfulness-20260920.md](p0-01-capability-truthfulness-20260920.md) 第 5 节）。因此当前 `check-suite --require-verified-corpus` 与 `self-check --require-verified-corpus` 都会**失败**：这是真实回归，必须修复解析行为或按证据更新 baseline，不能通过删除样本、放宽阈值或把该样本标成 `disabled` 来让门禁变绿。
 
 ## 覆盖范围
 
-`parsecore self-check` 当前串联四类检查：
+`parsecore self-check` 当前串联五类检查：
 
 1. 单测：`unittest discover -s tests -p "test_*.py"`
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
 3. Payload contract 校验：`parsecore.cli payload-contract-check`
-4. 回归基线：
+4. 样本清单校验：`tools/corpus_manifest.py`（每次运行都执行，结果写入 `verification`）
+5. 回归基线：
 	- `fast`：`tools/regression_baseline.py check-suite --suite var/regression/suite.fast.json`
 	- `slow/full`：`tools/regression_baseline.py check-suite --suite var/regression/suite.full.json`
 	- `perf`：`tools/regression_baseline.py check-suite --suite var/regression/suite.perf.json`
@@ -107,8 +169,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 
 ## 退出码语义
 
-1. `0`：全部通过
-2. `1`：至少一项必需检查失败
+1. `0`：全部通过（注意：`checks[].status` 可以是 `unverified`，表示该检查未被真正执行或样本未验证；此时 `verification.status = unverified`，不能作为发版证据）
+2. `1`：至少一项必需检查失败，或 `--require-verified-corpus` 下样本未验证
 3. `2`：没有硬失败，但存在退化或超时
 
 ## Provider Comparison Check

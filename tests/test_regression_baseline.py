@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import io
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from parsecore.models import Block, BlockType, Chunk, SemanticRole
-from tools import regression_baseline
+from tools import corpus_manifest, regression_baseline
 
 
 class RegressionBaselineTests(unittest.TestCase):
@@ -21,6 +25,16 @@ class RegressionBaselineTests(unittest.TestCase):
 
         self.assertEqual(record["fixture_name"], "sample.pdf")
         self.assertEqual(record["fixture_relative_path"], "sample.pdf")
+
+    def test_fixture_record_captures_digest_for_hash_drift_detection(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            fixture = Path(temp_dir) / "sample.pdf"
+            fixture.write_bytes(b"pdf")
+
+            record = regression_baseline._fixture_record(fixture, None)
+
+        self.assertEqual(record["fixture_sha256"], hashlib.sha256(b"pdf").hexdigest())
+        self.assertEqual(record["fixture_size_bytes"], 3)
 
     def test_resolve_fixture_entry_path_prefers_portable_fixture_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -61,6 +75,87 @@ class RegressionBaselineTests(unittest.TestCase):
                 )
 
         self.assertEqual(resolved, fixture)
+
+    def test_check_suite_reports_unverified_corpus_and_requires_flag(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "empty.json").write_text(json.dumps({"fixtures": []}), encoding="utf-8")
+            suite = root / "suite.json"
+            suite.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "name": "disabled-multi-column",
+                                "disabled": True,
+                                # Empty baseline resolves to this directory; the old
+                                # detector tried to read it as JSON and raised.
+                                "baseline": "",
+                                "fixture_relative_path": "fixtures/multi-column.pdf",
+                            },
+                            {"name": "missing-baseline", "baseline": "gone.json"},
+                            {"name": "empty-fixtures", "baseline": "empty.json"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            default_output = io.StringIO()
+            with contextlib.redirect_stdout(default_output):
+                default_exit = regression_baseline.main(["check-suite", "--suite", str(suite)])
+            release_output = io.StringIO()
+            with contextlib.redirect_stdout(release_output):
+                release_exit = regression_baseline.main(
+                    ["check-suite", "--suite", str(suite), "--require-verified-corpus"]
+                )
+
+        default_lines = default_output.getvalue()
+        release_lines = release_output.getvalue()
+        self.assertEqual(default_exit, 0)
+        self.assertIn("[suite][corpus] DISABLED: disabled-multi-column: disabled_entry", default_lines)
+        self.assertIn("UNVERIFIED: missing-baseline: baseline_missing", default_lines)
+        self.assertIn("UNVERIFIED: empty-fixtures: empty_fixture_set", default_lines)
+        self.assertIn("[suite][corpus] CORPUS NOT VERIFIED", default_lines)
+        self.assertIn("corpus NOT verified", default_lines)
+        self.assertIn("status=unavailable", default_lines)
+
+        self.assertEqual(release_exit, 1)
+        self.assertIn("[suite] FAILED: corpus-not-verified", release_lines)
+
+    def test_check_suite_empty_suite_returns_nonzero(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            suite = Path(temp_dir) / "suite.json"
+            suite.write_text(json.dumps({"entries": []}), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = regression_baseline.main(["check-suite", "--suite", str(suite)])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("no entries", output.getvalue())
+
+    def test_resolve_fixture_entry_path_delegates_to_corpus_manifest(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = root / "nested" / "sample.pdf"
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_bytes(b"pdf")
+            entry = {"fixture_relative_path": "nested/sample.pdf"}
+
+            recorded = regression_baseline._resolve_fixture_entry_path(
+                entry,
+                baseline_dir=root,
+                fixture_root=None,
+            )
+            expected = corpus_manifest.resolve_fixture_entry_path(
+                entry,
+                baseline_dir=root,
+                fixture_root=None,
+            )
+
+        self.assertEqual(recorded, expected)
+        self.assertEqual(recorded, fixture)
 
     def test_request_option_overrides_include_table_stage_when_enabled(self) -> None:
         args = argparse.Namespace(

@@ -2,7 +2,7 @@
 
 ## 分层门禁
 
-当前质量门禁按反馈速度分三层：
+当前质量门禁按反馈速度分三层，另加一条发版验收入口：
 
 1. 本地快速门禁：提交前运行单测和 runtime smoke。
 
@@ -10,9 +10,20 @@
 d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --skip-regression
 ```
 
-2. PR / 主分支 CI：`.github/workflows/parsecore-ci.yml` 自动运行快速门禁，并额外验证 base SDK import 不会加载 API 可选依赖。
+该命令现在会在 JSON 中写入 `verification.status = unverified`（原因 `regression_skipped_by_flag`）：smoke 通过只说明“没有发现单测/装配问题”，不代表质量门禁被执行。
+
+2. PR / 主分支 CI：`.github/workflows/parsecore-ci.yml` 自动运行快速门禁，并额外验证 base SDK import 不会加载 API 可选依赖。fast lane 只有在 `tools/corpus_manifest.py` 判定样本 `available=true` 时才真正执行回归；否则降级为 smoke，并在 job summary 与 self-check JSON 中标记 `UNVERIFIED`（原因含 `fixture_missing`、`hash_drift` 等），不会静默冒充质量通过。
 
 3. 定时或手动 CI：运行完整回归套件和 Postgres + pgvector smoke。OCR 长尾和存储层问题不阻塞日常 PR，但会在夜间或发版前暴露。
+
+4. 发版验收（release acceptance）：由独立 `release` job（`workflow_dispatch` 或 `v*` tag）执行，缺样本/被跳过/空 fixture 集/hash 漂移或任何 baseline 未真正执行都会非零退出。
+
+```powershell
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/corpus_manifest.py --suite var/regression/suite.full.json --require-verified
+d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile slow --require-verified-corpus --out var/self-check/release.json
+```
+
+发布报告（`verification` 块）记录 commit、配置路径与 `config_sha256`、每个样本的实际 sha256/大小与 baseline 记录值、实际执行/跳过的 baseline 数以及报告路径；发版流程只接受 `verification.verified = true` 的报告。
 
 若要把 `perf` 从一次性手工执行升级成持续趋势，建议为夜间或手动 CI 准备一台带持久磁盘的 runner，并至少提供：
 

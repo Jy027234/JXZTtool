@@ -7,14 +7,28 @@ Checks:
 1. Unit tests
 2. Runtime describe smoke
 3. Payload contract validation
-4. Regression baseline suite (optional, enabled by default)
-5. Local provider comparison suite (optional, explicitly enabled)
+4. Regression corpus manifest validation (always; see ``tools/corpus_manifest.py``)
+5. Regression baseline suite (optional, enabled by default)
+6. Local provider comparison suite (optional, explicitly enabled)
 
 The script prints a JSON summary and also writes it to ``var/self-check``.
 
+Verification status
+-------------------
+
+A passing smoke run is *not* evidence that the quality gate was exercised.
+Every report therefore carries a ``verification`` block recording the commit,
+config hash, sample hashes, the corpus manifest result and the actual
+run/skip counts, with ``verification.status`` = ``verified`` or
+``unverified``.  ``--require-verified-corpus`` turns the report into a
+release acceptance gate: missing/skipped/empty/drifted samples then exit
+non-zero instead of quietly degrading to smoke.  The default ``fast`` profile
+keeps its historical PR semantics (it reports ``unverified`` but does not
+fail on a missing corpus).
+
 Exit codes:
 0 -> all requested checks passed
-1 -> at least one required check failed
+1 -> at least one required check failed (including release acceptance failure)
 2 -> no required check failed, but a check degraded or timed out
 """
 
@@ -42,6 +56,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from parsecore.pdf_parts import detect_pdf_page_count  # noqa: E402
+from tools import corpus_manifest  # noqa: E402
 
 
 FAST_PROFILE = "fast"
@@ -71,6 +86,16 @@ PROFILE_INCLUDE_TAGS = {
 FAST_PROVIDER_PAGE_BUDGET_KEY = "fast_page_budget"
 TIMEOUT_TREE_CLEANUP_GRACE_SECONDS = 10
 TIMEOUT_TREE_KILL_SECONDS = 15
+CORPUS_MANIFEST_CHECK_NAME = "corpus_manifest"
+REGRESSION_CHECK_NAME = "regression_suite"
+RELEASE_ACCEPTANCE_CHECK_NAME = "release_acceptance"
+# Machine-readable reasons the report is not verification-grade evidence.
+UNVERIFIED_REGRESSION_SKIPPED = "regression_skipped_by_flag"
+UNVERIFIED_REGRESSION_NOT_RUN = "regression_not_executed"
+UNVERIFIED_REGRESSION_FAILED = "regression_suite_failed"
+UNVERIFIED_REGRESSION_TIMEOUT = "regression_suite_timeout"
+UNVERIFIED_NO_BASELINES_EXECUTED = "no_baselines_executed"
+UNVERIFIED_SKIPPED_BASELINES = "baselines_skipped"
 
 
 @dataclass
@@ -156,6 +181,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional large PDF benchmark config path for the large-sample stress gate",
     )
+    parser.add_argument(
+        "--require-verified-corpus",
+        action="store_true",
+        help=(
+            "release acceptance mode: fail (exit 1) when the regression corpus is not "
+            "fully verified, when the regression suite is skipped, or when no baseline "
+            "was actually executed; the report is marked unverified either way"
+        ),
+    )
+    parser.add_argument(
+        "--corpus-manifest-out",
+        default=None,
+        help="optional path for the standalone corpus manifest JSON report",
+    )
     return parser
 
 
@@ -224,10 +263,17 @@ def _resolve_regression_profile(
     return normalized_profile, include_tags, timeout_seconds
 
 
-def _build_regression_suite_args(suite: str, include_tags: tuple[str, ...]) -> list[str]:
+def _build_regression_suite_args(
+    suite: str,
+    include_tags: tuple[str, ...],
+    *,
+    require_verified_corpus: bool = False,
+) -> list[str]:
     args = [sys.executable, "tools/regression_baseline.py", "check-suite", "--suite", suite]
     for tag in include_tags:
         args.extend(["--include-tag", tag])
+    if require_verified_corpus:
+        args.append("--require-verified-corpus")
     return args
 
 
@@ -896,15 +942,23 @@ def _run_regression_suite(
     *,
     include_tags: tuple[str, ...] = (),
     profile: str = FAST_PROFILE,
+    require_verified_corpus: bool = False,
 ) -> CheckResult:
     result, output = _run_subprocess(
-        "regression_suite",
-        _build_regression_suite_args(suite, include_tags),
+        REGRESSION_CHECK_NAME,
+        _build_regression_suite_args(
+            suite,
+            include_tags,
+            require_verified_corpus=require_verified_corpus,
+        ),
         timeout_seconds=timeout_seconds,
     )
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     ok_count = sum(1 for line in lines if line == "[check] OK: all metrics within budget")
     skip_count = sum(1 for line in lines if line.startswith("[suite] SKIP"))
+    corpus_unverified = [
+        line for line in lines if line.startswith("[suite][corpus] CORPUS NOT VERIFIED")
+    ]
     last_suite = _last_suite_label(lines)
     structure_metrics = _extract_structure_metrics(lines)
     result.details.update(
@@ -915,6 +969,9 @@ def _run_regression_suite(
             "structure_metrics": structure_metrics,
             "profile": profile,
             "include_tags": list(include_tags),
+            "require_verified_corpus": bool(require_verified_corpus),
+            "corpus_unverified": bool(corpus_unverified),
+            "corpus_unverified_detail": corpus_unverified[-1] if corpus_unverified else None,
         }
     )
     perf_samples: list[dict[str, Any]] = []
@@ -1180,7 +1237,248 @@ def _run_large_pdf_benchmark(config_path: str, *, config: str) -> CheckResult:
     )
 
 
+def _run_corpus_manifest(
+    suite: str,
+    *,
+    include_tags: tuple[str, ...] = (),
+    require_verified: bool = False,
+) -> tuple[CheckResult, corpus_manifest.CorpusReport | None]:
+    """Validate the regression corpus manifest (never raises)."""
+    started = time.monotonic()
+
+    def _result(status: str, summary: str, details: dict[str, Any]) -> CheckResult:
+        return CheckResult(
+            name=CORPUS_MANIFEST_CHECK_NAME,
+            status=status,
+            exit_code=1 if status == "failed" else None,
+            elapsed_s=round(time.monotonic() - started, 3),
+            summary=summary,
+            details=details,
+            tail=[],
+        )
+
+    try:
+        report = corpus_manifest.validate_suite(suite, include_tags=include_tags)
+    except Exception as exc:  # pragma: no cover - the validator is exception-free by contract
+        return (
+            _result(
+                "failed" if require_verified else "unverified",
+                f"corpus manifest validation error: {exc}",
+                {"error": str(exc), "suite": str(suite), "require_verified_corpus": bool(require_verified)},
+            ),
+            None,
+        )
+    details = report.to_dict()
+    details["require_verified_corpus"] = bool(require_verified)
+    if report.verified:
+        return _result("passed", f"corpus verified: {corpus_manifest.summarize(report)}", details), report
+    summary = (
+        f"corpus UNVERIFIED ({report.reason}): {corpus_manifest.summarize(report)}"
+    )
+    return _result("failed" if require_verified else "unverified", summary, details), report
+
+
+def _file_sha256(path: str | Path) -> str | None:
+    try:
+        return corpus_manifest.file_sha256(Path(path))
+    except (OSError, ValueError):
+        return None
+
+
+def _git_commit() -> str | None:
+    """Best-effort read-only HEAD lookup; never raises."""
+    for env_name in ("PARSECORE_BUILD_COMMIT", "GITHUB_SHA"):
+        value = str(os.environ.get(env_name) or "").strip()
+        if value:
+            return value
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    value = str(completed.stdout or "").strip()
+    return value or None
+
+
+def _corpus_fixture_hashes(
+    report: corpus_manifest.CorpusReport | None,
+) -> list[dict[str, Any]]:
+    if report is None:
+        return []
+    samples: list[dict[str, Any]] = []
+    for entry in report.entries:
+        if not entry.selected:
+            continue
+        for fixture in entry.fixtures:
+            samples.append(
+                {
+                    "entry": entry.name,
+                    "baseline": entry.baseline_path,
+                    "baseline_sha256": entry.baseline_sha256,
+                    "fixture": fixture.resolved,
+                    "fixture_relative_path": fixture.relative or None,
+                    "status": fixture.status,
+                    "sha256": fixture.sha256,
+                    "size_bytes": fixture.size_bytes,
+                    "recorded_sha256": fixture.recorded_sha256,
+                    "hash_recorded": bool(fixture.hash_recorded),
+                    "hash_verified": bool(fixture.hash_verified),
+                }
+            )
+    return samples
+
+
+def _regression_run_summary(
+    result: CheckResult | None,
+    *,
+    skipped: bool,
+) -> dict[str, Any]:
+    if result is None or skipped:
+        return {
+            "ran": False,
+            "skipped": bool(skipped),
+            "status": "skipped" if skipped else "not_run",
+            "ok_count": 0,
+            "skip_count": 0,
+            "last_suite": None,
+            "exit_code": None,
+            "elapsed_s": 0.0,
+        }
+    details = result.details or {}
+    return {
+        "ran": True,
+        "skipped": False,
+        "status": result.status,
+        "ok_count": int(details.get("ok_count") or 0),
+        "skip_count": int(details.get("skip_count") or 0),
+        "last_suite": details.get("last_suite"),
+        "exit_code": result.exit_code,
+        "elapsed_s": result.elapsed_s,
+    }
+
+
+def _build_verification_payload(
+    *,
+    suite: str,
+    manifest_report: corpus_manifest.CorpusReport | None,
+    manifest_path: str | None,
+    regression_result: CheckResult | None,
+    regression_skipped: bool,
+    unit_tests_details: Mapping[str, Any] | None,
+    require_verified: bool,
+    config: str,
+    report_path: str,
+) -> dict[str, Any]:
+    """Build the verification block recorded in every self-check report."""
+    regression = _regression_run_summary(regression_result, skipped=regression_skipped)
+    reasons: list[str] = []
+    if manifest_report is None:
+        reasons.append("corpus_manifest_unavailable")
+    elif not manifest_report.verified:
+        reasons.append(f"corpus_{manifest_report.reason or 'unverified'}")
+    if regression["skipped"]:
+        reasons.append(UNVERIFIED_REGRESSION_SKIPPED)
+    elif not regression["ran"]:
+        reasons.append(UNVERIFIED_REGRESSION_NOT_RUN)
+    elif regression["status"] == "timeout":
+        reasons.append(UNVERIFIED_REGRESSION_TIMEOUT)
+    elif regression["status"] != "passed":
+        reasons.append(UNVERIFIED_REGRESSION_FAILED)
+    if regression["ran"] and regression["status"] == "passed":
+        if regression["ok_count"] <= 0:
+            reasons.append(UNVERIFIED_NO_BASELINES_EXECUTED)
+        if regression["skip_count"] > 0:
+            reasons.append(UNVERIFIED_SKIPPED_BASELINES)
+    ordered_reasons = list(dict.fromkeys(reasons))
+    warnings: list[str] = []
+    if manifest_report is not None:
+        unrecorded = int(manifest_report.totals.get("hash_unrecorded_fixtures", 0) or 0)
+        if unrecorded:
+            warnings.append(f"hash_unrecorded_fixtures:{unrecorded}")
+    verified = not ordered_reasons
+    totals = dict(manifest_report.totals) if manifest_report is not None else {}
+    counts: dict[str, Any] = {
+        **totals,
+        "regression_ok_count": regression["ok_count"],
+        "regression_skip_count": regression["skip_count"],
+    }
+    if unit_tests_details:
+        counts["unit_tests_ran"] = unit_tests_details.get("tests_ran")
+        counts["unit_tests_skipped"] = unit_tests_details.get("skipped")
+    return {
+        "status": "verified" if verified else "unverified",
+        "verified": verified,
+        "enforced": bool(require_verified),
+        "release_acceptance": bool(require_verified and verified),
+        "reasons": ordered_reasons,
+        "warnings": warnings,
+        "suite": str(suite),
+        "corpus": (
+            corpus_manifest.compact_dict(manifest_report)
+            if manifest_report is not None
+            else None
+        ),
+        "corpus_manifest_path": manifest_path,
+        "regression": regression,
+        "counts": counts,
+        "commit": _git_commit(),
+        "config": str(config),
+        "config_sha256": _file_sha256(config),
+        "sample_hashes": _corpus_fixture_hashes(manifest_report),
+        "report_path": str(report_path),
+    }
+
+
+def _release_acceptance_check(
+    verification: Mapping[str, Any],
+    *,
+    require_verified: bool,
+) -> CheckResult | None:
+    if not require_verified:
+        return None
+    reasons = [str(reason) for reason in (verification.get("reasons") or [])]
+    if not reasons:
+        summary = (
+            "release acceptance passed: corpus verified and"
+            f" {verification.get('counts', {}).get('regression_ok_count', 0)} baseline(s) executed"
+        )
+        return CheckResult(
+            name=RELEASE_ACCEPTANCE_CHECK_NAME,
+            status="passed",
+            exit_code=0,
+            elapsed_s=0.0,
+            summary=summary,
+            details={"reasons": [], "verified": True},
+            tail=[],
+        )
+    return CheckResult(
+        name=RELEASE_ACCEPTANCE_CHECK_NAME,
+        status="failed",
+        exit_code=1,
+        elapsed_s=0.0,
+        summary=(
+            "release acceptance FAILED: samples were NOT verified for this run"
+            f" (reasons: {', '.join(reasons)})"
+        ),
+        details={"reasons": reasons, "verified": False},
+        tail=[],
+    )
+
+
 def _overall_status(results: list[CheckResult]) -> tuple[str, int]:
+    # ``unverified`` and ``skipped`` checks do not fail the gate: a fast/PR run
+    # may legitimately degrade to smoke.  They are surfaced through the
+    # ``verification`` block and ``--require-verified-corpus`` for releases.
     if any(item.status == "failed" for item in results):
         return "failed", 1
     if any(item.status == "timeout" for item in results):
@@ -1194,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
     suite = args.suite or _default_suite_for_profile(profile)
     provider_suite = args.provider_suite or _default_provider_suite_for_profile(profile)
     out_path_str = args.out or _default_out_for_profile(profile)
+    require_verified_corpus = bool(args.require_verified_corpus)
     results = [
         _run_unit_tests(),
         _run_runtime_describe(args.config),
@@ -1208,14 +1507,56 @@ def main(argv: list[str] | None = None) -> int:
             profile,
             args.regression_timeout_seconds,
         )
+    # The corpus manifest is validated for every profile, including smoke runs:
+    # a report must always state whether the regression corpus was verified.
+    manifest_result, manifest_report = _run_corpus_manifest(
+        suite,
+        include_tags=regression_include_tags,
+        require_verified=require_verified_corpus,
+    )
+    results.append(manifest_result)
+    manifest_path: str | None = None
+    if args.corpus_manifest_out and manifest_report is not None:
+        manifest_out = Path(args.corpus_manifest_out)
+        manifest_out.parent.mkdir(parents=True, exist_ok=True)
+        manifest_out.write_text(
+            json.dumps(manifest_report.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        manifest_path = str(manifest_out)
+    regression_result: CheckResult | None = None
+    if args.skip_regression:
         results.append(
-            _run_regression_suite(
-                suite,
-                regression_timeout_seconds,
-                include_tags=regression_include_tags,
-                profile=profile,
+            CheckResult(
+                name=REGRESSION_CHECK_NAME,
+                status="skipped",
+                exit_code=None,
+                elapsed_s=0.0,
+                summary=(
+                    f"profile={profile} regression suite skipped by --skip-regression;"
+                    " this run is NOT verification evidence"
+                ),
+                details={
+                    "reason": UNVERIFIED_REGRESSION_SKIPPED,
+                    "profile": profile,
+                    "suite": str(suite),
+                    "ok_count": 0,
+                    "skip_count": 0,
+                    "include_tags": list(regression_include_tags),
+                    "require_verified_corpus": require_verified_corpus,
+                },
+                tail=[],
             )
         )
+    else:
+        regression_result = _run_regression_suite(
+            suite,
+            int(regression_timeout_seconds or PROFILE_TIMEOUTS[FAST_PROFILE]),
+            include_tags=regression_include_tags,
+            profile=profile,
+            require_verified_corpus=require_verified_corpus,
+        )
+        results.append(regression_result)
     if provider_suite and not args.skip_provider_comparison:
         provider_comparison_timeout_seconds = (
             args.provider_comparison_timeout_seconds
@@ -1272,6 +1613,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.large_pdf_benchmark:
         results.append(_run_large_pdf_benchmark(args.large_pdf_benchmark, config=args.config))
 
+    unit_tests_details = next(
+        (item.details for item in results if item.name == "unit_tests"),
+        None,
+    )
+    verification = _build_verification_payload(
+        suite=suite,
+        manifest_report=manifest_report,
+        manifest_path=manifest_path,
+        regression_result=regression_result,
+        regression_skipped=bool(args.skip_regression),
+        unit_tests_details=unit_tests_details,
+        require_verified=require_verified_corpus,
+        config=args.config,
+        report_path=str(out_path_str),
+    )
+    release_check = _release_acceptance_check(
+        verification,
+        require_verified=require_verified_corpus,
+    )
+    if release_check is not None:
+        results.append(release_check)
+
     overall, exit_code = _overall_status(results)
     payload = {
         "status": overall,
@@ -1279,6 +1642,8 @@ def main(argv: list[str] | None = None) -> int:
         "profile": profile,
         "config": str(args.config),
         "suite": None if args.skip_regression else str(suite),
+        "corpus_manifest_suite": str(suite),
+        "verification": verification,
         "provider_suite": (
             str(provider_suite)
             if provider_suite and not args.skip_provider_comparison
@@ -1343,6 +1708,20 @@ def main(argv: list[str] | None = None) -> int:
     out_path = Path(out_path_str)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(payload_text, encoding="utf-8")
+    if verification["verified"]:
+        print(
+            "[self-check] VERIFICATION: verified"
+            f" ({verification['counts'].get('regression_ok_count', 0)} baseline(s) executed,"
+            f" suite={suite})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[self-check] VERIFICATION: UNVERIFIED -"
+            f" this run is NOT quality-gate evidence ({', '.join(verification['reasons'])});"
+            " use --require-verified-corpus for release acceptance",
+            file=sys.stderr,
+        )
     _write_stdout(payload_text)
     return exit_code
 

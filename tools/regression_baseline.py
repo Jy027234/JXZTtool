@@ -25,6 +25,13 @@ Usage::
 The "check" mode exits non-zero when any guarded metric drifts beyond the
 configured budget, so it is suitable as a CI gate.
 
+``check-suite`` first validates the suite corpus with the shared
+``tools/corpus_manifest.py`` validator: disabled entries are never read, a
+blank/directory/missing baseline and an empty fixture set are reported as
+unverified instead of being silently skipped, and fixture hash drift is
+surfaced.  Pass ``--require-verified-corpus`` to turn any unverified entry
+into a non-zero exit (release acceptance mode).
+
 Guard budgets (tunable via CLI):
     --max-very-short-delta        absolute delta on very_short_ratio
     --max-block-count-delta-pct   relative drift on total_blocks (e.g. 0.05)
@@ -52,6 +59,8 @@ from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_ROOT_ENV = "PARSECORE_REGRESSION_FIXTURE_ROOT"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from parsecore.bootstrap import build_runtime  # noqa: E402
@@ -62,14 +71,11 @@ from parsecore.quality import (  # noqa: E402
     evaluate_chunk_embeddings,
     evaluate_layout_signals,
 )
+from tools import corpus_manifest  # noqa: E402
 
 
 def _resolve_path(base_dir: Path, raw_path: str) -> Path:
-    expanded = os.path.expandvars(os.path.expanduser(str(raw_path or "").strip()))
-    path = Path(expanded)
-    if path.is_absolute():
-        return path
-    return (base_dir / path).resolve()
+    return corpus_manifest.resolve_path(base_dir, raw_path)
 
 
 def _resolve_fixture_root(
@@ -77,11 +83,7 @@ def _resolve_fixture_root(
     *,
     env_name: str = FIXTURE_ROOT_ENV,
 ) -> Path | None:
-    configured_root = str(raw_root or "").strip() or os.environ.get(env_name, "")
-    expanded = os.path.expandvars(os.path.expanduser(configured_root.strip()))
-    if not expanded:
-        return None
-    return Path(expanded)
+    return corpus_manifest.resolve_fixture_root(raw_root, env_name=env_name)
 
 
 def _fixture_relative_path(fixture: Path, fixture_root: Path | None) -> str | None:
@@ -101,6 +103,11 @@ def _fixture_record(fixture: Path, fixture_root: Path | None) -> dict[str, Any]:
     relative_path = _fixture_relative_path(fixture, fixture_root)
     if relative_path:
         payload["fixture_relative_path"] = relative_path
+    # Record the sample digest so later runs can detect a swapped/edited
+    # fixture instead of silently comparing metrics across different documents.
+    digest = corpus_manifest.fixture_digest(fixture)
+    if digest:
+        payload.update(digest)
     return payload
 
 
@@ -111,19 +118,12 @@ def _resolve_fixture_entry_path(
     fixture_root: Path | None,
     fixture_root_env: str | None = None,
 ) -> Path:
-    raw_path = str(entry.get("fixture") or "").strip()
-    baseline_path = _resolve_path(baseline_dir, raw_path) if raw_path else baseline_dir
-    relative_path = str(entry.get("fixture_relative_path") or "").strip()
-    resolved_root = fixture_root or _resolve_fixture_root(None, env_name=fixture_root_env or FIXTURE_ROOT_ENV)
-    if relative_path and resolved_root is not None:
-        candidate = (resolved_root / Path(relative_path)).resolve()
-        if candidate.exists() or not baseline_path.exists():
-            return candidate
-    if baseline_path.exists() or not raw_path:
-        return baseline_path
-    if resolved_root is not None:
-        return (resolved_root / Path(relative_path or raw_path).name).resolve()
-    return baseline_path
+    return corpus_manifest.resolve_fixture_entry_path(
+        entry,
+        baseline_dir=baseline_dir,
+        fixture_root=fixture_root,
+        fixture_root_env=fixture_root_env,
+    )
 
 
 def _detect_media_type(path: Path) -> str | None:
@@ -878,28 +878,53 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 def _cmd_check_suite(args: argparse.Namespace) -> int:
     suite_path = Path(args.suite)
-    suite_payload = json.loads(suite_path.read_text(encoding="utf-8"))
-    entries = list(suite_payload.get("entries") or [])
-    if not entries:
+    include_tags = tuple(str(tag).strip() for tag in (args.include_tags or []) if str(tag).strip())
+    report = corpus_manifest.validate_suite(
+        suite_path,
+        fixture_root=getattr(args, "fixture_root", None),
+        include_tags=include_tags,
+    )
+    totals = report.totals
+    print(
+        f"[suite][corpus] status={report.status}"
+        f" available={str(report.available).lower()}"
+        f" verified={str(report.verified).lower()}"
+        f" entries={totals['entries']}"
+        f" selected={totals['selected_entries']}"
+        f" verified_entries={totals['verified_entries']}"
+        f" missing={totals['missing_entries']}"
+        f" unavailable={totals['unavailable_entries']}"
+        f" empty={totals['empty_entries']}"
+        f" hash_drift={totals['hash_drift_entries']}"
+        f" error={totals['error_entries']}"
+        f" disabled={totals['disabled_entries']}"
+        f" skipped={totals['skipped_entries']}"
+        + (f" reason={report.reason}" if report.reason else "")
+    )
+    if totals["entries"] == 0:
         print(f"[suite] no entries in {suite_path}")
         return 1
 
-    include_tags = {tag.strip() for tag in (args.include_tags or []) if tag.strip()}
     failures: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
+    unverified: list[str] = []
+    checked = 0
+    for entry in report.entries:
+        if entry.disabled:
+            print(f"[suite][corpus] DISABLED: {entry.name}: {entry.reason}")
             continue
-        raw_baseline = str(entry.get("baseline") or "").strip()
-        if not raw_baseline:
+        if entry.skipped:
+            excluded = [tag for tag in entry.tags if tag in corpus_manifest.DEFAULT_EXCLUDED_TAGS]
+            print(f"[suite] SKIP ({', '.join(excluded) or 'tag'}): {entry.name}")
             continue
-        entry_tags = {str(t) for t in (entry.get("tags") or [])}
-        # Skip entries tagged "slow" unless explicitly included via --include-tag slow.
-        if "slow" in entry_tags and "slow" not in include_tags:
-            label = str(entry.get("name") or raw_baseline)
-            print(f"[suite] SKIP (slow): {label}")
+        label = entry.name
+        if entry.status not in corpus_manifest.RUNNABLE_STATUSES:
+            unverified.append(f"{label}: {entry.reason}")
+            print(f"[suite][corpus] UNVERIFIED: {label}: {entry.reason} - {entry.message}")
             continue
-        baseline_path = _resolve_path(suite_path.parent, raw_baseline)
-        label = str(entry.get("name") or baseline_path.name)
+        if entry.status == corpus_manifest.STATUS_HASH_DRIFT:
+            unverified.append(f"{label}: {entry.reason}")
+            print(f"[suite][corpus] HASH DRIFT: {label}: {entry.message}")
+        baseline_path = Path(entry.baseline_path or "")
         print(f"[suite] {label}: {baseline_path}")
         check_args = argparse.Namespace(
             config=args.config,
@@ -930,10 +955,25 @@ def _cmd_check_suite(args: argparse.Namespace) -> int:
         )
         if _cmd_check(check_args) != 0:
             failures.append(label)
+        else:
+            checked += 1
 
+    if unverified:
+        print(
+            f"[suite][corpus] CORPUS NOT VERIFIED: {report.reason}: {report.message}"
+            f" | unverified entries: {', '.join(unverified)}"
+        )
+        if getattr(args, "require_verified_corpus", False):
+            failures.append(f"corpus-not-verified ({len(unverified)} entry/entries)")
     if failures:
         print(f"[suite] FAILED: {', '.join(failures)}")
         return 1
+    if unverified:
+        print(
+            f"[suite] OK: {checked} baseline(s) passed; corpus NOT verified ({report.reason})"
+            " - rerun with --require-verified-corpus to fail instead"
+        )
+        return 0
     print("[suite] OK: all baselines passed")
     return 0
 
@@ -1077,13 +1117,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Include entries with this tag (default skips 'slow'-tagged entries)",
     )
+    check_suite.add_argument(
+        "--require-verified-corpus",
+        action="store_true",
+        dest="require_verified_corpus",
+        help=(
+            "Fail when the corpus manifest is not fully verified (missing baseline/"
+            "fixture, empty fixture set, or fixture hash drift). Release acceptance mode."
+        ),
+    )
     check_suite.set_defaults(func=_cmd_check_suite)
 
     return parser
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _build_parser().parse_args(list(argv) if argv is not None else None)
     return int(args.func(args))
 
 

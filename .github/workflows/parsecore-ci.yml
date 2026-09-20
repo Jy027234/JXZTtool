@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - master
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
   schedule:
@@ -30,43 +32,42 @@ jobs:
           python -m pip install -e ".[api,parsers,storage]"
       - name: Detect fast regression corpus
         id: fast-corpus
-        shell: python
         run: |
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path.cwd()
-          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
-          suite = root / "var" / "regression" / "suite.fast.json"
-          payload = json.loads(suite.read_text(encoding="utf-8"))
-          fixtures = []
-          for entry in payload.get("entries", []):
-              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
-              if not baseline.exists():
-                  continue
-              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
-              for item in baseline_payload.get("fixtures", []):
-                  relative = str(item.get("fixture_relative_path", "")).strip()
-                  raw = str(item.get("fixture", "")).strip()
-                  candidates = []
-                  if relative and fixture_root is not None:
-                      candidates.append(fixture_root / Path(relative))
-                  if raw:
-                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
-                  fixtures.append(any(candidate.exists() for candidate in candidates))
-
-          missing = sum(1 for available in fixtures if not available)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            handle.write(f"available={'false' if missing else 'true'}\n")
-          if missing:
-            print("::notice::Fast regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the sample PDFs to enable baseline checks.")
+          python tools/corpus_manifest.py \
+            --suite var/regression/suite.fast.json \
+            --github-output "$GITHUB_OUTPUT" \
+            --out "$RUNNER_TEMP/parsecore-corpus.fast.json"
+      - name: Record fast corpus status
+        run: |
+          {
+            echo "### Fast regression corpus: \`${{ steps.fast-corpus.outputs.status }}\`"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| available | \`${{ steps.fast-corpus.outputs.available }}\` |"
+            echo "| verified | \`${{ steps.fast-corpus.outputs.verified }}\` |"
+            echo "| reason | \`${{ steps.fast-corpus.outputs.reason }}\` |"
+            echo "| entries verified | ${{ steps.fast-corpus.outputs.verified_entries }} / ${{ steps.fast-corpus.outputs.selected_entries }} selected (${{ steps.fast-corpus.outputs.entry_count }} total) |"
+            echo "| missing entries / fixtures | ${{ steps.fast-corpus.outputs.missing_entries }} / ${{ steps.fast-corpus.outputs.missing_fixtures }} |"
+            echo "| empty / hash_drift / error entries | ${{ steps.fast-corpus.outputs.empty_entries }} / ${{ steps.fast-corpus.outputs.hash_drift_entries }} / ${{ steps.fast-corpus.outputs.error_entries }} |"
+            echo "| disabled / skipped entries | ${{ steps.fast-corpus.outputs.disabled_entries }} / ${{ steps.fast-corpus.outputs.skipped_entries }} |"
+            echo "| manifest | \`${{ runner.temp }}/parsecore-corpus.fast.json\` |"
+            echo ""
+            if [ "${{ steps.fast-corpus.outputs.available }}" != "true" ]; then
+              echo "**Verification status: UNVERIFIED.** The regression quality gate is NOT exercised on this runner; this fast run is a smoke check and cannot be used as release acceptance evidence."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.fast-corpus.outputs.available }}" != "true" ]; then
+            echo "::notice::Fast regression corpus unavailable (reason=${{ steps.fast-corpus.outputs.reason }}): ${{ steps.fast-corpus.outputs.summary }} - falling back to smoke; this run is recorded as UNVERIFIED."
+          fi
       - name: Run fast gate
         if: steps.fast-corpus.outputs.available == 'true'
         run: python tools/self_check.py --profile fast --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
-      - name: Run fast smoke fallback
+      - name: Run fast smoke fallback (unverified)
         if: steps.fast-corpus.outputs.available != 'true'
-        run: python tools/self_check.py --skip-regression --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
+        run: |
+          python tools/self_check.py --skip-regression --out "$RUNNER_TEMP/parsecore-self-check-fast.json"
+          echo "::warning::Fast lane ran in smoke mode: the regression quality gate was NOT exercised (corpus reason=${{ steps.fast-corpus.outputs.reason }}). Release acceptance requires --require-verified-corpus."
       - name: Verify optional API boundary
         run: python -m unittest tests.test_package_imports
 
@@ -87,43 +88,40 @@ jobs:
           python -m pip install -e ".[api,parsers,storage]"
       - name: Detect full regression corpus
         id: full-corpus
-        shell: python
         run: |
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path.cwd()
-          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
-          suite = root / "var" / "regression" / "suite.full.json"
-          payload = json.loads(suite.read_text(encoding="utf-8"))
-          fixtures = []
-          for entry in payload.get("entries", []):
-              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
-              if not baseline.exists():
-                  continue
-              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
-              for item in baseline_payload.get("fixtures", []):
-                  relative = str(item.get("fixture_relative_path", "")).strip()
-                  raw = str(item.get("fixture", "")).strip()
-                  candidates = []
-                  if relative and fixture_root is not None:
-                      candidates.append(fixture_root / Path(relative))
-                  if raw:
-                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
-                  fixtures.append(any(candidate.exists() for candidate in candidates))
-
-          missing = sum(1 for available in fixtures if not available)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            handle.write(f"available={'false' if missing else 'true'}\n")
-          if missing:
-            print("::notice::Full regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the sample PDFs to enable full baseline checks.")
+          python tools/corpus_manifest.py \
+            --suite var/regression/suite.full.json \
+            --github-output "$GITHUB_OUTPUT" \
+            --out "$RUNNER_TEMP/parsecore-corpus.full.json"
+      - name: Record full corpus status
+        run: |
+          {
+            echo "### Full regression corpus: \`${{ steps.full-corpus.outputs.status }}\`"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| available | \`${{ steps.full-corpus.outputs.available }}\` |"
+            echo "| verified | \`${{ steps.full-corpus.outputs.verified }}\` |"
+            echo "| reason | \`${{ steps.full-corpus.outputs.reason }}\` |"
+            echo "| entries verified | ${{ steps.full-corpus.outputs.verified_entries }} / ${{ steps.full-corpus.outputs.selected_entries }} selected (${{ steps.full-corpus.outputs.entry_count }} total) |"
+            echo "| missing entries / fixtures | ${{ steps.full-corpus.outputs.missing_entries }} / ${{ steps.full-corpus.outputs.missing_fixtures }} |"
+            echo "| empty / hash_drift / error entries | ${{ steps.full-corpus.outputs.empty_entries }} / ${{ steps.full-corpus.outputs.hash_drift_entries }} / ${{ steps.full-corpus.outputs.error_entries }} |"
+            echo "| disabled / skipped entries | ${{ steps.full-corpus.outputs.disabled_entries }} / ${{ steps.full-corpus.outputs.skipped_entries }} |"
+            echo "| manifest | \`${{ runner.temp }}/parsecore-corpus.full.json\` |"
+            echo ""
+            if [ "${{ steps.full-corpus.outputs.available }}" != "true" ]; then
+              echo "**Verification status: UNVERIFIED.** The full regression gate is skipped on this runner."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.full-corpus.outputs.available }}" != "true" ]; then
+            echo "::notice::Full regression corpus unavailable (reason=${{ steps.full-corpus.outputs.reason }}): ${{ steps.full-corpus.outputs.summary }} - full gate skipped and recorded as UNVERIFIED."
+          fi
       - name: Run full gate
         if: steps.full-corpus.outputs.available == 'true'
         run: python tools/self_check.py --profile slow --out "$RUNNER_TEMP/parsecore-self-check-full.json"
-      - name: Skip full gate
+      - name: Skip full gate (unverified)
         if: steps.full-corpus.outputs.available != 'true'
-        run: echo "Full regression corpus unavailable on this runner; skipped."
+        run: echo "Full regression corpus unavailable (reason=${{ steps.full-corpus.outputs.reason }}); skipped and recorded as UNVERIFIED in the job summary."
 
   performance:
     name: Performance tracking
@@ -142,37 +140,34 @@ jobs:
           python -m pip install -e ".[api,parsers,storage]"
       - name: Detect performance regression corpus
         id: perf-corpus
-        shell: python
         run: |
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path.cwd()
-          fixture_root = Path(os.environ["PARSECORE_REGRESSION_FIXTURE_ROOT"]).expanduser() if os.environ.get("PARSECORE_REGRESSION_FIXTURE_ROOT") else None
-          suite = root / "var" / "regression" / "suite.perf.json"
-          payload = json.loads(suite.read_text(encoding="utf-8"))
-          fixtures = []
-          for entry in payload.get("entries", []):
-              baseline = root / "var" / "regression" / str(entry.get("baseline", ""))
-              if not baseline.exists():
-                  continue
-              baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
-              for item in baseline_payload.get("fixtures", []):
-                  relative = str(item.get("fixture_relative_path", "")).strip()
-                  raw = str(item.get("fixture", "")).strip()
-                  candidates = []
-                  if relative and fixture_root is not None:
-                      candidates.append(fixture_root / Path(relative))
-                  if raw:
-                      candidates.append(Path(os.path.expandvars(os.path.expanduser(raw))))
-                  fixtures.append(any(candidate.exists() for candidate in candidates))
-
-          missing = sum(1 for available in fixtures if not available)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            handle.write(f"available={'false' if missing else 'true'}\n")
-          if missing:
-            print("::notice::Performance regression corpus unavailable on this runner; set PARSECORE_REGRESSION_FIXTURE_ROOT or provision the heavy sample PDFs to enable perf tracking.")
+          python tools/corpus_manifest.py \
+            --suite var/regression/suite.perf.json \
+            --github-output "$GITHUB_OUTPUT" \
+            --out "$RUNNER_TEMP/parsecore-corpus.perf.json"
+      - name: Record perf corpus status
+        run: |
+          {
+            echo "### Performance regression corpus: \`${{ steps.perf-corpus.outputs.status }}\`"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| available | \`${{ steps.perf-corpus.outputs.available }}\` |"
+            echo "| verified | \`${{ steps.perf-corpus.outputs.verified }}\` |"
+            echo "| reason | \`${{ steps.perf-corpus.outputs.reason }}\` |"
+            echo "| entries verified | ${{ steps.perf-corpus.outputs.verified_entries }} / ${{ steps.perf-corpus.outputs.selected_entries }} selected (${{ steps.perf-corpus.outputs.entry_count }} total) |"
+            echo "| missing entries / fixtures | ${{ steps.perf-corpus.outputs.missing_entries }} / ${{ steps.perf-corpus.outputs.missing_fixtures }} |"
+            echo "| empty / hash_drift / error entries | ${{ steps.perf-corpus.outputs.empty_entries }} / ${{ steps.perf-corpus.outputs.hash_drift_entries }} / ${{ steps.perf-corpus.outputs.error_entries }} |"
+            echo "| disabled / skipped entries | ${{ steps.perf-corpus.outputs.disabled_entries }} / ${{ steps.perf-corpus.outputs.skipped_entries }} |"
+            echo "| manifest | \`${{ runner.temp }}/parsecore-corpus.perf.json\` |"
+            echo ""
+            if [ "${{ steps.perf-corpus.outputs.available }}" != "true" ]; then
+              echo "**Verification status: UNVERIFIED.** Performance tracking is skipped on this runner."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.perf-corpus.outputs.available }}" != "true" ]; then
+            echo "::notice::Performance regression corpus unavailable (reason=${{ steps.perf-corpus.outputs.reason }}): ${{ steps.perf-corpus.outputs.summary }} - perf tracking skipped and recorded as UNVERIFIED."
+          fi
       - name: Resolve perf history paths
         id: perf-history
         if: steps.perf-corpus.outputs.available == 'true'
@@ -259,9 +254,66 @@ jobs:
           shutil.copy2(source, snapshot)
           print(f"::notice::Persisted perf report to {target}")
           print(f"::notice::Archived perf snapshot to {snapshot}")
-      - name: Skip perf gate
+      - name: Skip perf gate (unverified)
         if: steps.perf-corpus.outputs.available != 'true'
-        run: echo "Performance regression corpus unavailable on this runner; skipped."
+        run: echo "Performance regression corpus unavailable (reason=${{ steps.perf-corpus.outputs.reason }}); skipped and recorded as UNVERIFIED in the job summary."
+
+  release:
+    name: Release acceptance gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,parsers,storage]"
+      - name: Require a verified regression corpus
+        id: release-corpus
+        run: |
+          python tools/corpus_manifest.py \
+            --suite var/regression/suite.full.json \
+            --require-verified \
+            --github-output "$GITHUB_OUTPUT" \
+            --out "$RUNNER_TEMP/parsecore-corpus.release.json" \
+            --verbose
+      - name: Record release corpus status
+        if: always()
+        run: |
+          {
+            echo "### Release corpus: \`${{ steps.release-corpus.outputs.status }}\`"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| verified | \`${{ steps.release-corpus.outputs.verified }}\` |"
+            echo "| reason | \`${{ steps.release-corpus.outputs.reason }}\` |"
+            echo "| entries verified | ${{ steps.release-corpus.outputs.verified_entries }} / ${{ steps.release-corpus.outputs.selected_entries }} selected |"
+            echo "| missing fixtures | ${{ steps.release-corpus.outputs.missing_fixtures }} |"
+            echo "| hash_drift entries | ${{ steps.release-corpus.outputs.hash_drift_entries }} |"
+            echo "| manifest | \`${{ runner.temp }}/parsecore-corpus.release.json\` |"
+            echo ""
+            echo "A release may only be published when the corpus is VERIFIED and the release self-check below exits 0."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run release self-check
+        run: |
+          python tools/self_check.py \
+            --profile slow \
+            --require-verified-corpus \
+            --out "$RUNNER_TEMP/parsecore-self-check-release.json"
+      - name: Upload release acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parsecore-release-acceptance
+          path: |
+            ${{ runner.temp }}/parsecore-self-check-release.json
+            ${{ runner.temp }}/parsecore-corpus.release.json
+          if-no-files-found: warn
 
   postgres-pgvector:
     name: Postgres and pgvector smoke

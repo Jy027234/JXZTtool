@@ -189,7 +189,9 @@
 - 验收：迁移前后文档计数、哈希、检索与导出一致；演练报告列明恢复点、恢复时间及无法恢复的既有历史数据；P0 三个核心故障探针全部通过新约束。
 - 依赖：P0-03～04。
 
-#### [ ] P0-06 修复 CI 样本探测并建立真正的发布门禁（中）
+#### [~] P0-06 修复 CI 样本探测并建立真正的发布门禁（中）
+
+状态：**前半已实施（2026-09-20）**（复用 corpus 校验 + 发布验收状态区分）；"可随仓库分发的最小脱敏核心样本"与"最终门禁纳入 P0-05 故障回归"仍待实施。
 
 - 修改位置：`.github/workflows/parsecore-ci.yml`、`tools/self_check.py`、`tools/regression_baseline.py`、`var/regression`。
 - 抽取复用的 corpus manifest 校验，统一正确处理 disabled、空 baseline、非文件路径、缺样本、空 fixture 集和哈希漂移；修复当前 full 探测目录读取错误，避免 fast/full/perf 三段复制逻辑漂移。
@@ -197,6 +199,15 @@
 - 建立可随仓库分发的最小脱敏核心样本；受限真实样本用内部工件存储按 manifest 拉取。补齐当前缺失 perf 样本或有依据地更新基线，不把删除难样本当通过。
 - 验收：刻意移除核心样本、使 suite 为空或 baseline 路径错误时 release 非零退出；合法 disabled 不触发目录读取；发布报告记录 commit、配置、样本哈希、实际运行/跳过数与报告路径。
 - 依赖：样本盘点可立即开始；最终门禁纳入 P0-05 故障回归。
+
+实施说明：
+
+- 新增 `tools/corpus_manifest.py` 作为唯一一份 suite → baseline → fixture 解析/校验实现与 CLI；CI 中三段重复的内联 Python 探测改为调用同一命令（保留旧的 `available=` 输出，新增 `verified` / `status` / `reason` / 各类计数与报告路径）。
+- `tools/self_check.py` 新增 `corpus_manifest` 检查与 `verification` 报告块（含 commit、配置指纹、样本哈希、实际运行/跳过数、报告路径），以及 `--require-verified-corpus` 发布验收模式；`--skip-regression` 现在写入显式 `regression_suite` 检查（`status=skipped`、`reason=regression_skipped_by_flag`），不再静默降级。
+- 新增独立 `release` job；fast lane 语义不变（PR 仍是轻量门禁），但 smoke fallback 打印 UNVERIFIED 警告并写入 job summary。
+- 实测：fast **3/3** 条目 verified；full **5/5** verified 且 **3 个 disabled 条目**被正确跳过（其空/目录 baseline 不再被读取，即原先 Windows `PermissionError` 的场景）；perf **1/2**，缺 `sample-27-81-17.pdf`。既有 baseline 未记录哈希 → `hash_unrecorded_fixtures` 为非阻塞 warning，`save` 起开始记录哈希。
+- 发布门禁实测非零退出（`EXIT=1`，`reason=regression_suite_failed`），并把既有真实回归如实暴露：`numeric_heavy_total +38`、`suspected_header_footer_total +39`、`total_blocks +6.88%`、`heading_body_binding_rate -0.0909`。未修改任何 baseline 或阈值，未删除/禁用难样本。
+- 未完成：可随仓库分发的最小脱敏核心样本；perf 缺样本补齐；P0-05 故障回归纳入发布门禁。
 
 #### [ ] P0-07 明确宿主身份与租户边界（条件前置，中）
 
