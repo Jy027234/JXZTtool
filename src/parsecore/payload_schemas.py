@@ -757,6 +757,42 @@ def _local_provider_route_request_schema() -> dict[str, Any]:
     }
 
 
+def _publication_read_context_schema() -> dict[str, Any]:
+    """Which run a projection served (P0-03 batch 2).
+
+    ``pinned`` distinguishes a published formal version from the legacy
+    latest-job view, and ``latest_job_used_as_formal_version`` is a constant
+    ``false`` so a consumer can assert the distinction instead of trusting it.
+    """
+
+    return {
+        "type": "object",
+        "required": [
+            "schema_version",
+            "served_run_id",
+            "run_identity",
+            "pinned",
+            "publication_status",
+            "publication_generation",
+            "consumer_signal",
+            "latest_job_used_as_formal_version",
+        ],
+        "properties": {
+            "schema_version": _string_schema(),
+            "served_run_id": _string_schema(nullable=True),
+            "run_identity": _string_schema(nullable=True),
+            "pinned": _boolean_schema(),
+            "publication_status": {"enum": [state.value for state in PublicationStatus]},
+            "publication_generation": _integer_schema(),
+            "consumer_signal": {
+                "enum": ["published", "not_ready", "preview_only", "withdrawn"]
+            },
+            "latest_job_used_as_formal_version": {"const": False},
+        },
+        "additionalProperties": True,
+    }
+
+
 def _local_provider_routing_decision_schema(*, nullable: bool = False) -> dict[str, Any]:
     schema = {
         "type": "object",
@@ -1640,9 +1676,11 @@ def _coverage_document_schema() -> dict[str, Any]:
             "index_manifest",
             "local_provider_routing",
             "quality_gate",
+                    "publication",
         ],
         "properties": {
             "schema_version": {"const": COVERAGE_SCHEMA_VERSION},
+            "publication": _publication_read_context_schema(),
             "projection": {"const": "coverage"},
             "doc_id": _string_schema(),
             "parse_run_id": _string_schema(),
@@ -2078,9 +2116,11 @@ def _ir_schema() -> dict[str, Any]:
             "ocr_decision_trace",
             "index_manifest",
             "quality_gate",
+                    "publication",
         ],
         "properties": {
             "schema_version": {"const": IR_SCHEMA_VERSION},
+            "publication": _publication_read_context_schema(),
             "projection": {"const": "ir"},
             "doc_id": _string_schema(),
             "parse_run_id": _string_schema(),
@@ -2167,9 +2207,11 @@ def _reader_schema() -> dict[str, Any]:
             "quality_gate",
             "rag_coverage_quality",
             "index_manifest",
+                    "publication",
         ],
         "properties": {
             "schema_version": {"const": READER_SCHEMA_VERSION},
+            "publication": _publication_read_context_schema(),
             "projection": {"const": "reader"},
             "doc_id": _string_schema(),
             "parse_run_id": _string_schema(),

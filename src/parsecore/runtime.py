@@ -814,6 +814,30 @@ class ParseRuntime:
             payload["validation_report"] = report.as_payload()
         return payload
 
+    def publication_read_context(
+        self, *, doc_id: str, tenant_id: str | None = None
+    ) -> dict[str, Any]:
+        """Which run a formal read serves for this document (P0-03 batch 2).
+
+        ``run_identity`` is the run a read is pinned to: the published run when
+        one exists.  ``pinned`` distinguishes "this read is a published formal
+        version" from "this read is the legacy latest-job view", which is what
+        P0-04's acceptance requires every projection to state consistently.
+        """
+
+        state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        active_run_id = state.get("active_run_id")
+        return {
+            "schema_version": "2026-09-publication-read-context-v1",
+            "served_run_id": active_run_id,
+            "run_identity": active_run_id,
+            "pinned": bool(active_run_id),
+            "publication_status": str(state.get("publication_status") or "unpublished"),
+            "publication_generation": int(state.get("publication_generation") or 0),
+            "consumer_signal": str(state.get("consumer_signal") or "not_ready"),
+            "latest_job_used_as_formal_version": False,
+        }
+
     def _validation_options(self) -> dict[str, Any]:
         """Thresholds the shared validation rules should use.
 
@@ -1686,6 +1710,11 @@ class ParseRuntime:
             "partition_parts": partition_parts,
             "provider_registry": self.provider_registry(),
             "quality_gate": self.quality_gate_config(),
+            # P0-03 batch 2: every projection of this snapshot reports which run
+            # the read served, so a consumer can verify agreement.
+            "publication": self.publication_read_context(
+                doc_id=doc_id, tenant_id=normalized_tenant
+            ),
         }
 
     def get_document_records_projection(

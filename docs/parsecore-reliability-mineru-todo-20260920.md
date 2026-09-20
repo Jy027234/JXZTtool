@@ -167,7 +167,13 @@
 - 新增 `src/parsecore/run_store.py`：staged 产物表 + `parse_runs` / `document_publication` / `publication_events`；`begin_run → save_run_artifacts → seal_run → record_validation → publish_run`，发布事务以 `BEGIN IMMEDIATE` 原子完成状态、策略、claim、源版本、世代、清单校验与 active 指针切换。
 - 发布事务内从 staged 重写活层（blocks/chunks/document_views），因此**既有读路径无需改动**；`blocks`/`chunks` 增加 `run_id`（旧行回填 `legacy`）用于审计。
 - 新增只读端点 `/v1/parse/documents/{doc_id}/publication`；未发布时返回明确 `not_ready`，`/health` 与 `/v1/runtime` 的 `run_publication` 能力项说明当前后端能否原子发布。
-- 未完成（第 2 批）：索引三层与素材/manifest 的 run 隔离、Reader/Records/RAG/Export 正式读路径固定 run、full/parent-part/rechunk/reembed 派生 run 的接入、通知异步派发消费端、真实 Postgres/pgvector 验收、旧数据回填脚本。
+
+第 2 批已部分落地：
+
+- **读取身份一致性**：`runtime.publication_read_context()` 随快照传给全部六个投影（`compat`/`structured`/`full`/`ir`/`coverage`/`reader`），新增 `publication` 块；同一快照的所有投影与 HTTP 面的 `served_run_id` 一致，`latest_job_used_as_formal_version` 恒为 `false`。未发布时 `consumer_signal = not_ready`、`pinned = false`。
+- **通知派发消费端**：`dispatch_pending_publication_events()` 与 `parsecore dispatch-publication-events`（`--sink stdout|http`），先投递后标记，失败保持 pending。
+- **旧数据回填**：`parsecore import-legacy-snapshots`（默认 dry-run），导入 run 带 `validation_status = not_run` 且只能走受限发布路径。
+- 仍未完成：**索引三层与素材/manifest 的 run 隔离**（`PgVectorIndex` 不能按 run 过滤，因此不参加严格发布）、**把读取硬性限制为必须有已发布 run**（当前是如实声明而非强制固定）、rechunk/reembed 的正式派生 run、真实 Postgres/pgvector 验收与生产数据演练。
 
 #### [x] P0-04 将质量规则接入发布准入（中）
 

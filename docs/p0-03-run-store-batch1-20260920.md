@@ -109,15 +109,33 @@ Ran 770 tests / OK (skipped=6)
 
 ## 6. 本批未完成（第 2 批范围）
 
-1. **索引三层与素材/manifest 的 run 隔离**：`PgVectorIndex` 尚不能按 run 过滤，因此 `rag` profile 在非持久索引下不可发布已由 policy 拦住，但索引本身还没有 run 维度。
-2. **正式读路径固定 run**：Reader/Records/RAG/Export 目前读活层，等价于"读当前 active run"，但还没有携带 run 的分页游标与导出任务。
-3. **派生 run**：full / parent-part / rechunk / reembed 尚未接入 `base_run_id` 复用不可变基础快照。
-4. ~~**通知异步派发消费端**：outbox 写入与 `pending_publication_events()` / `mark_publication_event_dispatched()` 已就绪，尚无后台派发器。~~ **已完成（P0-05）**：`dispatch_pending_publication_events()` 与 `parsecore dispatch-publication-events`（`--sink stdout|http`），先投递后标记，失败保持 pending 并记录 `publication_event_dispatch_failed`；`publication_outbox` 已计入 SQLite 能力声明。
+第 2 批已部分落地（2026-09-20，同一报告续写）：
+
+| 原未完成项 | 现状 |
+| --- | --- |
+| 正式读路径固定 run | **部分完成**：`runtime.publication_read_context()` 把"本次读取服务了哪个 run"随快照传给所有投影，`compat`/`structured`/`full`/`ir`/`coverage`/`reader` 六个投影都带 `publication` 块（`pinned` / `served_run_id` / `consumer_signal` / `latest_job_used_as_formal_version` 恒为 false）。HTTP 面 `GET /documents/{id}`、`?projection=reader`、`/coverage` 与 `/publication` 的 `served_run_id` 一致。**尚未**把读取硬性限制为"必须有已发布 run"——嵌入式流程默认不发布，硬限制会破坏所有既有读取，因此当前是"如实声明"而不是"强制固定"。 |
+| 通知异步派发消费端 | **已完成**，见第 7 节。 |
+| 索引三层与素材/manifest 的 run 隔离 | 未完成。`PgVectorIndex` 仍不能按 run 过滤，因此 `publication_outbox` 之外的索引能力未计入 `SQLiteRunStore` 能力声明。 |
+| 派生 run（full / parent-part / rechunk / reembed） | 部分完成：`begin_run(base_run_id=...)` 与 `publish_run` 支持派生关系，租约恢复路径已使用；rechunk/reembed 的正式派生 run 尚未接入。 |
+| 真实 Postgres/pgvector 验收、旧数据回填脚本 | 回填脚本已完成（P0-05，`import-legacy-snapshots`）；Postgres 验收未完成。 |
+
+新增测试：`tests/test_publication_read_identity.py`（6 项），断言未发布时 `served_run_id` 为空且 `consumer_signal = not_ready`、发布后为已发布 run、六个投影一致、HTTP 面一致、新发布切换服务身份。
+
+## 7. 通知派发（P0-05 收口）
+
+`SQLiteRunStore.dispatch_pending_publication_events(handler)` 与 `parsecore dispatch-publication-events`：先投递后标记，失败保持 pending 并记录 `publication_event_dispatch_failed`；`publication_outbox` 已计入能力声明。详见 [docs/p0-05-fault-regression-20260920.md](p0-05-fault-regression-20260920.md) 第 6 节。
+
+## 8. 仍未完成
+
+1. **索引三层与素材/manifest 的 run 隔离**：`PgVectorIndex` 尚不能按 run 过滤，因此该实现不能参加严格发布（能力声明已如实反映）。
+2. **读取硬性固定 run**：见第 6 节；当前只保证身份一致与可声明。
+3. **派生 run 的完整接入**：rechunk / reembed 的正式派生 run。
+4. **真实 Postgres/pgvector 验收**与**生产数据回填演练**。
 5. **真实 Postgres/pgvector 验收**与**旧数据回填脚本**：见 ADR 第 8 节设计。
 
 在这些完成之前，不应宣称已经保证端到端原子交付。
 
-## 7. 回滚
+## 9. 回滚
 
 - 代码回滚：`git revert` 本批次提交；`run_id` 列与 run 表为增量，旧程序不读它们。
 - 运行期回滚：`runtime.run_publication_enabled = false` 即回到本批次之前的行为，`/publication` 端点报 `not_ready` 并说明原因。

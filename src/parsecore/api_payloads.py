@@ -252,6 +252,29 @@ def build_document_publication_payload(
     return payload
 
 
+def _publication_read_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Which run this projection served, and whether it is a formal version.
+
+    Passed in by the runtime so every projection of the same snapshot reports the
+    same identity; a projection can then be checked for agreement instead of
+    being trusted.
+    """
+
+    context = snapshot.get("publication")
+    if isinstance(context, Mapping):
+        return dict(context)
+    return {
+        "schema_version": "2026-09-publication-read-context-v1",
+        "served_run_id": None,
+        "run_identity": None,
+        "pinned": False,
+        "publication_status": "unpublished",
+        "publication_generation": 0,
+        "consumer_signal": "not_ready",
+        "latest_job_used_as_formal_version": False,
+    }
+
+
 def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") -> dict[str, Any]:
     normalized_projection = str(projection or "full").strip().lower()
     if normalized_projection not in {"compat", "structured", "full", "ir", "coverage", "reader"}:
@@ -273,6 +296,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
             "schema_version": PAYLOAD_SCHEMA_VERSION,
             "projection": "compat",
             "doc_id": doc_id,
+            "publication": _publication_read_context(snapshot),
             "job": _to_payload(job),
             "total_pages": len(pages),
             "pages": pages,
@@ -349,7 +373,10 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
             pages=pages,
         )
         if normalized_projection == "reader":
-            return _document_reader_projection(ir_payload)
+            reader_payload = _document_reader_projection(ir_payload)
+            reader_payload["publication"] = _publication_read_context(snapshot)
+            return reader_payload
+        ir_payload["publication"] = _publication_read_context(snapshot)
         return ir_payload
     if normalized_projection == "coverage":
         coverage_payload = build_coverage_projection(
@@ -385,6 +412,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
             parse_units=parse_units,
             pages=pages,
         )
+        coverage_payload["publication"] = _publication_read_context(snapshot)
         return coverage_payload
 
     coverage_payload = build_coverage_projection(
@@ -424,6 +452,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
         "projection": normalized_projection,
         "doc_id": doc_id,
         "parse_run_id": parse_run_id,
+        "publication": _publication_read_context(snapshot),
         "profile": profile,
         "profile_resolution": profile_resolution,
         "local_provider_routing": local_provider_routing,

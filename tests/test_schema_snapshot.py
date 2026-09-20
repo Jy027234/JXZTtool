@@ -47,6 +47,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "index_manifest",
             "local_provider_routing",
             "quality_gate",
+                    "publication",
         ],
         "properties": [
             "schema_version",
@@ -64,6 +65,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "index_manifest",
             "local_provider_routing",
             "quality_gate",
+                    "publication",
         ],
     },
     "document-ir": {
@@ -98,6 +100,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "ocr_decision_trace",
             "index_manifest",
             "quality_gate",
+                    "publication",
         ],
         "properties": [
             "schema_version",
@@ -127,6 +130,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "ocr_decision_trace",
             "index_manifest",
             "quality_gate",
+                    "publication",
         ],
     },
     "document-parts": {
@@ -272,6 +276,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "quality_gate",
             "rag_coverage_quality",
             "index_manifest",
+                    "publication",
         ],
         "properties": [
             "schema_version",
@@ -291,6 +296,7 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "quality_gate",
             "rag_coverage_quality",
             "index_manifest",
+                    "publication",
         ],
     },
 }
