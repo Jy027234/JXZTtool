@@ -30,7 +30,7 @@ from parsecore.config import (  # noqa: E402
     local_provider_route_plan_payload,
 )
 from parsecore.models import Block, BlockType, ParseJob, ParseJobState, ParseRequest  # noqa: E402
-from parsecore.parsers import build_parser  # noqa: E402
+from parsecore.parsers import build_parser, build_parser_or_placeholder  # noqa: E402
 from parsecore.pdf_parts import create_pdf_part_file  # noqa: E402
 from parsecore.provider_failures import classify_provider_failure  # noqa: E402
 from parsecore.stubs import FakeEmbeddingProvider, ParagraphChunkBuilder  # noqa: E402
@@ -770,7 +770,13 @@ def _run_provider(
         }
     parser = parser_cache.get(provider_id) if parser_cache is not None else None
     if parser is None:
-        parser = build_parser(
+        # P0-01: placeholders are only used when the evaluated config explicitly
+        # opted in through project.allow_placeholder_parsers.
+        parser = (
+            build_parser_or_placeholder
+            if bool(getattr(settings, "allow_placeholder_parsers", False))
+            else build_parser
+        )(
             parser_config.name,
             media_types=parser_config.media_types,
             extensions=parser_config.extensions,

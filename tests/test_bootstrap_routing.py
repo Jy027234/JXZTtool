@@ -155,6 +155,11 @@ class BootstrapRoutingTests(unittest.TestCase):
                 (ROOT / "parsecore.toml")
                 .read_text(encoding="utf-8")
                 .replace('database_url = "sqlite:///./var/parsecore.db"', 'database_url = "memory://"')
+                # P0-01: mock providers require an explicit opt-in.
+                .replace(
+                    "allow_mock_providers = false",
+                    "allow_mock_providers = true",
+                )
                 .replace(
                     '[providers.rerank]\nenabled = false\nprovider = "dashscope-compatible"',
                     '[providers.rerank]\nenabled = true\nprovider = "fake"',

@@ -1,6 +1,16 @@
 [project]
 name = "parsecore-starter"
 mode = "embedded-sdk"
+# P0-01 capability strictness. "strict" (default) rejects unknown parser,
+# index, or provider names, mock providers, and placeholder parsers at startup.
+# Set "lenient" only for a host that must load a legacy config; ParseCore still
+# reports the resulting placeholder/degraded state through /health.
+strictness = "strict"
+# Development escape hatch: an unknown [[parsers]] name is served by a
+# placeholder parser instead of being rejected. Placeholder results are flagged
+# in the job, the outcome and the API payload, and /health reports
+# formal_parse_ready = false.
+allow_placeholder_parsers = false
 
 [runtime]
 execution_mode = "inline"
@@ -13,6 +23,13 @@ part_timeout_seconds = 0
 retry_backoff_seconds = 1.0
 retry_backoff_max_seconds = 60.0
 poll_interval_ms = 500
+# Mock providers (provider = "fake"/"test"/"stub") produce non-production
+# results and are rejected unless this is true. Never enable it in production.
+allow_mock_providers = false
+# Capabilities that may degrade without blocking delivery. rerank, ocr and index
+# are optional by default; embedding and llm follow whether they are enabled.
+# Example: capability_optional = ["embedding", "parser:docx-native"]
+# capability_optional = []
 # Optional API ingress auth. When enabled, every HTTP endpoint except /health
 # requires x-api-key or Authorization: Bearer with the secret from this env var.
 # api_key_env = "PARSECORE_API_KEY"

@@ -81,7 +81,7 @@ def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
     output_qs = evaluate_projected_parse_quality(pages)
     ocr_trace = build_ocr_decision_trace(outcome.blocks)
     trace_payload = ocr_decision_trace_payload(ocr_trace)
-    return {
+    payload = {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "success": True,
         "total_pages": len(pages),
@@ -92,6 +92,27 @@ def _batch_success_response(outcome: ParseOutcome) -> dict[str, Any]:
         "output_quality": _quality_payload(output_qs),
         "ocr_decision_trace": trace_payload,
         "error": None,
+    }
+    _attach_placeholder_result(payload, outcome)
+    return payload
+
+
+def _attach_placeholder_result(payload: dict[str, Any], outcome: ParseOutcome) -> None:
+    """P0-01: expose a placeholder result so callers cannot treat it as formal.
+
+    The parse request still succeeds, but the response says explicitly that the
+    content is a placeholder and must not be published or indexed as a formal
+    result.
+    """
+
+    note = getattr(outcome, "placeholder_result", None)
+    if not isinstance(note, dict) or not note:
+        return
+    payload["placeholder_result"] = {
+        "placeholder_parser": str(note.get("placeholder_parser") or ""),
+        "result_grade": str(note.get("result_grade") or "placeholder"),
+        "formal_result": False,
+        "error_code": str(note.get("error_code") or "placeholder_parsers_not_allowed"),
     }
 
 
@@ -128,7 +149,7 @@ def _parse_success_response(
     fidelity_profile = _read_first_metadata(outcome.blocks, "fidelity_profile")
     if fidelity_profile:
         metadata["fidelity_profile"] = fidelity_profile
-    return {
+    payload = {
         "file_name": file_name,
         "mime_type": mime_type or "application/octet-stream",
         "total_pages": len(pages),
@@ -138,6 +159,8 @@ def _parse_success_response(
         "raw_quality": _quality_payload(raw_qs),
         "output_quality": _quality_payload(output_qs),
     }
+    _attach_placeholder_result(payload, outcome)
+    return payload
 
 
 def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") -> dict[str, Any]:

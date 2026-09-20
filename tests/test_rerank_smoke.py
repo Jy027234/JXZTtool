@@ -46,9 +46,16 @@ class RerankSmokeTests(unittest.TestCase):
             root = Path(tmp)
             config = root / "fake-rerank.toml"
             config.write_text(
-                ALIYUN_PROFILE.read_text(encoding="utf-8").replace(
+                ALIYUN_PROFILE.read_text(encoding="utf-8")
+                .replace(
                     'provider = "dashscope-compatible"',
                     'provider = "fake"',
+                )
+                # P0-01: mock providers are rejected unless the deployment
+                # explicitly acknowledges that it is not serving formal results.
+                .replace(
+                    "[runtime]",
+                    "[runtime]\nallow_mock_providers = true",
                 ),
                 encoding="utf-8",
             )

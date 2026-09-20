@@ -12,6 +12,11 @@ part_timeout_seconds = 0
 retry_backoff_seconds = 1.0
 retry_backoff_max_seconds = 60.0
 poll_interval_ms = 500
+
+# P0-01: `provider = "fake"` below is a mock embedding provider. Integration
+# profiles must acknowledge that this deployment does not serve formal results,
+# which /health reports as mock_capabilities = ["embedding"].
+allow_mock_providers = true
 # Gray-release default: reject files above 50 MiB before parser execution.
 max_upload_bytes = 52428800
 # Optional guard for /parse/uploads and /v1/parse/uploads; 0 keeps the async bridge open for large files.

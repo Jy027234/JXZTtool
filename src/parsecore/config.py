@@ -7,6 +7,8 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 import tomllib
 
+from .capabilities import validate_capability_configuration
+
 
 _EMPTY_MAPPING: Mapping[str, Any] = MappingProxyType({})
 
@@ -59,6 +61,10 @@ class RuntimeSettings:
     log_path: str = "var/logs/job_events.jsonl"
     api_key_env: str = ""
     staged_upload_api_key_env: str = ""
+    # P0-01: explicit opt-in for mock providers (``fake``/``test``/``stub``).
+    # They produce non-production results, so they are rejected unless the
+    # deployment states that it is not serving formal results.
+    allow_mock_providers: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -185,6 +191,18 @@ class ParseCoreSettings:
     )
     index_embedding_dimension: int = 1536
     quality_gate: QualityGateSettings = field(default_factory=QualityGateSettings)
+    # P0-01: ``strict`` rejects unknown parser/index/provider names, mock
+    # providers and placeholder parsers at startup.  ``lenient`` keeps loading
+    # legacy configs but still reports the resulting placeholder/degraded state.
+    strictness: str = "strict"
+    # P0-01: development escape hatch.  When true an unknown ``[[parsers]]`` name
+    # is served by an explicitly reported placeholder parser instead of being
+    # rejected; placeholder results are never claimed as formal results.
+    allow_placeholder_parsers: bool = False
+    # P0-01: capability names that may degrade without blocking delivery.
+    # ``rerank`` and ``ocr`` are optional by default; every other enabled
+    # capability is required.
+    capability_optional: tuple[str, ...] = ()
 
 
 def _as_tuple(value: Any) -> tuple[str, ...]:
@@ -589,6 +607,10 @@ def _normalize_product_adapter(value: Any) -> str:
     return "embedded"
 
 
+def _normalize_strictness(value: Any) -> str:
+    return str(value or "").strip().lower() or "strict"
+
+
 def load_settings(path: str | Path) -> ParseCoreSettings:
     config_path = Path(path)
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -703,7 +725,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
         or configured_database_url
     )
 
-    return ParseCoreSettings(
+    settings = ParseCoreSettings(
         project_name=str(project.get("name", "parsecore")),
         mode=str(project.get("mode", "embedded-sdk")),
         database_url=database_url,
@@ -740,6 +762,7 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             log_path=str(runtime.get("log_path", "var/logs/job_events.jsonl")),
             api_key_env=str(runtime.get("api_key_env", "")),
             staged_upload_api_key_env=str(runtime.get("staged_upload_api_key_env", "")),
+            allow_mock_providers=bool(runtime.get("allow_mock_providers", False)),
         ),
         parsers=parser_settings,
         profiles=profiles,
@@ -764,4 +787,11 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             allow_local_rerun=bool(quality_gate_raw.get("allow_local_rerun", True)),
             allow_manual_review=bool(quality_gate_raw.get("allow_manual_review", True)),
         ),
+        strictness=_normalize_strictness(project.get("strictness", "strict")),
+        allow_placeholder_parsers=bool(project.get("allow_placeholder_parsers", False)),
+        capability_optional=_as_tuple(runtime.get("capability_optional")),
     )
+    # P0-01: a config that no real implementation can serve must fail at load
+    # time instead of silently degrading to a stub parser or in-memory index.
+    validate_capability_configuration(settings)
+    return settings

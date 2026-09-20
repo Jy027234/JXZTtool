@@ -64,10 +64,12 @@ class ApiRoutes:
         api_version: str,
         health_services: Callable[[ParseRuntime], dict[str, bool]],
         health_service_details: Callable[[ParseRuntime], dict[str, dict[str, Any]]] | None = None,
+        health_capabilities: Callable[[ParseRuntime], dict[str, Any]] | None = None,
     ) -> None:
         self.api_version = api_version
         self.health_services = health_services
         self.health_service_details = health_service_details
+        self.health_capabilities = health_capabilities
 
     def routes(self) -> list[Route]:
         return [
@@ -151,6 +153,13 @@ class ApiRoutes:
         }
         if self.health_service_details is not None:
             payload["service_details"] = self.health_service_details(runtime_obj)
+        if self.health_capabilities is not None:
+            capabilities = self.health_capabilities(runtime_obj)
+            payload["capabilities"] = capabilities
+            # P0-01: process liveness (``status``) stays "ok" so a supervisor is
+            # not restarted for a configuration problem; deliverability is
+            # reported separately so a readiness probe can gate traffic.
+            payload["delivery_status"] = capabilities["status"]
         return JSONResponse(
             payload
         )

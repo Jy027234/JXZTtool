@@ -117,6 +117,10 @@ class ParseOutcome:
     # persisted job or API payload schemas.
     stage_timings: dict[str, float] = field(default_factory=dict)
 
+    # P0-01: populated only when the result came from a placeholder parser.  The
+    # job still completes, but consumers must not treat the result as formal.
+    placeholder_result: dict[str, Any] | None = None
+
 
 @dataclass(slots=True, frozen=True)
 class ChunkSearchHit:

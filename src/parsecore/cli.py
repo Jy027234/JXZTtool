@@ -9,6 +9,7 @@ from typing import Sequence
 
 from .asgi import create_app
 from .bootstrap import build_runtime
+from .capabilities import CapabilityConfigurationError, capability_error_payload
 from .config import load_settings
 from .models import ParseRequest
 from .parts import cleanup_provider_comparison_artifacts
@@ -85,6 +86,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except CapabilityConfigurationError as exc:
+        # P0-01: an unusable configuration is an operator error with a stable
+        # code, not a crash.  Print the machine-readable payload and exit 2 so a
+        # supervisor or CI gate can branch on it.
+        print(
+            json.dumps(capability_error_payload(exc), ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args and raw_args[0] == "self-check":
         from tools import self_check as self_check_tool

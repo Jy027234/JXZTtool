@@ -11,6 +11,7 @@ from math import isfinite, sqrt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .capabilities import build_capability_report
 from .config import (
     ParseCoreSettings,
     local_provider_registry_payload,
@@ -28,12 +29,16 @@ from .profiles import describe_parse_profiles
 from .provider_failures import PROVIDER_FAILURE_CATEGORIES, classify_provider_failure
 from .private_files import ensure_private_directory
 from .quality import evaluate_parse_quality
+from .stores import PgVectorIndex
+from .stubs import NullEmbeddingProvider, NullRerankProvider
 
 
 _PDF_PARENT_JOB_KIND = "pdf_parent"
 _PDF_PART_JOB_KIND = "pdf_part"
 _RERUN_CHUNKS_ONLY_MODE = "rerun_chunks_only"
 _RERUN_EMBEDDINGS_ONLY_MODE = "rerun_embeddings_only"
+# P0-01: job option recording that a result came from a placeholder parser.
+_PLACEHOLDER_RESULT_OPTION = "placeholder_result"
 _SEARCH_VECTOR_WEIGHT = 0.7
 _SEARCH_KEYWORD_WEIGHT = 0.3
 _SEARCH_METRICS_HISTORY_LIMIT = 5000
@@ -502,6 +507,7 @@ class ParseRuntime:
         event_logger: JobEventLogger | None = None,
         pipeline_registry: PipelineRegistry | None = None,
         rerank_provider: RerankProvider | None = None,
+        capability_degradations: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.settings = settings
         self.parsers = tuple(parsers)
@@ -515,6 +521,14 @@ class ParseRuntime:
         self.event_logger = event_logger or JobEventLogger(settings.runtime.log_path)
         self.event_aggregator = EventAggregator(max_ringbuffer_size=1000)
         self.pipeline_registry = pipeline_registry
+        # P0-01: degradations discovered while building the runtime.  They are
+        # reported through capability_report()/health instead of staying silent.
+        self._capability_degradations: tuple[dict[str, Any], ...] = tuple(
+            dict(item) for item in capability_degradations
+        )
+        # Placeholder results are recorded per job so API projections can expose
+        # them without re-reading parser state.
+        self._placeholder_job_notes: dict[str, dict[str, Any]] = {}
         self._search_layer_query_hits: dict[tuple[str, str], list[int]] = {}
         # Part jobs are created and executed by this runtime instance. Keep a
         # parent-scoped latest-child map so every completed part does not scan
@@ -527,6 +541,7 @@ class ParseRuntime:
         return str(self.settings.runtime.execution_mode or "inline").strip().lower() == "inline"
 
     def describe(self) -> dict[str, object]:
+        capabilities = self.capability_report()
         description: dict[str, object] = {
             "project": self.settings.project_name,
             "mode": self.settings.mode,
@@ -549,6 +564,15 @@ class ParseRuntime:
                 "allow_external_file_paths": self.settings.runtime.allow_external_file_paths,
                 "staged_upload_max_bytes": self.settings.runtime.staged_upload_max_bytes,
                 "api_auth_enabled": bool(str(self.settings.runtime.api_key_env).strip()),
+                # P0-01: capability truthfulness at a glance.
+                "strictness": self.settings.strictness,
+                "allow_placeholder_parsers": self.settings.allow_placeholder_parsers,
+                "allow_mock_providers": self.settings.runtime.allow_mock_providers,
+                "accepting_jobs": capabilities["accepting_jobs"],
+                "formal_parse_ready": capabilities["formal_parse_ready"],
+                "capability_fingerprint": capabilities["fingerprint"],
+                "degraded_capabilities": capabilities["degraded_capabilities"],
+                "placeholder_parsers": capabilities["placeholder_parsers"],
             },
             "translation": {
                 "enabled": self.settings.translation_enabled,
@@ -570,6 +594,7 @@ class ParseRuntime:
             "provider_registry": self.provider_registry(),
             "payload_schemas": payload_schema_registry(),
             "quality_gate": self.quality_gate_config(),
+            "capabilities": self.capability_report(),
             "profiles": describe_parse_profiles(),
             "index_layers": ["primary", "structure", "high_precision"],
             "embedding_tiers": ["small", "large"],
@@ -582,6 +607,111 @@ class ParseRuntime:
 
     def provider_registry(self) -> dict[str, Any]:
         return local_provider_registry_payload(self.settings.providers)
+
+    # ------------------------------------------------------------------
+    # P0-01: capability truthfulness
+    # ------------------------------------------------------------------
+
+    def placeholder_parser_names(self) -> tuple[str, ...]:
+        """Configured parsers that are placeholders rather than implementations."""
+
+        return tuple(
+            sorted(
+                {
+                    str(parser.name).strip().lower()
+                    for parser in self.parsers
+                    if bool(getattr(parser, "is_placeholder", False))
+                }
+            )
+        )
+
+    def capability_report(self) -> dict[str, Any]:
+        """Capability, degradation and readiness report for this runtime.
+
+        Distinguishes "process is alive" from "this deployment can accept jobs
+        and produce formal results": a placeholder parser or an unavailable
+        required capability keeps the process healthy while blocking formal
+        results.
+        """
+
+        index_backend = "pgvector" if isinstance(self.index, PgVectorIndex) else "null"
+        embedding_configured = bool(
+            self.settings.providers.embedding.enabled
+            and not isinstance(self.embedding_provider, NullEmbeddingProvider)
+        )
+        rerank_configured = bool(
+            self.settings.providers.rerank.enabled
+            and not isinstance(self.rerank_provider, NullRerankProvider)
+        )
+        return build_capability_report(
+            self.settings,
+            parser_names=tuple(str(parser.name) for parser in self.parsers),
+            placeholder_names=self.placeholder_parser_names(),
+            index_backend=index_backend,
+            embedding_provider=type(self.embedding_provider).__name__,
+            rerank_provider=type(self.rerank_provider).__name__,
+            embedding_configured=embedding_configured,
+            rerank_configured=rerank_configured,
+            degraded=self._capability_degradations,
+        )
+
+    def _placeholder_parser_for_blocks(self, blocks: Sequence[Any]) -> str:
+        """Name of the placeholder parser that produced these blocks, if any."""
+
+        placeholders = set(self.placeholder_parser_names())
+        if not placeholders:
+            return ""
+        for block in blocks:
+            metadata = getattr(block, "metadata", None)
+            if not isinstance(metadata, Mapping):
+                continue
+            name = str(metadata.get("parser") or "").strip().lower()
+            if name in placeholders:
+                return name
+        return ""
+
+    def _record_placeholder_result(
+        self,
+        *,
+        job: Any,
+        request: ParseRequest,
+        placeholder_parser: str,
+    ) -> Any:
+        """Flag a job whose result came from a placeholder parser.
+
+        P0-01 does not change the completion contract (that is P0-02/P0-04); it
+        makes the placeholder visible in the job record, the event log and the
+        outcome so no consumer can mistake it for a formal parse result.
+        """
+
+        note = {
+            "placeholder_parser": placeholder_parser,
+            "result_grade": "placeholder",
+            "formal_result": False,
+            "error_code": "placeholder_parsers_not_allowed",
+        }
+        self._placeholder_job_notes[str(getattr(job, "job_id", ""))] = note
+        update_options = getattr(self.job_store, "update_options", None)
+        if callable(update_options) and str(getattr(job, "job_id", "")):
+            try:
+                options = dict(getattr(job, "options", None) or {})
+                options[_PLACEHOLDER_RESULT_OPTION] = note
+                job = update_options(job_id=str(job.job_id), options=options)
+            except Exception as exc:  # pragma: no cover - observability path
+                self.event_logger.log(
+                    "placeholder_result_option_update_failed",
+                    job_id=str(getattr(job, "job_id", "")),
+                    doc_id=request.doc_id,
+                    error=str(exc),
+                )
+        self.event_logger.log(
+            "placeholder_result",
+            job_id=str(getattr(job, "job_id", "")),
+            doc_id=request.doc_id,
+            placeholder_parser=placeholder_parser,
+            error_code="placeholder_parsers_not_allowed",
+        )
+        return job
 
     def provider_route_plan(
         self,
@@ -686,6 +816,13 @@ class ParseRuntime:
                 blocks = self._load_blocks_for_request(request)
                 if _is_pdf_part_request(request):
                     blocks = self._normalize_pdf_part_blocks(request=request, blocks=blocks)
+                placeholder_parser = self._placeholder_parser_for_blocks(blocks)
+                if placeholder_parser:
+                    job = self._record_placeholder_result(
+                        job=job,
+                        request=request,
+                        placeholder_parser=placeholder_parser,
+                    )
                 self._record_ocr_observability(request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request):
                 with stage_timer.stage("persist_blocks"):
@@ -808,6 +945,17 @@ class ParseRuntime:
                 blocks=len(blocks),
                 chunks=len(chunks),
             )
+            placeholder_note = self._placeholder_job_notes.get(str(job.job_id))
+            if placeholder_note:
+                # P0-01: keep the placeholder visible on the outcome so no
+                # caller mistakes this run for a formal parse result.
+                outcome.placeholder_result = dict(placeholder_note)
+                self.event_logger.log(
+                    "completed_with_placeholder_result",
+                    job_id=job.job_id,
+                    doc_id=job.doc_id,
+                    placeholder_parser=placeholder_note["placeholder_parser"],
+                )
             self.product_adapter.after_parse(outcome=outcome)
             return outcome
         except RuntimeError as exc:

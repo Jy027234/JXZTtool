@@ -872,6 +872,13 @@ name = "text-native"
 """,
             1,
         )
+        # P0-01: "text-alt" is a placeholder parser, so the fixture must opt in
+        # explicitly instead of relying on a silent stub fallback.
+        config = config.replace(
+            "[project]",
+            "[project]\nallow_placeholder_parsers = true",
+            1,
+        )
         with TemporaryWorkspace(config) as workspace:
             sample = workspace.create_text_file("manual.txt", "Heading\n\nInspect pump.")
             assert workspace.config_path is not None
@@ -976,6 +983,13 @@ extensions = [".txt", ".md"]
 [[parsers]]
 name = "text-native"
 """,
+            1,
+        )
+        # P0-01: "text-alt" is a placeholder parser, so the fixture must opt in
+        # explicitly instead of relying on a silent stub fallback.
+        config = config.replace(
+            "[project]",
+            "[project]\nallow_placeholder_parsers = true",
             1,
         )
         with TemporaryWorkspace(config) as workspace:

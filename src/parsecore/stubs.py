@@ -106,6 +106,17 @@ def _view_bounds(items: Sequence[Mapping[str, object]]) -> tuple[int | None, int
 
 
 class StubParser(ParserAdapter):
+    """Explicit placeholder parser.
+
+    Only reachable when a deployment opts in through
+    ``project.allow_placeholder_parsers = true``.  Results produced by this
+    parser are reported as placeholders and never as formal parse results.
+    """
+
+    #: P0-01: lets the runtime mark jobs/outcomes produced by a placeholder.
+    is_placeholder = True
+    placeholder_reason = "placeholder_parser"
+
     def __init__(self, *, name: str, media_types: Sequence[str], extensions: Sequence[str]) -> None:
         self.name = name
         self._media_types = {item.lower() for item in media_types}
@@ -187,6 +198,9 @@ def _default_semantic_role_for_block(block: Block) -> str:
 
 
 class NullEmbeddingProvider(EmbeddingProvider):
+    is_degraded = True
+    degradation_reason = "embedding_provider_unavailable"
+
     def embed(self, *, doc_id: str, chunks: Sequence[Chunk]) -> Sequence[Chunk]:
         return tuple(chunks)
 
@@ -212,6 +226,9 @@ class FakeEmbeddingProvider(EmbeddingProvider):
 class NullRerankProvider(RerankProvider):
     """Explicit no-op used when reranking is disabled or unavailable."""
 
+    is_degraded = True
+    degradation_reason = "rerank_provider_unavailable"
+
     def rerank(self, *, query: str, documents: Sequence[str]) -> Sequence[RerankScore]:
         return ()
 
@@ -228,6 +245,15 @@ class FakeRerankProvider(RerankProvider):
 
 
 class NullIndex(IndexAdapter):
+    """Non-durable index used when no vector backend is configured.
+
+    P0-01: reported as a degraded (non-publishable) capability instead of being
+    presented as a working index backend.
+    """
+
+    is_degraded = True
+    degradation_reason = "in_memory_index"
+
     def __init__(self) -> None:
         self.upserts: list[dict[str, object]] = []
         self.documents: dict[tuple[str, str], dict[str, object]] = {}

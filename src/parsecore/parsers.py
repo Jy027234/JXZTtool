@@ -22,13 +22,13 @@ from typing import Any, Callable, Mapping, Sequence
 import xml.etree.ElementTree as ET
 import zipfile
 
+from .capabilities import known_parser_names
 from .config import OcrProviderSettings
 from .contracts import ParserAdapter
 from .garble import detect_page_garble_reason
 from .models import Block, BlockType, ParseRequest, SemanticRole
 from .ocr import OcrConfigurationError, OcrRequestError, build_ocr_engine
 from .ocr_cache import PageOcrCache, get_default_cache
-from .stubs import StubParser
 
 
 _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
@@ -5938,7 +5938,7 @@ def build_parser(
         return ExcelParser(media_types=media_types, extensions=extensions, options=options)
     if normalized == "text-native":
         return TextParser(media_types=media_types, extensions=extensions)
-    if normalized == "docling-local":
+    if normalized in ("docling-local", "docling"):
         return DoclingParser(
             media_types=media_types,
             extensions=extensions,
@@ -5953,17 +5953,54 @@ def build_parser(
             boundary_refiner=boundary_refiner,
             semantic_refiner=semantic_refiner,
         )
-    if normalized == "pymupdf4llm-local":
+    if normalized in ("pymupdf4llm-local", "pymupdf4llm"):
         return PyMuPdf4LlmParser(
             media_types=media_types,
             extensions=extensions,
             options=options,
         )
-    if normalized == "image-ocr":
+    if normalized in ("image-ocr", "ocr"):
         return ImageOcrParser(
             media_types=media_types,
             extensions=extensions,
             options=options,
             ocr_provider_settings=ocr_provider_settings,
         )
-    return StubParser(name=name, media_types=media_types, extensions=extensions)
+    raise KeyError(
+        f"unknown parser implementation {name!r}; known implementations: "
+        + ", ".join(known_parser_names())
+    )
+
+
+def build_parser_or_placeholder(
+    name: str,
+    *,
+    media_types: Sequence[str],
+    extensions: Sequence[str],
+    options: Mapping[str, Any] | None = None,
+    ocr_provider_settings: OcrProviderSettings | None = None,
+    boundary_refiner: Any = None,
+    semantic_refiner: Any = None,
+) -> ParserAdapter:
+    """Build a real parser, or an explicit placeholder when the name is unknown.
+
+    P0-01 keeps :func:`build_parser` strict.  Callers that have an explicit,
+    operator-visible opt-in (``project.allow_placeholder_parsers``) use this
+    entry point instead; the returned :class:`~parsecore.stubs.StubParser`
+    advertises ``is_placeholder`` so the runtime can flag the result.
+    """
+
+    try:
+        return build_parser(
+            name,
+            media_types=media_types,
+            extensions=extensions,
+            options=options,
+            ocr_provider_settings=ocr_provider_settings,
+            boundary_refiner=boundary_refiner,
+            semantic_refiner=semantic_refiner,
+        )
+    except KeyError:
+        from .stubs import StubParser
+
+        return StubParser(name=name, media_types=media_types, extensions=extensions)

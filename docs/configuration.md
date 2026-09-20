@@ -86,12 +86,30 @@ docker compose --profile pgvector up -d --build
 [project]
 name = "parsecore-starter"
 mode = "embedded-sdk"
+strictness = "strict"
+allow_placeholder_parsers = false
 ```
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `project.name` | `parsecore` | 出现在 runtime describe 中，便于环境识别。 |
 | `project.mode` | `embedded-sdk` | 当前产品主形态；保留字段，暂不建议改成其他值。 |
+| `project.strictness` | `strict` | `strict` 在启动时拒绝未知 parser / index / provider 名称、mock provider 与占位解析器；`lenient` 仅为必须加载历史配置的宿主保留，此时 ParseCore 仍会通过 `/health` 报告占位与降级状态，不会伪装成健康。 |
+| `project.allow_placeholder_parsers` | `false` | 开发用逃生开关。为 `true` 时，未知 `[[parsers]]` 名称由显式占位解析器承接，结果会带上 `placeholder_result`，`/health` 报告 `formal_parse_ready = false`。生产必须保持 `false`。 |
+
+配置与真实实现的校验结果使用稳定错误码，便于 CI 与探针分支（见 `src/parsecore/capabilities.py` 的 `ERROR_CODES`）：
+
+| 错误码 | 触发条件 |
+| --- | --- |
+| `unknown_parser_name` | `[[parsers]]` 名称不是已实现解析器，且未开启 `allow_placeholder_parsers`。 |
+| `unknown_index_mode` | `index.mode` 不是 `pgvector` / `hybrid` / `null` 及其别名。 |
+| `index_backend_mismatch` | `index.mode = "pgvector"` 但 `storage.database_url` 不是 PostgreSQL；不再静默降级为内存索引。 |
+| `unknown_database_scheme` | `storage.database_url` 不是 sqlite / postgresql / memory。 |
+| `unknown_llm_provider` / `unknown_embedding_provider` / `unknown_rerank_provider` / `unknown_ocr_provider` | 对应 `providers.*.provider` 不是已实现 provider。 |
+| `mock_providers_not_allowed` | 启用了 `fake`/`test`/`stub` provider，但 `runtime.allow_mock_providers` 仍为 `false`。 |
+| `unknown_capability_name` | `runtime.capability_optional` 含未知能力名。 |
+
+CLI 遇到上述错误时以退出码 `2` 输出 JSON（`code` / `field` / `message`），不会打印 traceback。
 
 ## Runtime 配置
 
@@ -115,11 +133,15 @@ quota_window_hours = 24
 quota_default_limit_units = 0
 max_attempts = 3
 log_path = "var/logs/job_events.jsonl"
+allow_mock_providers = false
+# capability_optional = ["embedding", "parser:docx-native"]
 # api_key_env = "PARSECORE_API_KEY"
 ```
 
 | 字段 | 默认值 | 可选值/范围 | 说明 |
 | --- | ---: | --- | --- |
+| `allow_mock_providers` | `false` | 布尔 | 允许 `fake`/`test`/`stub` provider。它们产出非正式结果，只用于联调与冒烟；开启后 `/health` 会把这些能力列进 `mock_capabilities`。生产必须保持 `false`。 |
+| `capability_optional` | `[]` | 能力名列表 | 声明哪些能力允许降级而不阻塞交付。默认 `rerank`、`ocr`、`index` 为 optional；`embedding`/`llm` 未启用时为 `disabled`（合法关闭，不算故障），显式启用后若初始化失败或缺少凭据则视为 required 并阻止受理。也可写 `parser:<name>`。 |
 | `execution_mode` | `inline` | `inline` / `queue-worker` | `inline` 由 API 进程执行后台 job；`queue-worker` 由 API 提交 job、Worker 独立消费。 |
 | `max_workers` | `2` | 正整数 | inline 后台 job 执行线程数。同步 `/parse` 和 `/parse/batch` 仍在请求内完成。 |
 | `max_inflight_jobs` | `0` | `0` 或正整数 | inline job 背压上限；`0` 表示自动取 `max_workers * 4`。超过时返回 `429 too_many_inflight_jobs`。 |

@@ -33,6 +33,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - `pages / lines / records` document views 持久化、records 分页查询与大结果集导出
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可选 DashScope-compatible 二阶段 rerank provider，支持阿里 Qwen 排序模型与安全降级
+- 启动期能力真实性校验：未知 parser / index / provider 名称、mock provider 与占位解析器默认被拒绝，能力状态通过 `/health` 与 `/v1/runtime` 的 `capabilities` 报告暴露（`accepting_jobs` / `formal_parse_ready` / `degraded_capabilities`）
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
 - `profile=auto` 自动路由，支持大文件、表格密集、OCR 密集、Excel 台账等解析策略分流
@@ -53,6 +54,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 文档导航
 
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（方案阶段；P0-01 配置与能力真实性已实施，其余待实施）
 - [docs/release-notes.md](docs/release-notes.md)：当前版本定位、交付范围、验证结果、已知限制与发版检查
 - [docs/user-guide.md](docs/user-guide.md)：面向宿主产品开发/测试/运维的使用说明、推荐流程和验收口径
 - [docs/ocr-gateway-contract.md](docs/ocr-gateway-contract.md)：`remote-http` OCR 网关的固定请求/响应契约与验收口径

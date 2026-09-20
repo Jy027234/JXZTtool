@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 from starlette.applications import Starlette
 
+from .api_health import health_capabilities as _base_health_capabilities
 from .api_health import health_service_details as _base_health_service_details
 from .api_health import health_services as _base_health_services
 from .api_health import is_ocr_service_available as _is_ocr_service_available
@@ -282,6 +283,7 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
             api_version=API_VERSION,
             health_services=_health_services,
             health_service_details=_health_service_details,
+            health_capabilities=_health_capabilities,
         ).routes(),
     )
 
@@ -298,6 +300,10 @@ def _health_services(runtime: ParseRuntime) -> dict[str, bool]:
 
 def _health_service_details(runtime: ParseRuntime) -> dict[str, dict[str, object]]:
     return _base_health_service_details(runtime, ocr_probe=_is_ocr_service_available)
+
+
+def _health_capabilities(runtime: ParseRuntime) -> dict[str, object]:
+    return _base_health_capabilities(runtime)
 
 
 def _part_active_limit(job: ParseJob) -> int:

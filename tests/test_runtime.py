@@ -105,6 +105,9 @@ LOCAL_PROVIDER_ROUTING_CONFIG = """
 [project]
 name = "test-parsecore"
 mode = "embedded-sdk"
+# P0-01: "text-alt" is a placeholder parser, so this fixture opts in explicitly
+# instead of relying on the previous silent stub fallback.
+allow_placeholder_parsers = true
 
 [storage]
 database_url = "__DB_URL__"
@@ -159,6 +162,8 @@ PDF_LOCAL_PROVIDER_RERUN_CONFIG = """
 [project]
 name = "test-parsecore"
 mode = "embedded-sdk"
+# P0-01: "pdf-layout" is a placeholder parser in this routing fixture.
+allow_placeholder_parsers = true
 
 [storage]
 database_url = "__DB_URL__"
