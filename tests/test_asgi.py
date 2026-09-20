@@ -795,6 +795,8 @@ gate_status = "pending"
                 "document-providers",
                 "document-quality",
                 "document-reader",
+                "parse-run",
+                "document-publication",
             ],
         )
         self.assertEqual(ir_schema.status_code, 200)
@@ -813,6 +815,8 @@ gate_status = "pending"
                 "document-providers",
                 "document-quality",
                 "document-reader",
+                "parse-run",
+                "document-publication",
             ],
         )
         self.assertEqual(runtime.status_code, 200)

@@ -130,7 +130,9 @@
 - `index.mode = "pgvector"` 配非 PostgreSQL 的 `database_url` 现在直接拒绝（`index_backend_mismatch`），不再返回 `NullIndex`。
 - 本次未改动完成时序与发布准入（占位结果仍会走到 `done`），该问题属于 P0-03/P0-04；P0-01 只保证占位与降级**可见且不可伪装为正式结果**。
 
-#### [ ] P0-02 冻结 run、发布与兼容契约（小）
+#### [x] P0-02 冻结 run、发布与兼容契约（小）
+
+状态：**已实施（2026-09-20）**。设计决策见 [docs/adr-p0-02-run-publication-contract.md](adr-p0-02-run-publication-contract.md)，可执行契约见 `src/parsecore/publication.py`，契约样例见 `/v1/parse/schemas/parse-run` 与 `/v1/parse/schemas/document-publication`。
 
 - 修改位置：`models.py`、`contracts.py`、`payload_schemas.py`、`payload_contract_samples.py`；新增一份状态/存储设计决策。
 - 冻结第 3 节字段、合法迁移、必需产物、warning 放行策略、旧 state 与新状态的映射；文档发布和 CAAC `quality.status=public` 的业务公开含义分别定义。
@@ -138,6 +140,14 @@
 - 明确两个作业同 doc 并行时的政策：以发布世代和预期源版本拒绝过时发布，不采用“最后完成者无条件覆盖”。
 - 验收：状态迁移表、契约样例、SQLite/Postgres 迁移设计、兼容说明和失败场景全部可评审；不以只添加三个 JSON 字段算完成。
 - 依赖：无，可与 P0-01 同期设计。
+
+实施说明：
+
+- 新增 `src/parsecore/publication.py`：三套状态机（`execution_status` / `validation_status` / `publication_status`）、合法迁移表、旧 `job.state` 映射、`ArtifactProfile`、`ValidationPolicy`、`RunStoreCapabilities` 与并行发布政策，全部以可机读常量冻结。
+- 三条硬性语义：`done` 不等于 `published`；`done` 不等于 `validated`（无校验记录即 `not_run`）；重试产生新 run，不覆盖上次尝试的部分产物。
+- 新增两个契约 schema 与样例（注册表 6→8，P1 契约验收 payload 24→32）；`parse_run_id` 的别名切换点写入契约（`PARSE_RUN_ID_ALIAS`），避免静默改变既有读口径。
+- 明确记录当前 SQLite / Postgres / memory 三个后端的 `strict_publication_ready` 均为 `false`，`latest_job` 不参与发布决策。
+- 本项**不改变运行时行为**：没有运行路径读写新状态，没有 store 实现 run 协议。存储与原子发布属于 P0-03，校验与发布门禁属于 P0-04。
 
 #### [ ] P0-03 实现快照存储与原子发布（大）
 

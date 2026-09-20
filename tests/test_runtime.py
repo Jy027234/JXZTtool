@@ -327,7 +327,8 @@ class ParseRuntimeTests(unittest.TestCase):
             },
         )
         self.assertEqual(description["payload_schemas"]["schema_version"], "2026-06-payload-schema-registry")
-        self.assertEqual(description["payload_schemas"]["summary"]["total"], 6)
+        # 6 document projections plus the P0-02 parse-run/document-publication contracts.
+        self.assertEqual(description["payload_schemas"]["summary"]["total"], 8)
         self.assertEqual(description["quality_gate"]["schema_version"], "2026-06-quality-gate-config")
         self.assertTrue(description["quality_gate"]["enabled"])
         self.assertEqual(description["quality_gate"]["enforcement"], "report_only")

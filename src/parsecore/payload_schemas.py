@@ -10,10 +10,21 @@ from .api_payloads import (
     READER_SCHEMA_VERSION,
 )
 from .ir import COVERAGE_SCHEMA_VERSION, IR_SCHEMA_VERSION
+from .publication import (
+    ArtifactRequirement,
+    ExecutionStatus,
+    PublicationStatus,
+    SCHEMA_VERSION as RUN_CONTRACT_VERSION,
+    ValidationStatus,
+)
 
 
 JSON_SCHEMA_DRAFT = "https://json-schema.org/draft/2020-12/schema"
 PAYLOAD_SCHEMA_REGISTRY_VERSION = "2026-06-payload-schema-registry"
+#: P0-02 run/publication contracts, versioned separately from the document
+#: projections so a run-contract change does not renumber reader/IR payloads.
+PARSE_RUN_SCHEMA_VERSION = "2026-09-parse-run-v1"
+DOCUMENT_PUBLICATION_SCHEMA_VERSION = "2026-09-document-publication-v1"
 _SCHEMA_BASE_URI = "https://parsecore.local/schemas"
 
 
@@ -2197,6 +2208,236 @@ def _reader_schema() -> dict[str, Any]:
     }
 
 
+def _run_transition_table_schema() -> dict[str, Any]:
+    """``{state: [next states]}`` table from the frozen contract."""
+
+    return {
+        "type": "object",
+        "additionalProperties": {
+            "type": "array",
+            "items": _string_schema(),
+        },
+    }
+
+
+def _run_identity_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["job_id", "parse_run_id", "tenant_id", "doc_id", "source_version"],
+        "properties": {
+            "job_id": _string_schema(),
+            "parse_run_id": _string_schema(),
+            "base_run_id": _string_schema(nullable=True),
+            "tenant_id": _string_schema(),
+            "doc_id": _string_schema(),
+            "source_version": _string_schema(),
+            "source_bytes": _integer_schema(),
+            "attempt_count": _integer_schema(),
+            "profile": _string_schema(),
+            "created_at": _string_schema(),
+        },
+        "additionalProperties": True,
+    }
+
+
+def _run_validation_reference_schema(*, nullable: bool = False) -> dict[str, Any]:
+    return {
+        "type": ["object", "null"] if nullable else "object",
+        "required": [
+            "status",
+            "reason",
+            "policy_version",
+            "rule_version",
+            "warning_codes",
+            "metrics",
+        ],
+        "properties": {
+            "status": {"enum": [state.value for state in ValidationStatus]},
+            "reason": _string_schema(),
+            "policy_version": _string_schema(),
+            "rule_version": _string_schema(),
+            "warning_codes": _string_list_schema(),
+            "metrics": _generic_object_schema(),
+            "evidence_refs": _string_list_schema(),
+            "validated_at": _string_schema(nullable=True),
+        },
+        "additionalProperties": True,
+    }
+
+
+def _run_publication_reference_schema(*, nullable: bool = False) -> dict[str, Any]:
+    return {
+        "type": ["object", "null"] if nullable else "object",
+        "required": [
+            "status",
+            "publication_generation",
+            "active_run_id",
+            "published_at",
+            "superseded_by_run_id",
+        ],
+        "properties": {
+            "status": {"enum": [state.value for state in PublicationStatus]},
+            "publication_generation": _integer_schema(nullable=True),
+            "active_run_id": _string_schema(nullable=True),
+            "published_at": _string_schema(nullable=True),
+            "superseded_by_run_id": _string_schema(nullable=True),
+            "withdrawn_reason": _string_schema(nullable=True),
+        },
+        "additionalProperties": True,
+    }
+
+
+def _parse_run_schema() -> dict[str, Any]:
+    return {
+        "$schema": JSON_SCHEMA_DRAFT,
+        "$id": f"{_SCHEMA_BASE_URI}/parse-run.json",
+        "title": "ParseCore Run Record",
+        "description": (
+            "Frozen run identity and status contract. Execution, validation and "
+            "publication are three separate state machines: a succeeded run is "
+            "neither validated nor published by default."
+        ),
+        "type": "object",
+        "required": [
+            "schema_version",
+            "contract_version",
+            "run_identity",
+            "execution_status",
+            "validation",
+            "publication",
+            "artifact_profile",
+            "required_artifacts",
+            "degraded_artifacts",
+            "version_sources",
+            "capabilities",
+            "legacy",
+            "transitions",
+        ],
+        "properties": {
+            "schema_version": {"const": PARSE_RUN_SCHEMA_VERSION},
+            "contract_version": {"const": RUN_CONTRACT_VERSION},
+            "contract_status": {"enum": ["frozen", "draft"]},
+            "run_identity": _run_identity_schema(),
+            "execution_status": {"enum": [state.value for state in ExecutionStatus]},
+            "validation": _run_validation_reference_schema(nullable=True),
+            "publication": _run_publication_reference_schema(nullable=True),
+            "artifact_profile": _string_schema(),
+            "required_artifacts": _string_list_schema(),
+            "optional_artifacts": _string_list_schema(),
+            "disabled_artifacts": _string_list_schema(),
+            "degraded_artifacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["artifact", "reason", "requirement"],
+                    "properties": {
+                        "artifact": _string_schema(),
+                        "reason": _string_schema(),
+                        "requirement": {
+                            "enum": [value.value for value in ArtifactRequirement]
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "version_sources": _generic_object_schema(),
+            "capabilities": _generic_object_schema(),
+            "legacy": _generic_object_schema(),
+            "transitions": {
+                "type": "object",
+                "required": ["execution_status", "validation_status", "publication_status"],
+                "properties": {
+                    "execution_status": _run_transition_table_schema(),
+                    "validation_status": _run_transition_table_schema(),
+                    "publication_status": _run_transition_table_schema(),
+                },
+                "additionalProperties": False,
+            },
+        },
+        "additionalProperties": False,
+        "x-parsecore": {
+            "name": "parse-run",
+            "category": "run_publication",
+            "projection": None,
+            "schema_version": PARSE_RUN_SCHEMA_VERSION,
+        },
+    }
+
+
+def _document_publication_schema() -> dict[str, Any]:
+    return {
+        "$schema": JSON_SCHEMA_DRAFT,
+        "$id": f"{_SCHEMA_BASE_URI}/document-publication.json",
+        "title": "ParseCore Document Publication State",
+        "description": (
+            "Formal read contract for one tenant/doc: which run is published, "
+            "whether a formal version exists at all, and the policy applied. "
+            "consumer_signal is authoritative for downstream ingest decisions."
+        ),
+        "type": "object",
+        "required": [
+            "schema_version",
+            "contract_version",
+            "tenant_id",
+            "doc_id",
+            "active_run_id",
+            "publication_generation",
+            "publication_status",
+            "formal_version_available",
+            "consumer_signal",
+            "source_version",
+            "profile",
+            "validation",
+            "readiness",
+            "policy",
+            "legacy",
+        ],
+        "properties": {
+            "schema_version": {"const": DOCUMENT_PUBLICATION_SCHEMA_VERSION},
+            "contract_version": {"const": RUN_CONTRACT_VERSION},
+            "tenant_id": _string_schema(),
+            "doc_id": _string_schema(),
+            "active_run_id": _string_schema(nullable=True),
+            "publication_generation": _integer_schema(),
+            "publication_status": {"enum": [state.value for state in PublicationStatus]},
+            "formal_version_available": _boolean_schema(),
+            "consumer_signal": {
+                "enum": ["published", "not_ready", "preview_only", "withdrawn"]
+            },
+            "source_version": _string_schema(nullable=True),
+            "profile": _string_schema(),
+            "validation": _run_validation_reference_schema(nullable=True),
+            "readiness": {
+                "type": "object",
+                "required": ["accepting_jobs", "formal_parse_ready", "blocking_reasons"],
+                "properties": {
+                    "accepting_jobs": _boolean_schema(),
+                    "formal_parse_ready": _boolean_schema(),
+                    "blocking_reasons": {
+                        "type": "array",
+                        "items": _generic_object_schema(),
+                    },
+                },
+                "additionalProperties": True,
+            },
+            "policy": _generic_object_schema(),
+            "runs": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
+            "legacy": _generic_object_schema(),
+            "diagnostics": _generic_object_schema(),
+        },
+        "additionalProperties": False,
+        "x-parsecore": {
+            "name": "document-publication",
+            "category": "run_publication",
+            "projection": None,
+            "schema_version": DOCUMENT_PUBLICATION_SCHEMA_VERSION,
+        },
+    }
+
+
 _SCHEMAS = {
     "document-coverage": _coverage_document_schema(),
     "document-ir": _ir_schema(),
@@ -2204,4 +2445,6 @@ _SCHEMAS = {
     "document-providers": _providers_document_schema(),
     "document-quality": _quality_document_schema(),
     "document-reader": _reader_schema(),
+    "parse-run": _parse_run_schema(),
+    "document-publication": _document_publication_schema(),
 }

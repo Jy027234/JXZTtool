@@ -296,6 +296,87 @@ _SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
 }
 
 
+_RUN_SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
+    "parse-run": {
+        "title": "ParseCore Run Record",
+        "schema_version": "2026-09-parse-run-v1",
+        "required": [
+            "schema_version",
+            "contract_version",
+            "run_identity",
+            "execution_status",
+            "validation",
+            "publication",
+            "artifact_profile",
+            "required_artifacts",
+            "degraded_artifacts",
+            "version_sources",
+            "capabilities",
+            "legacy",
+            "transitions",
+        ],
+        "properties": [
+            "schema_version",
+            "contract_version",
+            "contract_status",
+            "run_identity",
+            "execution_status",
+            "validation",
+            "publication",
+            "artifact_profile",
+            "required_artifacts",
+            "optional_artifacts",
+            "disabled_artifacts",
+            "degraded_artifacts",
+            "version_sources",
+            "capabilities",
+            "legacy",
+            "transitions",
+        ],
+    },
+    "document-publication": {
+        "title": "ParseCore Document Publication State",
+        "schema_version": "2026-09-document-publication-v1",
+        "required": [
+            "schema_version",
+            "contract_version",
+            "tenant_id",
+            "doc_id",
+            "active_run_id",
+            "publication_generation",
+            "publication_status",
+            "formal_version_available",
+            "consumer_signal",
+            "source_version",
+            "profile",
+            "validation",
+            "readiness",
+            "policy",
+            "legacy",
+        ],
+        "properties": [
+            "schema_version",
+            "contract_version",
+            "tenant_id",
+            "doc_id",
+            "active_run_id",
+            "publication_generation",
+            "publication_status",
+            "formal_version_available",
+            "consumer_signal",
+            "source_version",
+            "profile",
+            "validation",
+            "readiness",
+            "policy",
+            "runs",
+            "legacy",
+            "diagnostics",
+        ],
+    },
+}
+
+
 class SchemaSnapshotTests(unittest.TestCase):
     """Lock down the frozen schema definitions — any change requires a schema version bump."""
 
@@ -309,8 +390,35 @@ class SchemaSnapshotTests(unittest.TestCase):
                 "document-providers",
                 "document-quality",
                 "document-reader",
+                # P0-02 run/publication contracts, versioned separately from the
+                # document projections so a run-contract change does not renumber
+                # reader/IR payloads.
+                "parse-run",
+                "document-publication",
             ),
         )
+
+    def test_run_contract_schemas_have_correct_metadata(self) -> None:
+        for name, expect in _RUN_SCHEMA_EXPECTATIONS.items():
+            with self.subTest(name=name):
+                schema = payload_schema(name)
+                self.assertEqual(schema["$schema"], JSON_SCHEMA_DRAFT)
+                self.assertEqual(schema["$id"], f"{_SCHEMA_BASE_URI}/{name}.json")
+                self.assertEqual(schema["title"], expect["title"])
+                self.assertEqual(schema["type"], "object")
+                self.assertIs(schema["additionalProperties"], False)
+                meta = schema["x-parsecore"]
+                self.assertEqual(meta["name"], name)
+                self.assertEqual(meta["category"], "run_publication")
+                self.assertEqual(meta["schema_version"], expect["schema_version"])
+                self.assertEqual(
+                    schema["properties"]["schema_version"]["const"],
+                    expect["schema_version"],
+                )
+                self.assertEqual(schema["required"], expect["required"])
+                self.assertEqual(
+                    sorted(schema["properties"]), sorted(expect["properties"])
+                )
 
     def test_each_schema_has_correct_json_schema_metadata(self) -> None:
         for name, expect in _SCHEMA_EXPECTATIONS.items():

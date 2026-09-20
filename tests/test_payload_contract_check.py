@@ -16,8 +16,8 @@ class PayloadContractCheckTests(unittest.TestCase):
 
         self.assertEqual(payload["schema_version"], "2026-06-payload-contract-check")
         self.assertEqual(payload["status"], "passed")
-        self.assertEqual(payload["summary"]["schema_count"], 6)
-        self.assertEqual(payload["summary"]["payload_count"], 6)
+        self.assertEqual(payload["summary"]["schema_count"], 8)
+        self.assertEqual(payload["summary"]["payload_count"], 8)
         self.assertEqual(payload["summary"]["failed_schema_count"], 0)
         self.assertEqual(payload["summary"]["failed_payload_count"], 0)
         self.assertEqual(payload["failures"], [])

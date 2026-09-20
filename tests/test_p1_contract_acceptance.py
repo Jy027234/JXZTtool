@@ -16,9 +16,9 @@ class P1ContractAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(report["schema_version"], "2026-07-p1-contract-acceptance")
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(report["summary"]["schema_count"], 6)
+        self.assertEqual(report["summary"]["schema_count"], 8)
         self.assertEqual(report["summary"]["sample_variant_count"], 4)
-        self.assertEqual(report["summary"]["payload_count"], 24)
+        self.assertEqual(report["summary"]["payload_count"], 32)
         self.assertEqual(report["summary"]["failed_check_count"], 0)
         self.assertEqual(report["failures"], [])
         self.assertEqual(

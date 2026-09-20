@@ -10,6 +10,163 @@ from .api_payloads import (
 )
 from .models import Block, BlockType, Chunk, ParseJobState
 from .parts import document_parts_projection
+from .publication import (
+    ARTIFACT_PROFILES,
+    ArtifactRequirement,
+    DEFAULT_VALIDATION_POLICY,
+    ExecutionStatus,
+    PublicationStatus,
+    RUN_STORE_OPERATIONS,
+    ValidationStatus,
+    contract_payload,
+)
+
+
+def _run_identity(*, state: str = "succeeded") -> dict[str, Any]:
+    return {
+        "job_id": "job-0001",
+        "parse_run_id": "run-0001",
+        "base_run_id": None,
+        "tenant_id": "tenant-a",
+        "doc_id": "doc-0001",
+        "source_version": "sha256:2f8a1c0d9e5b7a43",
+        "source_bytes": 1048576,
+        "attempt_count": 1,
+        "profile": "default",
+        "created_at": "2026-09-20T10:00:00+00:00",
+    }
+
+
+def _validation_reference(
+    *,
+    status: str = "needs_review",
+    reason: str = "quality_gate_report_only",
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "reason": reason,
+        "policy_version": DEFAULT_VALIDATION_POLICY.version,
+        "rule_version": "2026-06-quality-signals",
+        "warning_codes": [],
+        "metrics": {"reading_order_confidence": 0.91},
+        "evidence_refs": ["quality-signal:reading_order"],
+        "validated_at": None,
+    }
+
+
+def build_sample_parse_run() -> dict[str, Any]:
+    """Frozen run record: succeeded execution, validated, not yet published.
+
+    This is the case the whole P0-02 contract exists for: the legacy signal
+    (``job.state = done``) is ``succeeded``, yet the run is unreviewed and
+    therefore unpublished.
+    """
+
+    contract = contract_payload()
+    profile = ARTIFACT_PROFILES["default"]
+    return {
+        "schema_version": "2026-09-parse-run-v1",
+        "contract_version": contract["schema_version"],
+        "contract_status": contract["status"],
+        "run_identity": _run_identity(),
+        "execution_status": ExecutionStatus.SUCCEEDED.value,
+        "validation": _validation_reference(),
+        "publication": {
+            "status": PublicationStatus.UNPUBLISHED.value,
+            "publication_generation": None,
+            "active_run_id": None,
+            "published_at": None,
+            "superseded_by_run_id": None,
+            "withdrawn_reason": None,
+        },
+        "artifact_profile": profile.name,
+        "required_artifacts": list(profile.required_artifacts()),
+        "optional_artifacts": [
+            name
+            for name, requirement in sorted(profile.requirements.items())
+            if requirement is ArtifactRequirement.OPTIONAL
+        ],
+        "disabled_artifacts": list(profile.disabled_artifacts()),
+        "degraded_artifacts": [
+            {
+                "artifact": "rag",
+                "reason": "in_memory_index",
+                "requirement": ArtifactRequirement.OPTIONAL.value,
+            }
+        ],
+        "version_sources": {
+            "engine": "pdf-text",
+            "engine_version": "1.0.0",
+            "adapter": "parsecore",
+            "facts_schema": "2026-06-ir-v1",
+            "domain_package": None,
+            "chunker": "artifact-chunker",
+            "embedding": None,
+            "validation_policy": DEFAULT_VALIDATION_POLICY.version,
+            "config_fingerprint": "9f1c2ab34de5f607",
+            "capability_fingerprint": "0a1b2c3d4e5f6071",
+        },
+        "capabilities": {
+            "accepting_jobs": True,
+            "formal_parse_ready": True,
+            "degraded_capabilities": [],
+            "placeholder_parsers": [],
+        },
+        "legacy": {
+            "job_state": ParseJobState.DONE.value,
+            "job_state_maps_to_execution_status": ExecutionStatus.SUCCEEDED.value,
+            "done_means_published": False,
+            "done_means_validated": False,
+            "parse_run_id_alias": contract["legacy_notes"]["parse_run_id_alias"],
+        },
+        "transitions": contract["transitions"],
+    }
+
+
+def build_sample_document_publication() -> dict[str, Any]:
+    """Formal read contract when no run has been published yet."""
+
+    contract = contract_payload()
+    return {
+        "schema_version": "2026-09-document-publication-v1",
+        "contract_version": contract["schema_version"],
+        "tenant_id": "tenant-a",
+        "doc_id": "doc-0001",
+        "active_run_id": None,
+        "publication_generation": 0,
+        "publication_status": PublicationStatus.UNPUBLISHED.value,
+        "formal_version_available": False,
+        "consumer_signal": "not_ready",
+        "source_version": None,
+        "profile": "default",
+        "validation": _validation_reference(),
+        "readiness": {
+            "accepting_jobs": True,
+            "formal_parse_ready": True,
+            "blocking_reasons": [],
+        },
+        "policy": {
+            **DEFAULT_VALIDATION_POLICY.as_payload(),
+            "concurrent_publication": contract["concurrent_publication_policy"],
+        },
+        "runs": [
+            {
+                "parse_run_id": "run-0001",
+                "execution_status": ExecutionStatus.SUCCEEDED.value,
+                "validation_status": ValidationStatus.NEEDS_REVIEW.value,
+                "publication_status": PublicationStatus.UNPUBLISHED.value,
+            }
+        ],
+        "legacy": {
+            "formal_signal": contract["consumer_migration"]["legacy_formal_signal"],
+            "formal_signal_sufficient": False,
+            "preview_endpoint_required_for_partial": True,
+        },
+        "diagnostics": {
+            "store_operations": list(RUN_STORE_OPERATIONS),
+            "latest_job_used_for_publication": False,
+        },
+    }
 
 
 def _base_provider_registry() -> dict[str, Any]:
@@ -756,6 +913,8 @@ def build_payload_contract_samples() -> dict[str, dict[str, Any]]:
         "document-providers": _document_providers_projection(snapshot),
         "document-quality": _document_quality_projection(snapshot),
         "document-reader": _document_projection(snapshot, projection="reader"),
+        "parse-run": build_sample_parse_run(),
+        "document-publication": build_sample_document_publication(),
     }
 
 
@@ -771,6 +930,8 @@ def build_complex_payload_contract_samples() -> dict[str, dict[str, Any]]:
         "document-providers": _document_providers_projection(snapshot),
         "document-quality": _document_quality_projection(snapshot),
         "document-reader": _document_projection(snapshot, projection="reader"),
+        "parse-run": build_sample_parse_run(),
+        "document-publication": build_sample_document_publication(),
     }
 
 
@@ -786,6 +947,8 @@ def build_anomaly_payload_contract_samples() -> dict[str, dict[str, Any]]:
         "document-providers": _document_providers_projection(snapshot),
         "document-quality": _document_quality_projection(snapshot),
         "document-reader": _document_projection(snapshot, projection="reader"),
+        "parse-run": build_sample_parse_run(),
+        "document-publication": build_sample_document_publication(),
     }
 
 
@@ -801,4 +964,6 @@ def build_part_rerun_payload_contract_samples() -> dict[str, dict[str, Any]]:
         "document-providers": _document_providers_projection(snapshot),
         "document-quality": _document_quality_projection(snapshot),
         "document-reader": _document_projection(snapshot, projection="reader"),
+        "parse-run": build_sample_parse_run(),
+        "document-publication": build_sample_document_publication(),
     }

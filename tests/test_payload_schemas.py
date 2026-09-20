@@ -12,6 +12,10 @@ from parsecore.api_payloads import (
 )
 from parsecore.models import Block, BlockType, Chunk, ParseJobState
 from parsecore.parts import document_parts_projection
+from parsecore.payload_contract_samples import (
+    build_sample_document_publication,
+    build_sample_parse_run,
+)
 from parsecore.payload_schemas import (
     PAYLOAD_SCHEMA_REGISTRY_VERSION,
     payload_schema,
@@ -248,9 +252,11 @@ class PayloadSchemaTests(unittest.TestCase):
                 "document-providers",
                 "document-quality",
                 "document-reader",
+                "parse-run",
+                "document-publication",
             ),
         )
-        self.assertEqual(registry["summary"]["total"], 6)
+        self.assertEqual(registry["summary"]["total"], 8)
         self.assertEqual(registry["summary"]["document_projection_count"], 6)
         self.assertEqual(
             [descriptor["endpoint"] for descriptor in registry["schemas"]],
@@ -261,6 +267,8 @@ class PayloadSchemaTests(unittest.TestCase):
                 "/v1/parse/schemas/document-providers",
                 "/v1/parse/schemas/document-quality",
                 "/v1/parse/schemas/document-reader",
+                "/v1/parse/schemas/parse-run",
+                "/v1/parse/schemas/document-publication",
             ],
         )
 
@@ -272,12 +280,22 @@ class PayloadSchemaTests(unittest.TestCase):
             "document-providers": "2026-06-provider-usage",
             "document-quality": "2026-06",
             "document-reader": "2026-07-reader",
+            "parse-run": "2026-09-parse-run-v1",
+            "document-publication": "2026-09-document-publication-v1",
         }
         for name, schema_version in expected_versions.items():
             with self.subTest(name=name):
                 schema = payload_schema(name)
                 Draft202012Validator.check_schema(schema)
                 self.assertEqual(schema["x-parsecore"]["schema_version"], schema_version)
+
+    def test_parse_run_sample_matches_frozen_schema(self) -> None:
+        payload = build_sample_parse_run()
+        Draft202012Validator(payload_schema("parse-run")).validate(payload)
+
+    def test_document_publication_sample_matches_frozen_schema(self) -> None:
+        payload = build_sample_document_publication()
+        Draft202012Validator(payload_schema("document-publication")).validate(payload)
 
     def test_ir_payload_matches_frozen_schema(self) -> None:
         payload = _document_projection(_sample_snapshot(), projection="ir")

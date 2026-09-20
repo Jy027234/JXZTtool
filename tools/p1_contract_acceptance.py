@@ -53,6 +53,10 @@ EXPECTED_SCHEMA_NAMES = (
     "document-providers",
     "document-quality",
     "document-reader",
+    # P0-02: run/publication contract, frozen in the same registry so a
+    # downstream consumer can gate on publication_status instead of job.state.
+    "parse-run",
+    "document-publication",
 )
 
 _SAMPLE_BUILDERS: tuple[tuple[str, Callable[[], dict[str, dict[str, Any]]]], ...] = (
