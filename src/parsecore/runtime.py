@@ -895,6 +895,90 @@ class ParseRuntime:
             "latest_job_used_as_formal_version": False,
         }
 
+    def publish_reviewed_run(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        parse_run_id: str | None = None,
+        reason: str = "",
+        reviewer: str = "",
+    ) -> dict[str, Any]:
+        """Make a reviewed preview run the formal version of a document.
+
+        A run whose validation asked for a decision (``warning`` /
+        ``needs_review``) is kept as a preview on purpose.  A reviewer who accepts
+        that conclusion publishes it here: the run keeps the conclusion it was
+        reviewed under (publishing after review never rewrites ``warning`` into
+        ``passed``), the decision is recorded with the publication event, and a
+        document that is a partition part refreshes its parent afterwards so the
+        parent can publish the part it was waiting for.
+
+        A ``rejected`` or ``error`` run has nothing deliverable and stays
+        unpublishable; so does a run that was never validated.
+        """
+
+        if not self.run_publication_ready or self.run_store is None:
+            raise RuntimeError("run publication is not available for this backend")
+        state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        run_id = str(parse_run_id or state.get("preview_run_id") or "").strip()
+        if not run_id:
+            raise LookupError(f"no preview run to publish for doc_id={doc_id!r}")
+        record = self.run_store.get_run(parse_run_id=run_id)
+        if record is None or str(record.doc_id) != str(doc_id):
+            raise LookupError(f"run {run_id!r} does not belong to doc_id={doc_id!r}")
+        result = self.run_store.publish_run(
+            parse_run_id=run_id,
+            expected_generation=int(state.get("publication_generation") or 0),
+            durable_index=isinstance(self.index, PgVectorIndex),
+            profile=str(record.profile or self.settings.runtime.run_artifact_profile or "default"),
+            actor=reviewer or "reviewer",
+            reviewed={"reason": reason, "reviewer": reviewer},
+        )
+        payload = result.as_payload()
+        payload["review"] = {"reason": reason, "reviewer": reviewer}
+        payload["validation_status"] = str(record.validation_status or "")
+        self.event_logger.log(
+            "run_published_after_review",
+            doc_id=doc_id,
+            parse_run_id=run_id,
+            reviewer=str(reviewer or ""),
+            reason=str(reason or ""),
+            publication_generation=int(result.publication_generation or 0),
+        )
+        self._refresh_parent_of_reviewed_part(doc_id=doc_id, run_id=run_id)
+        return payload
+
+    def _refresh_parent_of_reviewed_part(self, *, doc_id: str, run_id: str) -> None:
+        """Re-assemble the parent of a part whose content just became formal.
+
+        A partitioned parent withholds its formal version while a part awaits
+        review; publishing the reviewed part is the event that lets the parent
+        publish, so it must not wait for an unrelated part to finish.
+        """
+
+        job = None
+        get_job = getattr(self.job_store, "get_job", None)
+        if callable(get_job):
+            record = self.run_store.get_run(parse_run_id=run_id) if self.run_store else None
+            job_id = str(getattr(record, "job_id", "") or "")
+            if job_id:
+                try:
+                    job = get_job(job_id=job_id)
+                except Exception:
+                    job = None
+        options = dict(getattr(job, "options", {}) or {})
+        if str(options.get("job_kind") or "") != _PDF_PART_JOB_KIND:
+            return
+        parent_doc_id = str(options.get("source_doc_id") or options.get("parent_doc_id") or "")
+        if not parent_doc_id:
+            return
+        self.refresh_partitioned_parent(
+            doc_id=parent_doc_id,
+            tenant_id=getattr(job, "tenant_id", None),
+            parent_job_id=str(options.get("parent_job_id") or "") or None,
+        )
+
     def _uses_run_publication(self, *, doc_id: str, tenant_id: str | None) -> bool:
         """Whether this document's executions must go through the run store.
 

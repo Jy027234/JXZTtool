@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import time
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from starlette.requests import Request
@@ -50,6 +50,7 @@ from .private_files import (
     write_private_bytes,
 )
 from .profiles import describe_parse_profiles, resolve_parse_profile
+from .run_store import PublicationPolicyError, PublishError, StalePublicationError
 from .runtime import ParseRuntime, QuotaExceededError
 from .tenant_scope import (
     SOURCE_DEFAULT,
@@ -139,6 +140,11 @@ class ApiRoutes:
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/publication", self.get_document_publication, methods=["GET"]),
+            Route(
+                "/v1/parse/documents/{doc_id}/publication/publish",
+                self.publish_document_publication,
+                methods=["POST"],
+            ),
             Route("/v1/parse/documents/{doc_id}/coverage", self.get_document_coverage, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/providers", self.get_document_providers, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/reader", self.get_document_reader, methods=["GET"]),
@@ -1039,6 +1045,85 @@ class ApiRoutes:
                 readiness=capabilities,
                 runs=runs,
                 diagnostics=diagnostics,
+            )
+        )
+
+    async def publish_document_publication(self, request: Request) -> JSONResponse:
+        """Publish a reviewed preview run as the document's formal version.
+
+        The reviewer's reason is required: this endpoint exists to record a human
+        decision, not to bypass the validation policy silently.  A rejected or
+        errored run stays unpublishable.
+        """
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
+        doc_id = str(request.path_params["doc_id"])
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, Mapping):
+            payload = {}
+        reason = str(payload.get("reason") or "").strip()
+        reviewer = str(payload.get("reviewer") or "").strip()
+        if not reason and not reviewer:
+            return _error_response(
+                request,
+                code="review_decision_required",
+                message="A review reason or reviewer is required to publish a preview run",
+                status_code=400,
+            )
+        run_id = str(payload.get("parse_run_id") or payload.get("run_id") or "").strip() or None
+        try:
+            result = runtime_obj.publish_reviewed_run(
+                doc_id=doc_id,
+                tenant_id=tenant_id,
+                parse_run_id=run_id,
+                reason=reason,
+                reviewer=reviewer,
+            )
+        except LookupError as exc:
+            return _error_response(
+                request, code="preview_run_not_found", message=str(exc), status_code=404
+            )
+        except PublicationPolicyError as exc:
+            return _error_response(
+                request,
+                code=exc.code,
+                message=str(exc),
+                status_code=409,
+                detail={"policy_reason": getattr(exc, "policy_reason", "")},
+            )
+        except (PublishError, StalePublicationError) as exc:
+            return _error_response(request, code=exc.code, message=str(exc), status_code=409)
+        state = runtime_obj.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        capabilities = runtime_obj.capability_report()
+        return JSONResponse(
+            build_document_publication_payload(
+                state=state,
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                profile=str(runtime_obj.settings.runtime.run_artifact_profile),
+                readiness=capabilities,
+                runs=[
+                    {
+                        "parse_run_id": record.parse_run_id,
+                        "execution_status": record.execution_status,
+                        "validation_status": record.validation_status,
+                        "publication_status": record.publication_status,
+                        "created_at": record.created_at,
+                    }
+                    for record in runtime_obj.list_runs(doc_id=doc_id, tenant_id=tenant_id)
+                ],
+                diagnostics={
+                    "publication_ready": runtime_obj.run_publication_ready,
+                    "run_store_backend": type(runtime_obj.run_store).__name__
+                    if runtime_obj.run_store is not None
+                    else None,
+                    "latest_job_used_for_publication": False,
+                    "published_after_review": dict(result.get("review") or {}),
+                },
             )
         )
 

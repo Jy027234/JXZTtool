@@ -887,6 +887,13 @@ P0-03～P0-05 引入的运维命令（均使用同一个 `--config`）：
 # 查看某文档的正式版本指针（未发布时返回 not_ready）
 #   GET /v1/parse/documents/{doc_id}/publication
 
+# 复核通过后，把预览 run 发布为正式版本（必须给出 reason 或 reviewer）
+#   POST /v1/parse/documents/{doc_id}/publication/publish
+#   body: {"reason": "签名页已与纸质件核对", "reviewer": "qa-1", "parse_run_id": "<可选，默认取预览 run>"}
+#   返回与 GET 相同的发布状态载荷（diagnostics.published_after_review 记录本次决定）
+#   该校验结论不会被改写：run 仍是 warning/needs_review，只是被人工接受；
+#   rejected / error / not_run 的 run 不可通过该入口发布。
+
 # 把 P0-03 之前的遗留产物导入为"未校验"的 legacy 快照（默认 dry-run）
 .\.venv\Scripts\python.exe -m parsecore.cli import-legacy-snapshots --config parsecore.toml
 .\.venv\Scripts\python.exe -m parsecore.cli import-legacy-snapshots --config parsecore.toml --apply

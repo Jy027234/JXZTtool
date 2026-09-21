@@ -71,6 +71,17 @@ def _normalize_tenant(tenant_id: str | None) -> str:
     return str(tenant_id or "").strip() or "default"
 
 
+def _normalize_review_decision(reviewed: Mapping[str, Any]) -> dict[str, Any]:
+    """The reviewer's decision as it is recorded with the publication."""
+
+    return {
+        "reason": str(reviewed.get("reason") or "").strip(),
+        "reviewer": str(reviewed.get("reviewer") or "").strip(),
+        "source": str(reviewed.get("source") or "reviewed_publication"),
+        "reviewed_at": _utc_now(),
+    }
+
+
 def _canonical(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -810,6 +821,7 @@ class SQLiteRunStore:
         profile: str | None = None,
         actor: str = "runtime",
         legacy_import: bool = False,
+        reviewed: Mapping[str, Any] | None = None,
     ) -> PublishResult:
         """Atomically make ``parse_run_id`` the published version.
 
@@ -834,6 +846,14 @@ class SQLiteRunStore:
         ``legacy-import-no-validation``; the flag republishes nothing that was
         ever validated or rejected, and it cannot be used to bypass a failed
         validation because a failed run is not ``not_run``.
+
+        ``reviewed`` is the human decision the other exception stands for: a run
+        whose validation asked for review (``warning`` / ``needs_review``) can be
+        made the formal version by a reviewer who accepts it.  The decision must
+        name a reason or a reviewer, it is recorded with the publication event, and
+        the run's own validation conclusion is left untouched — publishing after
+        review never rewrites ``warning`` into ``passed``.  A ``rejected`` or
+        ``error`` run has nothing deliverable and cannot be reviewed into service.
         """
 
         with self._write_transaction() as conn:
@@ -878,9 +898,15 @@ class SQLiteRunStore:
             policy_version = (
                 str(report.get("policy_version") or "") if report else ""
             ) or DEFAULT_VALIDATION_POLICY.version
+            decision: dict[str, Any] | None = None
             if legacy_import:
                 self._assert_legacy_import_publishable(row=row, policy_version=policy_version)
                 allowed, reason = True, "legacy_import_exempt_from_validation_policy"
+            elif reviewed is not None and self._review_allows_publication(
+                validation_status=str(row["validation_status"] or ""), reviewed=reviewed
+            ):
+                allowed, reason = True, "reviewed_publication"
+                decision = _normalize_review_decision(reviewed)
             else:
                 allowed, reason = self._policy_for(policy_version).may_publish(
                     validation_status=row["validation_status"],
@@ -976,6 +1002,11 @@ class SQLiteRunStore:
                     "generation": generation,
                     "counts": counts,
                     "superseded_run_id": superseded_run_id,
+                    # A reviewed publication is recorded as a decision, not as a
+                    # policy pass: the run keeps the conclusion it was reviewed
+                    # under.
+                    "review": decision,
+                    "validation_status": str(row["validation_status"] or ""),
                 },
                 generation=generation,
             )
@@ -991,6 +1022,32 @@ class SQLiteRunStore:
                 reason=reason,
                 consumer_signal="published",
             )
+
+    @staticmethod
+    def _review_allows_publication(
+        *, validation_status: str, reviewed: Mapping[str, Any]
+    ) -> bool:
+        """Whether a human decision may publish this conclusion.
+
+        Only a conclusion that *asked* for a decision can be decided.  A rejected
+        or errored run has nothing deliverable, and a run that was never validated
+        is not something a reviewer can accept.
+        """
+
+        status = str(validation_status or "")
+        if status in {
+            ValidationStatus.REJECTED.value,
+            ValidationStatus.ERROR.value,
+            ValidationStatus.NOT_RUN.value,
+            # ``withdrawn`` is a publication state, not a validation one, but a run
+            # carrying it must not be pushed back into service by a review.
+            "withdrawn",
+        }:
+            return False
+        return bool(
+            str(reviewed.get("reason") or "").strip()
+            or str(reviewed.get("reviewer") or "").strip()
+        )
 
     def get_active_run(
         self, *, doc_id: str, tenant_id: str | None = None

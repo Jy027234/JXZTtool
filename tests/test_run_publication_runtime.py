@@ -250,6 +250,92 @@ class RuntimePublicationTests(unittest.TestCase):
         self.assertFalse(snapshot["publication"]["latest_job_used_as_formal_version"])
         self.assertIn("OLD content", "\n".join(block.content for block in snapshot["blocks"]))
 
+    def test_a_reviewed_preview_run_becomes_the_formal_version(self) -> None:
+        # A preview exists because a human has to decide.  The reviewer's decision
+        # makes it the formal version; the conclusion it was reviewed under stays
+        # `warning`, so publishing after review never rewrites the validation.
+        from unittest.mock import patch
+
+        from parsecore.bootstrap import build_runtime
+        from parsecore.publication import ValidationStatus
+        from parsecore.validation import ValidationReport
+
+        warning_report = ValidationReport(
+            status=ValidationStatus.WARNING,
+            reason="suspect_signature_pages",
+            warnings=("suspect_signature_pages",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            document_path = workspace.create_docx("spec.docx", ["Reviewed content"])
+            runtime = build_runtime(workspace.config_path)
+            with patch("parsecore.runtime.validate_run", return_value=warning_report):
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-reviewed",
+                        file_path=str(document_path),
+                        media_type=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document"
+                        ),
+                    )
+                )
+            preview_run_id = runtime.publication_state(doc_id="doc-reviewed")["preview_run_id"]
+            published = runtime.publish_reviewed_run(
+                doc_id="doc-reviewed",
+                reason="signature pages checked against the paper copy",
+                reviewer="qa-1",
+            )
+            state = runtime.publication_state(doc_id="doc-reviewed")
+            snapshot = runtime.get_document(doc_id="doc-reviewed")
+            run = runtime.run_store.get_run(parse_run_id=preview_run_id)
+
+        self.assertTrue(published["published"])
+        self.assertEqual(published["reason"], "reviewed_publication")
+        self.assertEqual(published["parse_run_id"], preview_run_id)
+        self.assertEqual(published["review"]["reviewer"], "qa-1")
+        self.assertEqual(state["consumer_signal"], "published")
+        self.assertEqual(state["active_run_id"], preview_run_id)
+        self.assertTrue(state["formal_version_available"])
+        # The run keeps the conclusion it was reviewed under.
+        self.assertEqual(run.validation_status, "warning")
+        self.assertEqual(snapshot["publication"]["served_run_id"], preview_run_id)
+        self.assertTrue(snapshot["publication"]["pinned"])
+
+    def test_a_reviewed_publication_needs_a_decision(self) -> None:
+        from unittest.mock import patch
+
+        from parsecore.bootstrap import build_runtime
+        from parsecore.publication import ValidationStatus
+        from parsecore.run_store import PublicationPolicyError
+        from parsecore.validation import ValidationReport
+
+        warning_report = ValidationReport(
+            status=ValidationStatus.WARNING,
+            reason="suspect_signature_pages",
+            warnings=("suspect_signature_pages",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            document_path = workspace.create_docx("spec.docx", ["Reviewed content"])
+            runtime = build_runtime(workspace.config_path)
+            with patch("parsecore.runtime.validate_run", return_value=warning_report):
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-no-decision",
+                        file_path=str(document_path),
+                        media_type=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document"
+                        ),
+                    )
+                )
+            with self.assertRaises(PublicationPolicyError):
+                # No reason, no reviewer: the policy still decides, and it refuses.
+                runtime.publish_reviewed_run(doc_id="doc-no-decision")
+            state = runtime.publication_state(doc_id="doc-no-decision")
+
+        self.assertEqual(state["consumer_signal"], "preview_only")
+        self.assertIsNone(state["active_run_id"])
+
     def test_a_document_with_nothing_parsed_has_no_preview(self) -> None:
         from parsecore.bootstrap import build_runtime
 
@@ -408,6 +494,49 @@ class PublicationEndpointTests(unittest.TestCase):
         self.assertEqual(body["active_run_id"], published["parse_run_id"])
         self.assertEqual(body["publication_generation"], 1)
         self.assertEqual(body["validation"]["policy_version"], "2026-09-validation-policy-v1")
+
+    def test_reviewed_publication_endpoint_promotes_a_preview_run(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        from parsecore.payload_schemas import payload_schema
+
+        with TemporaryWorkspace(CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                runtime = client.app.state.runtime
+                preview = runtime.publish_run(
+                    doc_id="doc-1",
+                    artifacts=RunArtifacts(
+                        blocks=(_block("b1", "reviewed", doc_id="doc-1"),),
+                        views={"pages": [{"page_number": 1, "text": "reviewed"}]},
+                    ),
+                    job_id="job-review",
+                    validation_status="warning",
+                    validation_reason="suspect_signature_pages",
+                )
+                missing_decision = client.post("/v1/parse/documents/doc-1/publication/publish", json={})
+                published = client.post(
+                    "/v1/parse/documents/doc-1/publication/publish",
+                    json={"reason": "checked against the paper copy", "reviewer": "qa-1"},
+                )
+
+        self.assertFalse(preview["published"])
+        self.assertEqual(missing_decision.status_code, 400)
+        self.assertEqual(missing_decision.json()["code"], "review_decision_required")
+        self.assertEqual(published.status_code, 200)
+        body = published.json()
+        self.assertEqual(body["publication_status"], "published")
+        self.assertTrue(body["formal_version_available"])
+        self.assertEqual(body["consumer_signal"], "published")
+        self.assertEqual(body["active_run_id"], preview["parse_run_id"])
+        self.assertEqual(body["publication_generation"], 1)
+        # The conclusion the reviewer accepted is still the recorded one.
+        self.assertEqual(body["validation"]["status"], "warning")
+        self.assertEqual(body["validation"]["reason"], "suspect_signature_pages")
+        self.assertEqual(
+            body["diagnostics"]["published_after_review"]["reviewer"], "qa-1"
+        )
+        Draft202012Validator(payload_schema("document-publication")).validate(body)
 
     def test_publication_payload_matches_the_frozen_schema(self) -> None:
         from jsonschema import Draft202012Validator

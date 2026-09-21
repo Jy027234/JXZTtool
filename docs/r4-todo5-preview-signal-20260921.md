@@ -157,14 +157,18 @@ blocks 与 B 的 chunks 配成一对。`seal_run()` 会拒绝这种 run，但这
 
 | 文件 | 变更 |
 | --- | --- |
-| [src/parsecore/runtime.py](../src/parsecore/runtime.py) | 父文档写锁；`_latest_done_part_jobs()`；`_parts_awaiting_review()`（待复核 / 未完成两类缺口）；`publish_merged_parent_run(parts_awaiting_review=…)` 把缺口作为 warning 质检信号送入校验；`SealError` 按"未发布"处理；run 记录补 `policy_version` / `rule_version` / `warning_codes` |
-| [tests/test_runtime.py](../tests/test_runtime.py) | 新增 3 项：两个刷新不交错的确定性用例（去掉锁即失败）、`SealError` 时父文档不发布、分片待复核时父文档保持预览并给出规则码；新增 1 项：重跑在飞时父文档保留该片上次完成的内容 |
+| [src/parsecore/runtime.py](../src/parsecore/runtime.py) | 父文档写锁；`_latest_done_part_jobs()`；`_parts_awaiting_review()`（待复核 / 未完成两类缺口）；`publish_merged_parent_run(parts_awaiting_review=…)` 把缺口作为 warning 质检信号送入校验；`SealError` 按"未发布"处理；run 记录补 `policy_version` / `rule_version` / `warning_codes`；新增 `publish_reviewed_run()` |
+| [src/parsecore/run_store.py](../src/parsecore/run_store.py) | `publish_run(reviewed=…)`：对 `warning` / `needs_review` 的人工决定例外，决定写入 `run_published` 事件；`rejected` / `error` / `not_run` 仍拒 |
+| [src/parsecore/api_routes.py](../src/parsecore/api_routes.py) | `POST /v1/parse/documents/{doc_id}/publication/publish`（缺 reason/reviewer → 400；无可发布预览 → 404；策略拒绝 → 409） |
+| [docs/configuration.md](configuration.md) | 运维章节补上复核发布入口与语义 |
+| [tests/test_runtime.py](../tests/test_runtime.py) | 新增 3 项：两个刷新不交错的确定性用例（去掉锁即失败）、`SealError` 时父文档不发布、分片待复核时父文档保持预览并给出规则码；新增 2 项：重跑在飞时父文档保留该片上次完成的内容、复核发布分片后父文档重算 |
+| [tests/test_run_publication_runtime.py](../tests/test_run_publication_runtime.py) | 新增 3 项：复核发布把预览 run 变成正式版本（结论仍是 warning）、无决定的复核被策略拒绝、复核发布接口端到端（含 schema 校验） |
 
 验证：
 
 ```text
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t .
-Ran 1010 tests / OK (skipped=6)
+Ran 1013 tests / OK (skipped=6)
 
 分片重跑用例连续 40 次：0 失败（修正前 30 次 3 次失败；未修改基线 30 次 1 次失败）
 ```
@@ -179,16 +183,44 @@ Ran 1010 tests / OK (skipped=6)
 重跑 part-1 并执行 5.9 s：父文档仍 preview_only、代数 0、内容不变
 ```
 
-第 1 片的 `warning` 是内容本身的结论（该片 100 页里触发了校验规则），因此父文档暂时没有正式
-版本是正确结果：要么复核后让该片可发布（当前没有"把预览 run 提升为正式版本"的入口，属待办 5
-的后续项），要么重跑该片得到可发布结论。
+第 1 片的 `warning` 是内容本身的结论（该片 100 页里触发了校验规则）。为避免"待复核"变成死路，
+本次补齐了复核后的发布入口（第 5.5 节），并在真实样本上跑通了完整链路。
+
+### 5.5 复核后的发布入口（本次补齐）
+
+预览 run 原本只能靠重跑或改配置才有机会进入正式版本；分区父文档加上缺口判定后，这会把
+"一片待复核"变成整篇都没有正式版本。因此补一个显式的人工决定入口：
+
+| 入口 | 说明 |
+| --- | --- |
+| `ParseRuntime.publish_reviewed_run(doc_id, parse_run_id=None, reason=..., reviewer=...)` | 把指定（默认取预览）run 发布为正式版本；分片发布会顺带刷新其父文档 |
+| `POST /v1/parse/documents/{doc_id}/publication/publish` | 同上，body `{"reason": "...", "reviewer": "...", "parse_run_id": "..."}`；缺 reason 与 reviewer 时返回 400 `review_decision_required` |
+| `SQLiteRunStore.publish_run(reviewed={...})` | 唯一的第二条策略例外（另一条是 `legacy_import`）：只对 `warning` / `needs_review` 生效，`rejected` / `error` / `not_run` 仍然拒绝 |
+
+原则：**发布不等于改写结论**。被复核发布的 run 仍然记录 `validation_status = warning`，决定
+（reason / reviewer / 时间）写进 `run_published` 事件的 payload 与接口返回的
+`diagnostics.published_after_review`，因此"为什么一个非 passed 的 run 成了正式版本"是可追溯的。
+
+真实样本上的完整链路（`36d65cd6b61346e28e97dbaf829646de.pdf`，3 片）：
+
+```text
+分片全部解析完成     父文档 preview_only，代数 0，1987 块 / 197 页（1 片待复核）
+复核发布 part-1      分片 published（validation 仍是 warning），父文档自动重算
+                     → 2782 块 / 2739 块分块 / 297 页（1..297），悬空引用 0，仍 preview_only
+                     （父文档自己的校验结论同样是 warning：它现在含有需要复核的内容）
+复核发布父文档        published，代数 1，formal_version_available=true，
+                     served_run_id=run-620a91c65ece4b15，pinned=true
+```
+
+即"复核分片 → 复核整篇"两次决定就能得到完整的 297 页正式版本；在此之前父文档不会用缺页的
+合并结果冒充正式版本。
 
 ## 6. 仍然留待后续
 
 1. **索引层的 run 隔离**：`PgVectorIndex` 仍不能按 run 过滤，因此索引能力未计入 `SQLiteRunStore` 的能力声明；正式部署的 Postgres/pgvector 一致性与超大目录演练仍按方案留在部署事项里。
 2. **已发布证据清理保护**：staged 产物的清理作业尚未实现（方案把它列为部署相关事项）。
 3. **导出数据集全覆盖**：本次覆盖 records 导出与结构化投影；pages/lines/coverage/reader 四个数据集走同一 `get_document` 快照，未各自单测。
-4. **预览 run 的人工提升入口**：分片（或整篇）的预览 run 目前只能通过重跑或改配置达到可发布结论，没有"复核通过后发布这个 run"的显式入口；父文档的正式版本会一直等它。
+4. **复核入口的权限与批量操作**：`publish 复核` 目前只做"必须给出决定"的校验，未接入宿主鉴权勾子，也没有"一次复核整篇（含所有待复核分片）"的批量入口；宿主可循环调用分片入口再发布父文档。
 
 ## 7. 回滚
 
