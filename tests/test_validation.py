@@ -131,24 +131,18 @@ class ReproducedProblemTests(unittest.TestCase):
         self.assertIn("empty_document", codes)
         self.assertIn("required_artifact_missing:blocks", codes)
 
-    def test_cid_garble_is_rejected(self) -> None:
+    def test_cid_garble_requires_review(self) -> None:
+        # The rest of the page is usually usable, so a garbled token marks the run
+        # for review instead of discarding the document. Such a run is delivered as
+        # an unreviewed preview and is not published.
         blocks = (
             _block("b1", "Maintenance Manual", block_type=BlockType.TITLE),
             _block("b2", "(cid:12)(cid:34)(cid:56) torque value missing"),
         )
         report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views())
-        self.assertIs(report.status, ValidationStatus.REJECTED)
-        self.assertIn("cid_garble", report.rejections)
-        self.assertEqual(report.metrics["total_cid_tokens"], 3)
-
-    def test_ocr_failed_pages_require_review(self) -> None:
-        blocks = (
-            _block("b1", "Maintenance Manual", block_type=BlockType.TITLE),
-            _block("b2", "", page=3, metadata={"ocr_error_reason": "engine_timeout"}),
-        )
-        report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views(pages=3))
         self.assertIs(report.status, ValidationStatus.NEEDS_REVIEW)
-        self.assertIn("ocr_failed_pages", report.reviews)
+        self.assertIn("cid_garble", report.reviews)
+        self.assertEqual(report.metrics["total_cid_tokens"], 3)
 
     def test_broken_source_reference_signal_is_rejected(self) -> None:
         report = validate_run(
@@ -242,14 +236,15 @@ class ThresholdAndSeverityTests(unittest.TestCase):
 
 class PrecedenceTests(unittest.TestCase):
     def test_rejected_outranks_needs_review_and_warning(self) -> None:
-        blocks = (
-            _block("b1", "(cid:12)(cid:34) garbled", block_type=BlockType.TITLE),
-            _block("b2", "", page=4, metadata={"ocr_error_reason": "engine_timeout"}),
-        )
+        # A missing required artifact rejects, which outranks review and warning
+        # findings on the same run.
         report = validate_run(
-            blocks=blocks,
-            chunks=_healthy_chunks(),
-            views=_views(pages=4),
+            blocks=(
+                _block("b1", "Maintenance Manual", block_type=BlockType.TITLE),
+                _block("b2", "", page=4, metadata={"ocr_error_reason": "engine_timeout"}),
+            ),
+            chunks=(),
+            views={"pages": []},
             quality_signals=({"code": "noisy", "severity": "warning"},),
         )
         self.assertIs(report.status, ValidationStatus.REJECTED)

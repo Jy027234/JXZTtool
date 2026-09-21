@@ -242,10 +242,14 @@ def validate_run(
             )
         )
     if quality.total_cid_tokens:
+        # ``needs_review``, not ``rejected``: the rest of the page is usually
+        # extractable, so the run is delivered as an unreviewed preview rather than
+        # thrown away.  Rejecting a whole document because one token could not be
+        # decoded discards content that OCR or a reviewer can still use.
         rules.append(
             ValidationRule(
                 code="cid_garble",
-                status=ValidationStatus.REJECTED,
+                status=ValidationStatus.NEEDS_REVIEW,
                 message="CID garble tokens remain in the parsed text",
                 metric="total_cid_tokens",
                 observed=quality.total_cid_tokens,

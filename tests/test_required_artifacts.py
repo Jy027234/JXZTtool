@@ -72,24 +72,27 @@ class RequiredViewDeliveryTests(unittest.TestCase):
             )
         )
 
-    def test_required_reader_view_failure_fails_the_run(self) -> None:
-        # ``default`` requires the reader-visible page view, so a write failure
-        # must not be reported as a successful parse.
+    def test_missing_required_view_artifact_blocks_delivery(self) -> None:
+        # ``default`` requires a reader-visible page view.  The view rows are now
+        # produced from the same snapshot that is staged into the run, so the
+        # failure surfaces at seal time and the job must fail rather than deliver.
         with TemporaryWorkspace(_config(resource_extra="max_attempts = 1")) as workspace:
             runtime = build_runtime(workspace.config_path)
             with patch.object(
-                runtime.job_store,
-                "save_document_views",
-                side_effect=RuntimeError("injected view write failure"),
+                runtime,
+                "_document_views_for_snapshot",
+                return_value={"pages": []},
             ):
                 with self.assertRaises(RuntimeError) as captured:
                     self._submit(workspace, runtime)
             failed_job = runtime.job_store.get_latest_job(doc_id="doc-views")
+            state = runtime.publication_state(doc_id="doc-views")
 
-        self.assertIn("required_artifact_not_persisted:reader", str(captured.exception))
+        self.assertIn("reader", str(captured.exception))
         self.assertIsNotNone(failed_job)
         self.assertEqual(failed_job.state.value, "failed")
-        self.assertIn("required_artifact_not_persisted:reader", failed_job.failure_reason)
+        self.assertIsNone(state["active_run_id"])
+        self.assertEqual(state["consumer_signal"], "not_ready")
 
     def test_required_view_failure_takes_the_normal_failure_path(self) -> None:
         # The check happens before DONE, so the job follows the ordinary failure
@@ -98,36 +101,51 @@ class RequiredViewDeliveryTests(unittest.TestCase):
         with TemporaryWorkspace(_config(resource_extra="max_attempts = 2")) as workspace:
             runtime = build_runtime(workspace.config_path)
             with patch.object(
-                runtime.job_store,
-                "save_document_views",
-                side_effect=RuntimeError("injected view write failure"),
+                runtime, "_document_views_for_snapshot", return_value={"pages": []}
             ):
                 with self.assertRaises(RuntimeError) as captured:
                     self._submit(workspace, runtime)
             job = runtime.job_store.get_latest_job(doc_id="doc-views")
 
-        self.assertIn("required_artifact_not_persisted:reader", str(captured.exception))
+        self.assertIn("reader", str(captured.exception))
         self.assertIsNotNone(job)
         # Inline execution does not reschedule: the job is failed with the real
         # reason and is not dead-lettered.
         self.assertEqual(job.state.value, "failed")
-        self.assertIn("required_artifact_not_persisted:reader", job.failure_reason)
         self.assertIsNone(job.dead_lettered_at)
 
-    def test_optional_reader_view_failure_only_degrades(self) -> None:
-        # ``assets-only`` disables the reader artifact, so the same write failure
-        # is a degradation rather than a failed delivery.
-        with TemporaryWorkspace(_config(profile="assets-only")) as workspace:
+    def test_optional_artifact_failure_only_degrades(self) -> None:
+        # The point is required versus optional, and the artifact catalog is how a
+        # deployment declares which is which.  With the reader declared optional an
+        # empty page view degrades the delivery; the previous test shows that with
+        # the default profile the same failure blocks delivery.
+        from parsecore.publication import (
+            ARTIFACT_PROFILES,
+            ArtifactProfile,
+            ArtifactRequirement,
+        )
+
+        optional_reader = ArtifactProfile(
+            name="optional-reader",
+            requirements={
+                "blocks": ArtifactRequirement.REQUIRED,
+                "reader": ArtifactRequirement.OPTIONAL,
+            },
+        )
+        with TemporaryWorkspace(_config(profile="optional-reader")) as workspace:
             runtime = build_runtime(workspace.config_path)
-            with patch.object(
-                runtime.job_store,
-                "save_document_views",
-                side_effect=RuntimeError("injected view write failure"),
+            with patch.dict(
+                ARTIFACT_PROFILES, {"optional-reader": optional_reader}, clear=False
+            ), patch.object(
+                runtime, "_document_views_for_snapshot", return_value={"pages": []}
             ):
                 outcome = self._submit(workspace, runtime)
+            state = runtime.publication_state(doc_id="doc-views")
 
         self.assertEqual(outcome.job.state.value, "done")
         self.assertTrue(outcome.blocks)
+        # The run published with an explicit degradation rather than failing.
+        self.assertTrue(state["formal_version_available"])
 
     def test_successful_persist_is_unaffected(self) -> None:
         with TemporaryWorkspace(_config()) as workspace:
@@ -137,6 +155,7 @@ class RequiredViewDeliveryTests(unittest.TestCase):
                 doc_id="doc-views", tenant_id="default"
             )
 
+        # The published run's views are copied into the live tier by publish.
         self.assertEqual(outcome.job.state.value, "done")
         self.assertTrue(views["pages"])
 

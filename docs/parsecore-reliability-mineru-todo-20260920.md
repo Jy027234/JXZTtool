@@ -1,385 +1,143 @@
-# ParseCore 现状核查与可靠交付、MinerU 接入待办
+# ParseCore 解析效果与性能提升：开发待办
 
-日期：2026-09-20  
-核查基线：`main @ 14cc7f2`，包版本 `0.1.0`；开始核查时工作区干净。  
-状态：方案已形成，以下研发待办尚未实施。
+修订日期：2026-09-21（R4，补充结构保真与代码瘦身）
 
-本次依据用户提供的 MinerU / JXZTtool 对比方案，核查当前源码、配置、历史规格与测试，并进行临时 SQLite 环境下的故障注入。本文作为**本轮改造的优先级与验收入口**；既有 `parsecore-productization-spec.md` 继续说明已交付接口，不应将其中的历史“完成”状态解释为本文新增可靠性约束已经完成。
+代码核查基线：`main @ b18a525`。本次核对新附件涉及的源码，保留 R2 已注明的测试和探针记录；以下五项仍为待实施。
 
-## 1. 判断与执行顺序
+本文件取代此前版本的开发优先级，保留原文件名以兼容已有链接。
 
-保留 ParseCore 的作业管理、part 恢复、领域语义、字段证据及下游交付能力；将 MinerU 作为独立部署、可替换、可评测的解析 Provider。
+## 1. 本轮目标与范围
 
-当前首要问题是**正式结果的可信交付**。本地已复现占位解析被标记完成、视图写入失败仍为 DONE、失败重跑混读新旧结果三个问题。单纯接入更强的解析器无法解决这些问题。
+目标是让现有产品**解析更准确、处理更快、减少重复处理**。先保住源文件和解析器已经提供的结构，让阅读、检索和导出使用同一份结果，再改善困难版面与表格。源文件已有的结构直接读取；规则难以解决的局部问题才调用模型判断，由程序生成并校验结果。
 
-推荐顺序：
+开发同时做减法：修复错误设计时优先替换，重复逻辑优先合并，被替代的分支及时删除。新增功能与旧路径收敛一起验收，不把持续叠加适配层、兜底规则和开关当作默认做法。
 
-1. **P0：收紧真实执行与发布约束。** 明确必需能力，建立不可变产物快照、持久化校验结论和统一发布入口。
-2. **P1：接入 MinerU 并收敛事实模型。** 独立推理环境，保留结构与素材，先旁路双跑，再按场景准入；同时明确并发配置。
-3. **P2：领域能力产品化。** 将已有 CAAC v1/v2、手册语义、证据校验整理为独立版本的领域包。
+本轮围绕具体样本和现有模块修改。取消上一版新增的费用核算、价格表、预算账本、预留结算、维护摊销和强制三方案对照要求；这些都不是本轮产品功能或开发验收前提。调用次数、重试、超时和并发采用简单配置，作为正常运行保护。
 
-调整原方案的一点：**最小发布回归门禁提前到 P0**。真实样本正确性评测在 P1 准入前完成，不能等领域包整理结束再补。
+保留已完成的配置校验、发布事务、质量校验、租户边界和回归工具。在现有文档产物层按选定链路补必要结构，不进行全格式、全类型迁移。MinerU 接入、多后端扩建、领域包及模板管理平台移出本轮。重复版式复用以后遇到明确瓶颈再做，不作为此次交付条件。默认仍支持 CPU、SQLite，不强制 GPU、本地大模型或新后台服务。
 
-## 2. 现状核查：已有能力与实际缺口
+## 2. 现状：直接影响效果和速度的问题
 
-下表源码位置均对应上述提交。标注“复现”表示本次本地观察；“源码”表示控制流或数据结构核查；不代表已经在生产环境发生事故。
-
-| 领域 | 已有能力与证据 | 当前缺口及判断 | 去向 |
-| --- | --- | --- | --- |
-| 解析器接入 | `contracts.py:9` 有 `ParserAdapter`；`parsers.py:5924` 实现 7 类工厂分支 | 未知名称落到 `StubParser`，返回固定正文；本次复现任务 `done`。默认配置没有启用 MinerU，不能据此说默认 PDF 都是假解析 | P0-01 |
-| 必需能力 | `bootstrap.py:46` 集中组装依赖 | embedding/rerank 配置异常转 Null；`_build_index()` 可将 `pgvector + SQLite` 转为 `NullIndex`，本次复现。NullIndex 有内存辅助行为，但不等于承诺的持久化向量后端 | P0-01 |
-| Provider 治理 | `config.py` 已有 registry、route-plan、`route_mode/gate_status/gate_checks`；`runtime.py:3816` 已接执行路由 | `parsecore.toml:192` 中 MinerU 为 `disabled/evaluate/pending`，工厂没有实现。应补实现与实际可用性检查，复用治理框架 | P1-01～04 |
-| 质量判断 | `quality.py`、`ir.py`、`api_payloads.py:2111` 已有质量、覆盖和复跑建议 | `config.py:580` 明确 `enforcement=report_only`；质量投影返回 `blocking=False`；`runtime.py:779` 的质量观测晚于索引与 DONE。当前通用链路不是发布硬门禁 | P0-04 |
-| 完成时序 | `runtime.py:747` 起保存 chunks、更新 index，再标记 DONE | `runtime.py:769` 才持久化视图；`_persist_document_views():1026` 捕获异常并返回 False，调用方未据此阻止完成。本次复现 `done + claim 已清除 + pages=0` | P0-03～04 |
-| 版本一致性 | 已有 source hash、配置指纹、IR schema、知识单元 diff、输出 `parse_run_id` | `api_payloads.py:3335` 的 run 标识取 job_id；`stores.py:246/272/300` 按 tenant/doc 覆盖产物；`runtime.py:1165` 取最新 job 与当前产物。本次复现新 Blocks 与旧 Chunks 并存 | P0-02～03 |
-| 作业与恢复 | job attempt、claim_token、租约、重试、死信、取消、part 及重分块/重向量化已经存在 | 写入前 claim 检查与实际产物写入不在同一原子操作；尚缺文档级发布世代约束。并发旧 worker 回写是待故障测试验证的风险，不能把现有 claim 当完整版本锁 | P0-03、P0-05 |
-| 并发 | `asgi.py:37` 的 BackgroundParseRunner 用 ThreadPoolExecutor | `worker.py:25/37` 顺序 drain；`max_workers` 在独立 worker 里是每轮处理上限。不是全项目没有并发，而是两种运行模式语义不同 | P1-05 |
-| 文档事实 | `pipelines.py:113/125/140` 已有 ArtifactItem、KnowledgeUnit、ParsedDocumentArtifact；IR 已有版本 | `ir.py:35` 仍从多来源重新组装投影；底层 BlockType 仅 title/paragraph/table/image。应升级现有 artifact 为持久化事实源，避免另外建立第四套独立事实模型 | P1-02 |
-| 领域提取 | `catalog_contracts.py` 已有 CAAC v1/v2、提取器版本和 fieldEvidence；专用运行可恢复 | 本地校验明确只查轻量不变量，权威 Schema 在 CAACresource；`catalog_runs.py:54` 起有特定目录页段，同时也已有章节检测。应整理为版本化配置与包，不是重新实现目录提取 | P2-01～02 |
-| 测试与评测 | 有 provider comparison、gold evaluation、stability、license audit、self-check 等工具；50 页已批准 AI 辅助标注 | 这些标注明确不是独立人工 gold；本次 92 项相关测试通过，但未阻止上述三种交付问题 | P0-05、P1-04 |
-| CI | `.github/workflows/parsecore-ci.yml` 分 fast/full/perf | 缺样本时 fast 降为 smoke、full 可跳过；另外 full 样本探测未跳过 disabled 条目，会把目录当 JSON 读取，本次复现目录读取异常 | P0-06 |
-| 访问边界 | tenant_id 已贯穿多项存储与运行接口，`api_support.py:20` 有共享 API key | 该中间件没有身份到租户的绑定。需要确认可信宿主注入边界；本次未证明越权漏洞。若对外开放多租户服务，应在开放前完成鉴权验收 | P0-07（条件前置） |
-| 文档 | 已有大量规格、验收和部署资料 | `architecture.md` 仍写同步首版/未来队列，README 等存在历史路线。须区分已交付规格、本轮待办、历史验收 | P2-03 |
-
-### 本次实测证据
-
-相关单测命令：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest tests.test_runtime tests.test_bootstrap_routing tests.test_worker tests.test_ir tests.test_provider_provenance tests.test_config_parser_options tests.test_provider_failures tests.test_p0_release_readiness -q
-```
-
-结果：**92 tests / 13.087s / OK**。这是选定测试的结果，不是全量测试、完整回归或 MinerU 推理结果。
-
-在临时配置、临时 SQLite 库、合成 DOCX 和临时日志中执行以下探针，未连接生产库：
-
-| 探针 | 操作 | 观察结果 |
+| 当前基础 | 已确认的问题 | 本轮处理 |
 | --- | --- | --- |
-| 未实现解析器 | 将测试 `[[parsers]]` 中的 `docx-native` 换为 `mineru-local`，提交合成文件 | 实例 `StubParser`；`state=done`；含固定占位正文 |
-| 视图写入故障 | 对 `job_store.save_document_views` 注入 RuntimeError | 写入尝试 1 次；`state=done`；claim 已清除；持久化 pages 为 0 |
-| 失败重跑 | 同 doc_id 先成功保存 OLD 内容；新文件含 NEW 内容；对第二次运行的 `_load_chunks_for_request` 注入异常，max_attempts=1 | 最新 job 为 failed；读取 Blocks 含 NEW，Chunks 含 OLD |
-| 索引配置不匹配 | `_build_index('sqlite:///:memory:', 'pgvector')` | 返回 `NullIndex`，未报配置不兼容 |
-| full 样本探测 | 按 CI 当前循环读取 `suite.full.json` 的 entry.baseline | 遇到 disabled 的 `multi-column-pdf`，空 baseline 指向目录；Windows 报 PermissionError。Linux 的具体错误类型未实测 |
+| 已有原生解析、OCR 和段落模型增强 | 段落增强让模型重新输出正文，仅用长度保护，可能接受数字或标识符被改写的结果 | 模型只判断切分、合并和顺序，正文由程序取自原文 |
+| 已有表格提取、坐标和目录提取器 | 困难表格的列归属、续行和跨页接续需要针对真实样本验证 | 先修好一种实际使用的表格资料，只处理有问题的区域 |
+| 已有 OCR 缓存、解析缓存和同键请求合并 | 部分 OCR 调用的缓存键没有包含实际配置；页缓存缺少容量限制和原子写入 | 补正确失效和容量保护，复用已验证结果 |
+| 已有模型调用上限、超时等设置 | refiner 在共享实例中保存计数，每次 parse 重置，并发任务可能相互影响 | 改为请求独立状态，复用现有简单限制 |
+| 已有 SQLite RunStore 和发布校验 | 默认执行仍写活层，读取的正文与标注的已发布 run 可能不一致 | 接好现用执行与读取路径，失败保留旧正式结果 |
 
-按有效 baseline 条目盘点本机样本引用：fast **3/3** 可找到；full **5/5** 可找到，另有 **3 个 disabled 条目**；perf **1/2** 可找到，缺 `sample-27-81-17`。这是文件存在性检查，引用数不等于不同文档数，也不表示样本通过质量验收或 CI runner 拥有相同文件。
+R2 核查的具体证据：
 
-未执行：完整 self-check、真实 PostgreSQL 故障演练、全量真实文档回归、GPU/模型推理、MinerU 同样本性能比较、线上权限测试。
+- `llm.py` 的假客户端探针：输入 `AB-123 torque 25`，返回 `AB-124` 与 `torque 95` 被接受。这是本地模拟结果，证明长度保护不能保证保真，未访问外部模型。
+- `parsers.py` 每次未命中解析缓存时重置 refiner，`bootstrap.py` 将同一个 refiner 注入共享 parser；存在并发状态互相影响的源码风险，尚未实测竞态。
+- `ocr_cache.py` 支持 provider/options 键，但部分 PDF 调用点固定 provider 且传空 options；页缓存只有 TTL，写入未采用原子替换。
+- 临时 SQLite 故障探针：先发布 OLD，随后解析 NEW 并使分块失败，读取返回 NEW 正文，却仍标注 OLD 的 published/pinned 身份。该问题已本地复现，不是线上事故报告。
+- `run_store.py` 存在跨文档 block/chunk ID 冲突时删除其他归属活层行的逻辑；需要拒绝冲突或安全隔离，不能以删除其他文档数据解决冲突。
 
-## 3. 目标约束与数据契约
+P0-03/P0-04 的现用路径仍有缺口，不能写成全部完成；其他已交付成果保留。历史依据：[SQLite RunStore](p0-03-run-store-batch1-20260920.md)、[质量校验](p0-04-validation-gate-20260920.md)、[故障回归](p0-05-fault-regression-20260920.md)。
 
-### 3.1 正式结果的唯一发布入口
+### 新附件核查：先减少结构丢失和重复重建
 
-```text
-冻结输入版本 / 分配 job 与 run
-  → Provider 原始结果及素材
-  → 统一文档事实快照
-  → 领域标注 / Chunks / Reader / Records / Export 所需产物
-  → 暂存索引 + 完整性与质量校验
-  → 原子切换 tenant/doc 的 active_run_id
-  → 下游按该 run 读取和检索
+附件基于较早的 `14cc7f2`，本次在 `b18a525` 对照确认如下；这些是源码事实，尚无新增精度或性能实测。
 
-失败或需复核的 run → 诊断/预览；已发布旧版本继续可用
-```
+| 现有位置 | 本次确认 | 改造判断 |
+| --- | --- | --- |
+| `parsers.py`：`DoclingParser.parse()`、`_normalize_docling_pages()` | 结果经页面 Markdown/文本，再调用 `_build_markdown_provider_blocks()` 重建 Blocks；PyMuPDF4LLM 当前也使用 Markdown 路径 | 对已启用且能提供结构对象的适配器直接映射；仅返回 Markdown 的入口保留必要解析，不假设所有供应商都有同一种结构接口 |
+| `parsers.py`：`_docx_paragraph_info()`、`_docx_table_cells()` | 段落主要保留文字、样式和大纲；单元格返回字符串二维数组，未提取 `gridSpan/vMerge` | Word 合并表格和行内结构先从原生文件读取，避免交给模型重猜 |
+| `pipelines.py`：`DocumentArtifactItem`、`_build_document_items()`；`ir.py`：`build_ir_projection()` | 已有产物和知识单元；item 的 `kind` 当前取语义角色，IR 仍从 Blocks、Chunks、pages、tables、snapshot 等输入组装 | 在已有产物中明确内容类型、关系和来源，逐条迁移消费者，收敛重复结构判断 |
+| `parsers.py`：Word 来源、`_build_markdown_provider_blocks()` | Word 使用固定 `page=1` 及推算的 `logical_page`；Markdown 构建器直接写 `confidence=1.0` | 不把逻辑定位当物理页码，不把固定常量当识别准确率 |
+| `llm.py`：`QwenDashscopeLlmClient.complete()` | 当前消息内容是纯文本 prompt | 需要看图的局部任务须补受限图像输入；纯文本接口不能宣称能恢复已丢失布局 |
 
-“原子发布”指**可见性切换原子化**，不要求文件系统、数据库和外部索引参与一个分布式事务。索引和素材先写入 run 隔离空间，确认完整后在权威库事务中切换指针；所有正式查询必须按指针筛选，直接访问未筛选索引不能绕过发布约束。
+## 3. 五项开发待办
 
-### 3.2 三类状态与版本字段（建议契约，P0-02 冻结）
+### [ ] 1. 保留原生结构，收敛为一份可复用的文档产物（本次补充）
 
-| 对象/字段 | 建议语义 |
+- **首批范围**：先打通合并表头 Word 的“原生提取 → 现有文档产物 → Reader/知识单元/结构化导出”，再将同一约定用于待办 3 的一种 PDF 表格。补当前链路需要的数据约束，不先设计完整文档标准。
+- **原生提取**：Word 读取跨行跨列、行内文字及上下标/强调/链接，保留标题层级。对实际启用且提供结构对象的解析器直接映射已有层级、单元格和来源；不因此默认启用 Docling 或增加重型依赖。
+- **唯一结构来源**：扩展 `ParsedDocumentArtifact`/`DocumentArtifactItem`，选定链路的内容与关系在此更新；Reader、知识单元、记录和导出只做派生与展示。旧 Block/API 从该产物生成兼容结果，不维护两套可独立修改的事实。已有存储和发布机制继续使用。
+- **最小约定**：保留原文片段和稳定标识、内容类型与业务语义、来源、父子/顺序关系；表格补单元格起始行列、跨度、表头关联与原文引用。迁移后的 `kind` 表示内容形态，`semantic_role` 表示警告、步骤等用途语义，不把含列表或图片的警告压成一个字符串。
+- **来源定位**：PDF 使用页码与区域，并明确坐标原点、旋转、裁剪和缩放映射；Word 使用段落/表格/单元格标识，真实物理页码未知就不填；Excel 使用工作表与单元格范围，Markdown 使用文件行范围。兼容接口暂留旧页码时说明其逻辑含义，不用于物理页面证据。
+- **完成标准**：Word 合并关系和上下标不丢失；同一表格在 Reader、JSON/记录、检索单元中引用一致的表格/单元格及来源，派生文本不得重新猜网格。Markdown 无法表达的合并关系保留在结构化输出中。更新后读取/导出不再次解析 Markdown 来恢复已知结构。
+- **修改位置**：`models.py`、`pipelines.py`、`parsers.py`、`ir.py` 及实际结果投影入口；以选定链路为限。
+
+图片、公式、脚注遵循“先保留，后理解”：在本轮处理到的内容中保存原始素材或可重建定位；可读取的原生公式、图注和脚注锚点保留关系，未可靠转写的内容明确未确认。原文图注与生成说明分开，LaTeX 语法正确不等于公式内容已核验，图表概述也不能作为数值记录入库。页眉页脚在来源层保留类别，由各视图决定是否展示或索引。
+
+完整列表/步骤编号、图片引用、脚注关联、原生公式映射，以及 Excel 原始值/公式/显示信息分离、Markdown 列表/代码/链接语法完善，按后续真实样本逐项扩展。Excel 已有区域和合并信息、Markdown 已有标题与表格能力继续复用；不要求首批一次补齐所有类型，也不开发通用公式识别或图表理解平台。
+
+### [ ] 2. 按区域整理阅读顺序，段落增强保留原文（原 LC-02）
+
+- **版面处理**：复用现有坐标和版面逻辑，先区分正文栏、跨栏标题、表格、图片和注释，确定区域顺序，再在区域内合并段落。替换会造成串栏的整页排序/合并分支，不在错误顺序后继续叠加文字补丁。
+- **做什么**：改造现有 `LlmBoundaryRefiner`，输入带稳定编号的原文片段，模型只返回切分、组合和排序关系，程序从原文生成结果。行内切分使用程序给出的合法边界，避免模型自行数 Unicode 字符造成错切。
+- **校验**：拒绝未知编号、越界、丢段、重复和重叠。数字、料号、单位等原文内容不能被改写；允许的展示空白变换单独处理。无效输出保留原结果并说明原因。
+- **视觉增强边界**：只有区域类型、阅读顺序或表格关系确需视觉证据时，给现有客户端补局部图像及片段编号输入，返回固定结构。缺图像证据就保留不确定性。只有明确的缺字/OCR/公式转写任务允许生成新文字，并标明图像来源与核验状态；本轮不默认开启公式转写。
+- **完成标准**：跨栏标题、双栏混排、图注穿插样本不串栏，选定样本的断行和合并问题得到修复；同长度改字、重复文本、中文/emoji 和无效响应不能造成静默改文；简单文档沿用原有快速路径。
+- **修改位置**：`src/parsecore/llm.py`、`parsers.py` 的调用点及相关测试。同步将 refiner 的可变执行状态改为请求独立，避免并发串扰。
+
+### [ ] 3. 修好一种常用 PDF 表格的错列、续行与跨页问题（原 LC-03）
+
+- **做什么**：从现有资料选一种实际使用的 PDF 目录表格，按“表区 → 网格/合并 → 文字归属 → 表头/单位/脚注 → 跨页关系 → 校验”处理。文字型 PDF 优先复用线条、对齐与间距，困难区域才让模型判断列边界或片段归属，程序从可靠原文填值。Word/Excel 网格读取原生结构。
+- **处理范围**：只重算有问题的区域及受影响的下游结果。已知难处理的版式可以先做局部结构判断，不要求整份文档反复失败后再修复。
+- **校验**：网格不越界、不非法重叠，合并范围有效；文字不遗漏、不重复分配；多级表头、单位、脚注和跨页关系保留。关键字段值与来源一致，行列归属正确，续行不漏行、不重复，重复表头不混入数据。行列数正常不能代替内容正确；无法确认时保留原文/原图并说明。
+- **完成标准**：选定表格的已知错误在修复样本及未参与调试的验收页上通过；阅读可保留表格图像，正式字段入库只使用已校验记录。
+- **修改位置**：`parsers.py`、`pipelines.py`、现有目录提取器和 `validation.py`，复用待办 1 的产物约定，不再新增并列的表格表示或状态体系。
+
+### [ ] 4. OCR 按需处理、复用缓存，减少重复解析（原 LC-05，合并 LC-04 的必要保护）
+
+- **做什么**：复用已有 OCR、解析和产物缓存；源文件及相关配置未改变时，重新分块、读取或导出应复用已有识别与校验结果。局部修复只让相关缓存和下游结果失效。
+- **OCR 提速与保真**：正常文字层不重复 OCR，优先处理扫描/乱码/图片中的必要区域；定向调整方向、裁剪和局部清晰度，保留行框及坐标映射。合并新旧文字时检查重复和冲突，不能仅按字数更多选结果。复用 RapidOCR/远程 HTTP 路径，大文档按页或小批处理，细坐标与图像按需加载。
+- **缓存修复**：键包含真实 provider、影响结果的配置、来源及相关版本；区分需要隔离的租户上下文。补页缓存容量上限和原子替换，复用现有同键请求合并能力。
+- **简单保护**：复用现有调用次数、重试次数、超时和并发上限；计数按请求隔离，同一请求内部重试不能无限续额。需要日志时记录调用次数、耗时和失败原因即可，不新增费用计算或预算持久化。
+- **完成标准**：同一输入的重复处理耗时下降；混合文字/扫描页只增强必要区域，文字不重复、原页定位正确；只改导出/分块配置时不重复调用无关 OCR/模型；改变识别配置能正确失效；缓存损坏可恢复，并发任务不互相清零状态。
+- **修改位置**：`ocr_cache.py`、`parsers.py`、`llm.py` 和已有缓存/产物使用点。若首次解析存在明显慢点，先根据耗时定位，再只优化该慢点。
+
+### [ ] 5. 修复失败重跑后的结果混用（原 LC-01）
+
+- **做什么**：复用 SQLite RunStore，把现用正式执行、发布、读取和导出接到一致版本；失败重跑不能覆盖旧正式结果。未发布内容明确为预览，不能标注 published/pinned。
+- **同时修复**：block/chunk ID 冲突时拒绝本次写入或安全隔离，保留其他文档数据；必需产物或视图失败时不报告成功交付。
+- **完成标准**：OLD 发布后，NEW 重跑失败，正式读取与导出仍返回 OLD，正文和版本标识一致；冲突不损伤其他文档；重复提交不产生错版。
+- **修改位置**：`runtime.py`、`run_store.py`、相关读取/导出入口及故障测试。先修现用 SQLite 路径，不扩成所有后端的重构项目。
+
+## 4. 随功能改造一起瘦身
+
+对已迁移链路，先让新实现覆盖原有受支持行为，再切换入口、删除被替代分支，完成相关回归；不长期双写或保留两套独立推断。未迁移数据/API 的必要兼容集中在入口或出口，明确其支持范围和删除条件。
+
+| 替换或合并对象 | 具体减法与完成条件 |
 | --- | --- |
-| `job_id` | 调度请求身份；保留现有 job.state 作为执行阶段兼容字段 |
-| `parse_run_id` | 一次执行尝试的唯一身份；重试产生新 run，避免复用 job_id 覆盖上次部分产物；关联 attempt_count 与 claim |
-| `source_version` | 输入文件内容哈希与大小；执行前校验或使用不可变输入副本，避免提交后原路径内容改变 |
-| `execution_status` | `pending/running/succeeded/failed/cancelled`；描述执行，不表示可供正式使用 |
-| `validation_status` | `not_run/passed/warning/needs_review/rejected/error`；保存原因、指标、证据及规则版本；未知或校验异常不能默认为通过 |
-| `publication_status` | `unpublished/published/superseded/withdrawn`；与当前 active 指针在同一事务维护 |
-| `active_run_id` / `publication_generation` | tenant/doc 的正式版本指针与并发控制世代；不同 job 的旧执行不能因晚完成而覆盖更新发布决策 |
-| `required_artifacts` / `capabilities` | 按 profile 声明 Reader、Records、RAG、素材等交付要求；未要求向量化的文档不因 embedding 关闭被拒绝 |
-| 版本来源 | engine、model、adapter、facts_schema、domain_package、chunker、embedding、validation_policy 与有效配置指纹 |
-| `base_run_id` | 重分块、重向量化、领域规则升级等派生产物的来源，保证复用关系可追溯 |
+| 富结构先转 Markdown 再恢复 | 已直映结构的适配器移除这段往返路径；保留真实 Markdown 输入/导出所需能力。`_build_markdown_provider_blocks()` 仍有 TextParser/PyMuPDF4LLM 调用，不能整段误删 |
+| Word 字符串二维表作为唯一事实 | 结构化单元格成为来源，旧 `cells`/Markdown 从它派生；迁移消费点后删除独立维护网格和补猜合并的分支 |
+| Reader、IR、知识单元各自重建结构 | 选定链路改为读取相同产物及标识，删该链路重复的表格识别、拼接和结构推断；旧数据只通过集中兼容转换进入，不散落多处兜底 |
+| 段落自由改写及长度兜底 | 位置/关系协议替换模型重写正文，删除旧字符串数组协议及 85% 长度放行路径；失败回原文，不回旧改写逻辑 |
+| 共享 refiner 的 reset/计数 | 请求独立状态替换共享可变计数，删除对应全局重置分支；沿用现有客户端、缓存和运行限制 |
+| 固定 `confidence=1.0`、混用质量状态 | 移除构建器伪置信度；只保留来源确实提供且含义明确的置信信息。来源、保留/识别/校验状态分别表达，复用现有质量字段，不再建评分系统 |
+| 已无调用方的选项、包装和依赖 | 随所属链路迁移检查引用、配置和相关测试，确认无受支持用途后删除；不能因为默认没启用就删除可选解析器，也不以删行数作为验收目标 |
 
-产物正文及 manifest 在封存后不可变；执行状态和发布指针通过受控状态迁移更新。若人工修订改变事实内容，应生成新派生 run，而非修改已发布正文。
+每项交付简述替换、合并或删除了什么，确需留下的兼容逻辑写清退出条件即可。无需另建重构项目、清理台账或全仓拆分计划。有效的可靠性保护、原始证据与现用 API 不属于为瘦身而删除的对象。
 
-每次读取先固定一个 run；分页游标和异步导出任务携带该 run，避免跨页或导出过程中自动切到新版。父 PDF 用 manifest 固定各 part 的 run、原始页段、重叠上下文与缺页情况；单 part 复跑产生新的父 manifest。`partial` 可显式预览，完整文档正式发布默认要求所有必需页段通过；确需发布部分结果时必须有专门 profile 和缺页清单。
+## 5. 简单验收与实施顺序
 
-已有 API `parse_run_id=job_id` 的语义不能静默替换：新增内部 run 身份后，先通过新版本 schema 暴露，旧投影保留兼容映射；生产读口径切换应有迁移说明及版本标识。历史快照无法从已被覆盖的数据中还原，不得伪造历史版本。
+每项开始时从现有样本挑出能复现问题的页面，保存修改前的结果和耗时；补少量未参与调试的页面及简单文档作为回归。复用已有评测工具，不另建评测系统。
 
-旧调用方可能把 DONE 或 `ProductAdapter.after_parse` 当成可以入库的通知。迁移必须同时调整消费条件：新接口以 `publication_status=published` 为准；旧正式结果接口只返回完整已发布版本，尚无正式版本时给出明确未就绪响应，另设诊断入口读取执行结果。原有 partial 消费方应迁移到显式预览口径；这些可见性变化须按契约版本灰度，不能只增加字段后继续原样通知下游。
+按改动选择合并表头 Word（含上下标/链接）、跨栏标题 PDF、跨页表格、含图片/公式/脚注的技术页或扫描图文页，不要求每项把所有样本重跑一遍。结构保真要核对 Reader、JSON/记录和检索单元中的对应内容与来源，不能只检查输出非空。
 
-## 4. 待办工作包
+| 验收点 | 只需回答的问题 |
+| --- | --- |
+| 解析效果 | 原来具体的断行、错列、漏行或改字问题是否修好？原生结构、关键值和内容覆盖是否保留，图片/公式/脚注是否仍可定位？ |
+| 输出一致性 | Reader、检索与导出的文字、单元格和来源是否来自同一产物及版本？已迁移链路的旧重建/改写分支是否退出？ |
+| 处理速度 | 同样输入、配置和环境下，首次处理与缓存命中时的耗时怎样变化？优化的慢点是否变快？ |
+| 稳定性 | 失败、无效响应和重跑能否保留正确结果？此次修改是否引入状态串扰或明显资源问题？ |
 
-以下均为 `[ ] 待实施`。每项交付时同时附代码/配置变更、测试报告及回滚说明；任务编号用于跟踪，旧规格中的 P1–P7 编号不与这里的优先级对应。
+提交一份简短的前后结果对比和耗时记录即可。质量修复不要求每项都提速，但不能带来未经解释的明显性能退化；性能优化必须保留原有解析效果。速度有波动时重复少量测量，不预设没有基线支持的提升百分比。只有涉及内存/并发的修改才增加对应验证，不要求每项重复全套压测。
 
-### P0：真实执行、质量准入与发布一致性
+实施顺序：先完成 Word 合并表格的结构保真与下游一致性，段落原文保护和现用发布一致性可独立推进；随后在一种 PDF 表格上复用产物约定，改善区域顺序、局部表格修复与 OCR/缓存。局部视觉调用按具体未解决样本补齐，不作为原生结构修复的前置条件。每条链路完成时同时移除已被替代的逻辑，通过相关检查即交付，不等所有格式迁移。
 
-#### [x] P0-01 配置与能力必须真实（小）
+原 LC-00/LC-06 合并为上述常规验证；LC-04 的费用与预算系统取消，仅保留普通调用保护；LC-07 的版式复用按后续实际性能问题决定是否开展。已有 P0 代码与数据不因本次简化而回滚。
 
-状态：**已实施（2026-09-20）**。交付报告见 [docs/p0-01-capability-truthfulness-20260920.md](p0-01-capability-truthfulness-20260920.md)。
+后续事项仅保留在这里：实际部署需要的 Postgres/pgvector 一致性、超大目录演练、宿主鉴权联调和已发布证据清理保护；按对应部署需求处理，不捆绑成此次段落或表格开发的前置工程。
 
-- 修改位置：`config.py`、`bootstrap.py`、`parsers.py`、`api_health.py`、配置模板及 bootstrap 测试。
-- 新增明确的生产严格模式与 mock 开关；不要把当前 `project.mode=embedded-sdk` 当生产/开发开关。未知 parser/index/provider 名称在启动时拒绝，mock 仅显式启用并标识为非正式结果。
-- 将能力分为 required、optional、disabled：required 配置/依赖/初始化失败应阻止 readiness 或任务；optional 降级须在 health、运行记录和响应暴露 `degraded_capabilities/reason`；disabled 不误报故障。保留非 RAG profile 合法关闭 embedding 的能力。
-- 校验配置、实际注册实现和运行可用性一致；探活按能力缓存/限时，区分存活与可接任务，避免每次 `/health` 加载重模型。
-- 验收：未知解析器、缺必需凭据、索引后端不匹配均给出稳定错误码；显式 optional rerank 降级仍能交付但可见；上节占位成功探针不能产生正式结果。
-- 依赖：无。建议作为第一个修复提交。
+## 6. 核查范围
 
-实施说明（与本节原始措辞的差异）：
+本次 R4 只修改本方案与 README，没有实施上述功能或代码删除，也没有改变业务代码、默认路由或依赖。新增核查覆盖附件提到的原生 Word、Docling/PyMuPDF4LLM 适配、文档产物、IR 和 LLM 输入路径。
 
-- 新增 `src/parsecore/capabilities.py` 作为实现注册表、稳定错误码与能力报告的单一来源；`strictness` 默认 `strict`。
-- `project.allow_placeholder_parsers`（默认 `false`）取代原先“未知名称静默落到 `StubParser`”的行为；开启后占位结果在 job options、`ParseOutcome.placeholder_result` 与 API payload 中显式标记，`/health` 报 `formal_parse_ready = false`。
-- `index.mode = "pgvector"` 配非 PostgreSQL 的 `database_url` 现在直接拒绝（`index_backend_mismatch`），不再返回 `NullIndex`。
-- 本次未改动完成时序与发布准入（占位结果仍会走到 `done`），该问题属于 P0-03/P0-04；P0-01 只保证占位与降级**可见且不可伪装为正式结果**。
+R2 在上述代码基线上执行的 `tests.test_validation`、`tests.test_publication_read_identity`、`tests.test_corpus_manifest` 共 **48 项测试通过**，并运行了前述两个本地探针。这些是历史核查记录，本次未重跑，也不代表五项改进已完成。
 
-#### [x] P0-02 冻结 run、发布与兼容契约（小）
-
-状态：**已实施（2026-09-20）**。设计决策见 [docs/adr-p0-02-run-publication-contract.md](adr-p0-02-run-publication-contract.md)，可执行契约见 `src/parsecore/publication.py`，契约样例见 `/v1/parse/schemas/parse-run` 与 `/v1/parse/schemas/document-publication`。
-
-- 修改位置：`models.py`、`contracts.py`、`payload_schemas.py`、`payload_contract_samples.py`；新增一份状态/存储设计决策。
-- 冻结第 3 节字段、合法迁移、必需产物、warning 放行策略、旧 state 与新状态的映射；文档发布和 CAAC `quality.status=public` 的业务公开含义分别定义。
-- 定义 `begin_run/save_run_artifacts/seal_run/get_active_run/publish_run` 等存储能力；明确 active 指针 CAS、claim fencing 和 latest-job 查询仅用于运行诊断。
-- 明确两个作业同 doc 并行时的政策：以发布世代和预期源版本拒绝过时发布，不采用“最后完成者无条件覆盖”。
-- 验收：状态迁移表、契约样例、SQLite/Postgres 迁移设计、兼容说明和失败场景全部可评审；不以只添加三个 JSON 字段算完成。
-- 依赖：无，可与 P0-01 同期设计。
-
-实施说明：
-
-- 新增 `src/parsecore/publication.py`：三套状态机（`execution_status` / `validation_status` / `publication_status`）、合法迁移表、旧 `job.state` 映射、`ArtifactProfile`、`ValidationPolicy`、`RunStoreCapabilities` 与并行发布政策，全部以可机读常量冻结。
-- 三条硬性语义：`done` 不等于 `published`；`done` 不等于 `validated`（无校验记录即 `not_run`）；重试产生新 run，不覆盖上次尝试的部分产物。
-- 新增两个契约 schema 与样例（注册表 6→8，P1 契约验收 payload 24→32）；`parse_run_id` 的别名切换点写入契约（`PARSE_RUN_ID_ALIAS`），避免静默改变既有读口径。
-- 明确记录当前 SQLite / Postgres / memory 三个后端的 `strict_publication_ready` 均为 `false`，`latest_job` 不参与发布决策。
-- 本项**不改变运行时行为**：没有运行路径读写新状态，没有 store 实现 run 协议。存储与原子发布属于 P0-03，校验与发布门禁属于 P0-04。
-
-#### [~] P0-03 实现快照存储与原子发布（大）
-
-状态：**第 1 批已实施（2026-09-20）**，其余待实施。交付报告见 [docs/p0-03-run-store-batch1-20260920.md](p0-03-run-store-batch1-20260920.md)。
-
-- 修改位置：`stores.py`、`stubs.py`、`contracts.py`、`runtime.py`、`exports.py`、`export_jobs.py`、检索与 records 读取路径。
-- Blocks、Chunks、document views、素材、索引和 manifest 按 `tenant/doc/run` 隔离；索引主层、高精层及 structure entries 均纳入，不能只给 Blocks 增加 run 字段。
-- 先保存完整 staged 产物并校验数量/引用/哈希，再以 DB 事务检查 run 状态、claim 所属、源版本和预期 generation，切换 active 指针。仅在写入前调用 `_ensure_active_claim()` 不足以作为原子防护。
-- 所有 Reader/Records/RAG/Export 正式读取固定已发布 run；预览按明确的 run 读取。若暂时不能让某个索引实现按 run 过滤，该实现不能参加严格发布。
-- 将下游可用通知绑定到发布事件，保留执行完成事件用于观测。发布事务同时保存待通知事件，再异步重试派发；按 tenant/doc/run/event 幂等消费，避免通知失败反过来重跑解析或已发布却永久漏通知。
-- 覆盖 full、parent/part、part rerun、rechunk、reembed，派生 run 可复用不可变基础快照；部分失败不得覆盖旧版。
-- 验收：在 blocks、chunks、views、embedding、index、seal、publish 前后分别注入故障，旧正式版本始终完整；并发 A/B 完成逆序、取消/超时后的旧 worker 不得发布；分页与导出不混版。先验证 SQLite，再以真实 Postgres/pgvector 验收。
-- 依赖：P0-02。该项是 P0 的主要工程量，不能用移动 DONE 一行代替。
-
-第 1 批已完成（SQLite 垂直闭环）：
-
-- 新增 `src/parsecore/run_store.py`：staged 产物表 + `parse_runs` / `document_publication` / `publication_events`；`begin_run → save_run_artifacts → seal_run → record_validation → publish_run`，发布事务以 `BEGIN IMMEDIATE` 原子完成状态、策略、claim、源版本、世代、清单校验与 active 指针切换。
-- 发布事务内从 staged 重写活层（blocks/chunks/document_views），因此**既有读路径无需改动**；`blocks`/`chunks` 增加 `run_id`（旧行回填 `legacy`）用于审计。
-- 新增只读端点 `/v1/parse/documents/{doc_id}/publication`；未发布时返回明确 `not_ready`，`/health` 与 `/v1/runtime` 的 `run_publication` 能力项说明当前后端能否原子发布。
-
-第 2 批已部分落地：
-
-- **读取身份一致性**：`runtime.publication_read_context()` 随快照传给全部六个投影（`compat`/`structured`/`full`/`ir`/`coverage`/`reader`），新增 `publication` 块；同一快照的所有投影与 HTTP 面的 `served_run_id` 一致，`latest_job_used_as_formal_version` 恒为 `false`。未发布时 `consumer_signal = not_ready`、`pinned = false`。
-- **通知派发消费端**：`dispatch_pending_publication_events()` 与 `parsecore dispatch-publication-events`（`--sink stdout|http`），先投递后标记，失败保持 pending。
-- **旧数据回填**：`parsecore import-legacy-snapshots`（默认 dry-run），导入 run 带 `validation_status = not_run` 且只能走受限发布路径。
-- 仍未完成：**索引三层与素材/manifest 的 run 隔离**（`PgVectorIndex` 不能按 run 过滤，因此不参加严格发布）、**把读取硬性限制为必须有已发布 run**（当前是如实声明而非强制固定）、rechunk/reembed 的正式派生 run、真实 Postgres/pgvector 验收与生产数据演练。
-
-#### [x] P0-04 将质量规则接入发布准入（中）
-
-状态：**已实施（2026-09-20）**。交付报告见 [docs/p0-04-validation-gate-20260920.md](p0-04-validation-gate-20260920.md)。
-
-- 修改位置：`runtime.py`、`quality.py`、`ir.py`、`api_payloads.py`、quality gate 配置。
-- 从现有 quality/coverage 规则抽取共享校验服务，使运行期和查询投影使用相同结果；校验报告持久化到 run。
-- 在必需产物生成后、正式发布前校验结构完整性、引用、覆盖、关键领域字段与 profile 要求。索引可提前写入隔离空间，但尚不可被正式查询命中。
-- 把 `_persist_document_views()` 的“失败仅记日志”改为按 required_artifacts 处理：必需视图失败不得进入成功交付；可选视图失败有明确降级状态。质量遥测故障仍可单独非阻塞，不能与质量判定故障混用。
-- `needs_review/rejected/error` 不自动发布；warning 是否可发布由版本化 policy 决定。执行成功且需复核不强行记作 parser 执行失败，也不无限自动重试。
-- 验收：占位、缺素材、缺页、断裂来源引用、校验异常被阻止发布；warning 策略可复现；状态 API、Reader 与 RAG 对同 run 的结论一致。
-- 依赖：P0-01～03；规则提取可在存储开发期间推进。
-
-实施说明：
-
-- 新增 `src/parsecore/validation.py`：把现有 quality 规则收敛为发布准入校验（必需产物、占位结果、CID 乱码、OCR 失败页、error 级质量信号、阅读顺序阈值），输出带 `policy_version` / `rule_version` / 证据引用的 `ValidationReport`，并持久化到 run。
-- 结论分级语义：`error`（校验自身失败）> `rejected` > `needs_review` > `warning` > `passed`；新增 `info` 仅记录不参与门禁，避免"未启用 embedding"把正常部署推上 warning 策略。
-- `runtime.publish_run()` 默认走共享规则（`validation_status=None`）；宿主与测试仍可显式传入结论。
-- `_persist_document_views()` 失败不再只记日志：必需产物（按 `run_artifact_profile`）失败即任务失败，可选/禁用产物失败只产生降级事件。
-- **顺序修正**：必需产物的持久化与校验被移到 `DONE` 之前。原先 `DONE` 先落地并清除 claim，导致后续必需产物失败既无法重试、又把真实错误变成 `stale_claim`，而任务仍读作 `done`。
-- 未完成：状态 API、Reader 与 RAG 对同 run 结论一致性的断言（需正式读路径固定 run，属 P0-03 第 2 批）；覆盖/表格阈值规则尚未接入（当前接的是结构性质量、OCR、CID 与阅读顺序）。
-
-#### [~] P0-05 补故障回归、迁移及回滚演练（中）
-
-状态：**故障回归与迁移/回滚工具已实施（2026-09-20）**；真实 Postgres/生产数据演练待实施。交付报告见 [docs/p0-05-fault-regression-20260920.md](p0-05-fault-regression-20260920.md)。
-
-- 修改位置：`tests/test_runtime.py`、`tests/test_parts.py`、`tests/test_postgres_stores.py`、API/exports 测试、部署文档。
-- 将本次故障注入转为长期回归，覆盖进程在发布前后退出、重复请求、取消、租约失效、worker 重启、索引不可用、并发 part 更新及发布通知丢失/重复；验证幂等与旧 claim 不可回写。
-- 采用新增表/列、回填、双读校验、按租户/profile 切换的迁移流程；只把可核对的当前遗留产物导入为 legacy snapshot，validation 标识为未验证或明确的历史豁免，不能自动伪装通过。
-- 回滚通过停止新路由/新发布并切回上一个完整 active run；迁移观察期不删旧快照。明确旧程序若不理解 run 表不能直接写入新版数据；保留能读取新存储的兼容版本作为回滚版本。
-- 清理 staged 和过期产物时保护 active run、回滚保留版本、在途导出及被父/派生 manifest 引用的快照。
-- 验收：迁移前后文档计数、哈希、检索与导出一致；演练报告列明恢复点、恢复时间及无法恢复的既有历史数据；P0 三个核心故障探针全部通过新约束。
-- 依赖：P0-03～04。
-
-实施说明：
-
-- `tests/test_run_store.py`（33 项）覆盖发布事务本身；新增 `tests/test_fault_regression.py`（20 项）覆盖事务之外：发布边界前后进程退出、重复请求幂等、租约失效后新建 run、worker 重启、索引不可用按 profile 判定、并发 part 逆序完成、part 重跑只影响自身文档、通知丢失可恢复与重复投递幂等、事件唯一性、陈旧写者不可覆盖新版本、活层损坏后回滚、staged 被篡改时拒绝回滚。
-- 新增 `tools/legacy_snapshot_import.py`（CLI：`parsecore import-legacy-snapshots`）：默认 dry-run，`--apply` 才写入；导入的 run 记录 `validation_status = not_run`、policy `legacy-import-no-validation`，并在 `publish_run(legacy_import=True)` 的约束路径下发布（该路径要求 run **没有**校验结论，因此无法复用为绕过失败校验的后门）。报告包含 block/chunk/view 计数与内容哈希，可据此比对迁移前后一致。
-- **发现并显式处理的一处真实风险**：活层 `blocks`/`chunks` 的 `block_id`/`chunk_id` 是全局主键，而读取按 `tenant/doc` 过滤；两个文档复用同一 id（P0-03 之前的库可能出现）时无法同时持有。发布现在会在插入冲突时移除冲突行，并写入 `artifact_id_displaced` 事件而非静默丢内容；该行为有专门的回归测试。
-- 未完成：真实 Postgres/pgvector 的迁移与故障演练；生产数据演练报告（恢复点与恢复时间）；staged 产物清理任务的保留策略（当前由 `staged_upload_retention_seconds` 等配置描述，尚无清理作业）。
-
-#### [~] P0-06 修复 CI 样本探测并建立真正的发布门禁（中）
-
-状态：**前半已实施（2026-09-20）**（复用 corpus 校验 + 发布验收状态区分）；"可随仓库分发的最小脱敏核心样本"与"最终门禁纳入 P0-05 故障回归"仍待实施。
-
-- 修改位置：`.github/workflows/parsecore-ci.yml`、`tools/self_check.py`、`tools/regression_baseline.py`、`var/regression`。
-- 抽取复用的 corpus manifest 校验，统一正确处理 disabled、空 baseline、非文件路径、缺样本、空 fixture 集和哈希漂移；修复当前 full 探测目录读取错误，避免 fast/full/perf 三段复制逻辑漂移。
-- 日常 PR 可按轻量套件运行；新增明确的 release 验收入口并纳入实际发版流程。发布要求核心样本齐全、必需用例执行和报告完整；缺样本/被跳过应阻止发版并显示未验证，不能沿用 smoke 成功代表质量通过。
-- 建立可随仓库分发的最小脱敏核心样本；受限真实样本用内部工件存储按 manifest 拉取。补齐当前缺失 perf 样本或有依据地更新基线，不把删除难样本当通过。
-- 验收：刻意移除核心样本、使 suite 为空或 baseline 路径错误时 release 非零退出；合法 disabled 不触发目录读取；发布报告记录 commit、配置、样本哈希、实际运行/跳过数与报告路径。
-- 依赖：样本盘点可立即开始；最终门禁纳入 P0-05 故障回归。
-
-实施说明：
-
-- 新增 `tools/corpus_manifest.py` 作为唯一一份 suite → baseline → fixture 解析/校验实现与 CLI；CI 中三段重复的内联 Python 探测改为调用同一命令（保留旧的 `available=` 输出，新增 `verified` / `status` / `reason` / 各类计数与报告路径）。
-- `tools/self_check.py` 新增 `corpus_manifest` 检查与 `verification` 报告块（含 commit、配置指纹、样本哈希、实际运行/跳过数、报告路径），以及 `--require-verified-corpus` 发布验收模式；`--skip-regression` 现在写入显式 `regression_suite` 检查（`status=skipped`、`reason=regression_skipped_by_flag`），不再静默降级。
-- 新增独立 `release` job；fast lane 语义不变（PR 仍是轻量门禁），但 smoke fallback 打印 UNVERIFIED 警告并写入 job summary。
-- 实测：fast **3/3** 条目 verified；full **5/5** verified 且 **3 个 disabled 条目**被正确跳过（其空/目录 baseline 不再被读取，即原先 Windows `PermissionError` 的场景）；perf **1/2**，缺 `sample-27-81-17.pdf`。既有 baseline 未记录哈希 → `hash_unrecorded_fixtures` 为非阻塞 warning，`save` 起开始记录哈希。
-- 发布门禁实测非零退出（`EXIT=1`，`reason=regression_suite_failed`），并把既有真实回归如实暴露：`numeric_heavy_total +38`、`suspected_header_footer_total +39`、`total_blocks +6.88%`、`heading_body_binding_rate -0.0909`。未修改任何 baseline 或阈值，未删除/禁用难样本。
-- 未完成：可随仓库分发的最小脱敏核心样本；perf 缺样本补齐；P0-05 故障回归纳入发布门禁。
-
-#### [x] P0-07 明确宿主身份与租户边界（条件前置，中）
-
-状态：**已实施（2026-09-20）**。交付报告见 [docs/p0-07-tenant-boundary-20260920.md](p0-07-tenant-boundary-20260920.md)。
-
-- 修改位置：`api_support.py`、`api_routes.py`、宿主注入协议及鉴权测试。
-- 嵌入/可信内网模式：记录谁认证用户、谁注入 tenant，禁止把外部请求任意 tenant 参数当可信身份。
-- 独立多租户模式：由认证上下文解析 tenant，覆盖 job 查询/取消、文档与原件、parts/rerun、records/search、导出创建/下载及诊断接口；资源授权以持久化所属租户为准。
-- 验收：租户 A 不能通过 B 的 doc/job/export/run ID 或请求参数越界；内部 worker 和宿主代理的授权路径可审计。
-- 依赖：P0-02；对外多租户开放前完成。若部署仅为受信单宿主，可先定边界，不为本轮另建账号系统。
-
-实施说明：
-
-- 新增 `src/parsecore/tenant_scope.py`：单一归属决策点（宿主注入身份 > 请求参数 > 默认租户），两种模式 `trusted`（默认，保持既有宿主语义）与 `enforced`（要求宿主注入身份，参数只能复述）。
-- 新增 `TenantScopeMiddleware`：在鉴权之后、任何 handler 之前完成归属；身份与参数不一致返回 `403 tenant_mismatch`，`enforced` 模式缺少身份返回 `403 tenant_identity_required`；响应头 `x-parsecore-tenant` / `x-parsecore-tenant-source` 暴露归属来源供审计。
-- 全部 23 处 `tenant_id = request.query_params.get(...)` 改为经决策点解析。
-- 资源授权：job 查询/取消与 export 创建/下载按持久化租户校验，越界返回与"不存在"相同的 404，不泄露资源是否存在；document/records/search/metrics/events 走已按租户过滤的读路径。
-- 兼容性：无任何租户声明的请求保持既有文档维度视图（不隐式收窄到 `default`）；一旦请求声明了租户，即按声明强制归属。
-- 未完成：真实宿主注入协议的联调（本轮只定义并实现了 header 约定）；"内部 worker 与宿主代理授权路径可审计"目前以响应头与事件为准，尚未落到审计日志表。
-
-### P1：MinerU 接入、事实模型收敛与并发
-
-#### [ ] P1-01 固定 MinerU 版本及独立运行环境（小）
-
-- 交付：固定 release/完整 commit、镜像与模型标识、依赖锁文件、资源规格、能力探测结果和许可记录。
-- 优先自托管内网服务；推理环境与 ParseCore 分离，ParseCore 端优先轻量 HTTP 客户端，不因使用官方 SDK 又引入整套模型依赖。
-- 上游本次查阅的 `torch` extra 为 `transformers>=5.10.1,<6`，本仓库 local-embedding 为 `>=4.40,<5`，这两组依赖不能在同一环境满足；此判断只针对上述组件组合。[上游依赖声明](https://github.com/opendatalab/MinerU/blob/master/pyproject.toml)
-- 上游许可有附加条件。接入时归档实际固定版本 LICENSE，确认自身部署/对外服务方式及模型、依赖的许可适用性；不把独立 HTTP 部署当许可豁免。[上游许可](https://github.com/opendatalab/MinerU/blob/master/LICENSE.md)
-- 验收：隔离服务可完成选定档位的合成文件解析和重启恢复；关闭 MinerU 不影响现有原生路径启动；资源和未支持能力可见。
-- 依赖：无，可做独立技术验证；正式路由仍保持关闭。
-
-#### [ ] P1-02 将现有 Artifact 收敛为持久化事实源（大）
-
-- 修改位置：`pipelines.py`、`models.py`、`ir.py`、`api_payloads.py`、`payload_schemas.py`；新增事实模型模块可按职责命名。
-- 复用 ParsedDocumentArtifact / ArtifactItem / KnowledgeUnit，增加版本化强类型页面、块、表格单元格、图/公式/素材及来源关系；未知类型保留原始类型和扩展字段，不能悄悄变成普通段落。
-- 固定页码基准、坐标单位/原点/旋转、阅读顺序、跨页与父子关系、表格合并单元格、图注、公式、行内元素、缺失能力及诊断。保留原始 Provider 工件便于回放。
-- Reader、Records、RAG、Export 仅投影同一快照；语义推断和原文提取分字段，并携带 source 引用。旧 Block/Chunk 接口由兼容投影继续提供。
-- 验收：同 run 多投影的文本来源、页码与引用一致；未知/缺失字段可解释；同一原始结果可离线重复生成各视图；新的 Renderer 不再自行修复文档事实。
-- 依赖：P0-02～03；第一版最小 facts 契约应与存储设计共同冻结，完整结构扩展在本项完成。
-
-#### [ ] P1-03 实现结构化 MinerU Adapter（中至大）
-
-- 修改位置：新增 `providers/mineru_http.py`（建议），对接 `parsers.py` 工厂、Provider 配置、provenance 与 failure 分类。
-- 复用配置中 `mineru-local` 的候选身份，另设 transport/endpoint 表示独立本地或内网服务；如最终改名为 `mineru-http`，提供配置迁移，避免两个 ID 指向同一实现却分别准入。
-- 接入路径：capability discovery → 上传受控输入 → 创建远端解析任务 → 有界轮询 → 下载结构化结果与素材 → 校验 → 映射事实快照。保留本地 job/run 与远端执行 ID，重试先恢复已有任务状态；不假设上游创建接口天然幂等。[官方 HTTP 流程](https://opendatalab.github.io/MinerU/usage/http_api/)
-- 主消费 MiddleJson/结构化工件和素材包，不能只接 Markdown。当前官方说明中，命令 `mineru parse --json` 的响应不是 MiddleJson；中间协议的 `page_idx` 从 0 起，CLI 页范围从 1 起；适配器必须显式映射、测试首尾页及 part 页偏移。[官方结果契约](https://opendatalab.github.io/MinerU/reference/output_files/)
-- 协议 schema、引擎版本不兼容、缺必需素材、页范围不完整、超时、取消、OOM、网络断开、下载失败分别保留错误码与 retryable；缺 bbox/confidence 不伪造。保护上传/下载凭据，素材解包校验路径与大小；设置服务级并发与输入上限。
-- 验收：固定结构样例通过映射契约测试；真实服务通过扫描/表格/多栏样本；远端重启后不重复发布、不丢执行映射；默认路由继续维持原 Provider。
-- 依赖：P0-01～04、P1-01～02。mock 协议开发可提前，真实影子结果必须写独立 run/工件空间。
-
-#### [ ] P1-04 用现有工具完成隔离双跑与正确性评测（中）
-
-- 复用 `provider_comparison_report.py`、`provider_gold_evaluation.py`、`provider_stability_gate.py`、`provider_license_audit.py`，补事实映射和运行资源指标，避免新建第二套评测平台。
-- 相同冻结输入、相同页段和明确档位双跑；shadow run 不更新 active 指针、不写正式索引、不参与正式配额结果统计。占用资源单独设预算，防止影响正式队列。
-- 复用现有 50 页 AI 辅助标注做初始诊断；关键数字/料号、表格行关系、警告与步骤应对照原文件独立复核，不能只以 pdf-text 的输出作为正确答案。划分调参集与验收集。
-- 覆盖第 5 节样本矩阵；补推理进程/服务的 RSS、GPU 显存、冷启动/稳态数据，不能把客户端 tracemalloc 当总内存。
-- 验收：报告可关联 input hash、run、engine/model/adapter 版本、规则版本与原始证据；至少 3 次稳定性复测；错误、未执行、缺证据均不计为质量通过。
-- 依赖：P0-06、P1-03；样本与标注整理可提前。
-
-#### [ ] P1-05 统一并发与资源限制（中）
-
-- 修改位置：`worker.py`、`asgi.py`、`config.py`、`runtime.py`、worker 部署配置。
-- 分开定义部署进程数、进程内 `job_concurrency`、`claim_batch_size`、`max_active_parts_per_doc`、Provider 级容量；旧 max_workers 按执行模式明确映射并给出弃用说明，不静默改变吞吐。
-- queue-worker 第一版可选择多进程，每进程单作业；确需线程池时先验证 parser/model 实例线程安全和 GPU 共享方式。跨进程 part/配额限制必须通过共享存储保证，不能只依赖进程内计数。
-- 明确 job 总截止时间与 worker 活性租约的区别；长推理的心跳、续租、取消、进程退出清理及重复领取分别验证。
-- 验收：2 个 worker 能完成不同任务而不重复发布；单文档 part 和 Provider 容量限制在多进程下有效；worker 被终止后可恢复；记录实测并发时间线与资源峰值。
-- 依赖：P0-03、P0-05；在扩大 MinerU 负载前完成。
-
-#### [ ] P1-06 按 profile 灰度与决定是否晋升（小）
-
-- 复用现有 route_mode、gate_status、gate_checks；按租户/profile/文档白名单控制，禁止全局将 PDF 默认切到 MinerU。
-- 准入只覆盖通过的样本类别；保留原生 DOCX/Excel/文本/简单 PDF。受控视觉解析可用，但禁止无证据改写和不可追溯替换。
-- 失败回退只按明确策略执行，每次换引擎留独立运行记录，最终结果暴露 actual provider、fallback reason 和验证结论。
-- 验收：第 5 节硬门槛全部满足；灰度中零混版/零未验证发布；演练关闭新 Provider 并继续使用上一个已发布版本。评测不能证明收益时继续 shadow，允许只晋升部分场景。
-- 依赖：P0 全部适用项、P1-04～05。
-
-### P2：领域包与维护成本
-
-#### [ ] P2-01 将 CAAC 和手册语义整理为版本化领域包（中）
-
-- 修改位置：`catalog_contracts.py`、`catalog_runs.py`、`catalog_extractors/`、`pipelines.py`、领域 TOML。
-- 包描述记录输入 facts 版本、领域包/规则/输出 Schema 版本、提取器、校验器、测试集和迁移策略；沿用 CAAC v1/v2，不重置既有版本历史。
-- 把特定年度页段抽为带 source/version 约束的配置；复用现有章节检测，新版目录不匹配时明确报错或进入复核。
-- 验收：同一事实快照分别运行旧/新领域包，无须重新 OCR；比较字段与证据 diff；升级领域规则不改变其他 profile 输出。
-- 依赖：P1-02。
-
-#### [ ] P2-02 收紧领域 Schema、证据与发布策略（中）
-
-- 与 CAACresource 固定权威 JSON Schema 的版本/哈希或分发包，防止只靠本地轻量形状检查。
-- 建立字段值到原页/块/表格单元格的证据校验及关键字段人工 gold；区分结构覆盖、内容正确和业务公开政策。
-- 将业务状态 candidate/internal_preview/public/rejected 映射到通用校验与交付政策，保留各自含义；批量提取可部分复核，但正式导出必须明确包含哪些记录状态。
-- 验收：关键字段错值、有值无证据、证据指向其他 run/源版本、跨页错行均能被拦截或标记复核；规则升级支持离线回放。
-- 依赖：P0-04、P2-01；P1 准入需要的核心正确性标注不等待本项整体完成。
-
-#### [ ] P2-03 按职责拆分模块并校准文档（中）
-
-- 随前述功能移动工厂/Provider、事实归一化、领域 enrich、投影与校验，逐步降低 `parsers.py/api_payloads.py/ir.py/runtime.py` 的职责交叉；不单独启动全仓大重写。
-- 更新 architecture、configuration、user-guide、release-notes 与 readiness，明确 Starlette、inline/queue-worker、report-only/发布门禁、partial preview 和正式版本语义。
-- 验收：README 只有一个本轮待办入口；每个完成项指向对应实现与报告；历史文档有适用日期，不把“主链完成”扩写成 MinerU 生产可用。
-- 依赖：跟随各阶段持续完成，最后统一收口。
-
-## 5. 样本矩阵与准入判据
-
-准确率/性能数字要先冻结基线与预算。以下是建议的验收口径，不是本次已经测出的收益，也不构成全部真实资料的准确率保证。
-
-| 样本组 | 主要验证 | 产物 |
-| --- | --- | --- |
-| 简单文字 PDF + 原生 DOCX/Excel/文本 | 原生路线不退化、表格和标题契约兼容 | 内容/结构基线及兼容报告 |
-| 多栏图文、跨栏标题、图注 | 阅读顺序、对象关系、页码坐标、素材引用 | 原页对照与结构映射报告 |
-| 扫描件、低清/旋转页、数字料号 | OCR 关键字符正确率、漏页、失败诊断 | 字段 exact-match、错误类型与证据 |
-| 跨页/合并单元格表格 | 单元格、行列关系、表头重复与跨页归属 | cell/row/relation 指标，不能只数表格数量 |
-| 航空手册 | warning/caution 与 procedure_step 关联、编号和步骤完整性 | 关键事实逐项核对及缺漏清单 |
-| 超大目录 | 完整页范围、内存/磁盘、任务恢复、part 上下文去重、记录分页与导出 | 小窗口 → 多 part → 全量三个阶段的报告 |
-
-建议先验收约束：
-
-- **交付硬门槛**：占位发布 0；必需产物缺失发布 0；新旧 run 混读 0；失效 claim 发布 0；缺核心样本或协议不支持时不得通过 release/provider 准入。
-- **来源硬门槛**：全部交付对象有真实 source/run 引用；所选页段完整性检查通过；缺坐标时明确 unavailable，不能用伪造坐标满足 100%。声明支持的坐标需通过原页对照。
-- **关键业务事实**：独立核对的验收集中，数字/料号/批准号及关键警告/步骤错误或遗漏为 0；覆盖范围仅限验收集。出现关键错误先修复或收窄可准入 profile，不能靠其他页面平均分抵消。
-- **整体质量**：按类别比较关键 token、表格结构/关系、阅读顺序与证据完整性；默认要求不劣于基线，并在目标复杂文档类别有事先约定的收益。复用已有 gold 工具的分数门槛时，应核对它是否覆盖本轮关键事实。
-- **资源与恢复**：固定机器和并发，分别报告冷启动/稳态 p50、p95、峰值 RSS/显存、失败率、恢复耗时；目标预算在首次小样本测量后冻结。超出内存或恢复预算不得直接扩大到万页。
-
-## 6. 依赖、里程碑与工作量
-
-关键路径：`P0-02 → P0-03 → P0-04 → P0-05 → 正式发布准入`；配置收紧与 CI 修复可先落地。MinerU 版本验证、协议样例、样本准备可独立推进，影子结果进入中台前须使用隔离 run。
-
-| 里程碑 | 范围 | 出口条件 | 规划量级 |
-| --- | --- | --- | --- |
-| M0：风险确认与契约 | P0-01/02、P0-06 初步修复；P1-01 调研 | 配置真实、契约可评审、CI 探测可用 | 约 1 周 |
-| M1：可靠交付闭环 | P0-03～06；适用时 P0-07 | 三类本地故障被回归约束，SQLite/Postgres 发布及回滚通过 | 约 2～3 周 |
-| M2：MinerU 影子接入 | P1-01～03、P1-05 | 独立服务、完整结构映射、影子隔离与容量限制 | 约 2～3 周 |
-| M3：评测与受控晋升 | P1-04/06 | 样本、许可、质量、资源、恢复及回滚证据齐全 | 约 1～2 周 |
-| M4：领域包收口 | P2-01～03 | 领域版本独立、证据验证和文档一致 | 约 1～2 周 |
-
-估算假设：1 名熟悉仓库的后端开发，测试/领域人员可参与验收，数据库与推理资源可获得；各阶段可有样本准备重叠，但表内合计约 **7～11 人周量级**，不是工期承诺。完整快照迁移、生产权限、上游部署或样本获取的未知项应在 M0 后重新估算；不应把原子发布压成一两天的小修。
-
-首批建议拆为四个可评审交付：
-
-1. 配置严格性及显式降级（P0-01）。
-2. CI corpus 探测修复、发布验收状态区分（P0-06 前半）。
-3. run / 状态 / 发布指针 ADR 与契约样例（P0-02）。
-4. 快照存储和读取的第一个垂直闭环，再扩到索引、导出及 part（P0-03）；在全部正式读路径完成前，不宣称已经保证原子交付。
-
-## 7. 本轮决策与待验证事项
-
-- 默认保持现有原生路径，MinerU 先自托管隔离运行、只做候选；ParseCore 管来源版本与发布，不引入第二套文档权威库。官方提供不创建文档库的解析入口以及自托管 API，可支持这一边界。[官方 SDK 说明](https://opendatalab.github.io/MinerU/usage/sdk_api/)
-- 本次访问了 MinerU 官方主分支资料及文档；未成功读取输入报告的缩写 commit 页面，未据此宣称已复核其精确 `4.0.4/25b16c40d18f…` 基线。P1-01 必须重新固定完整版本，再录制协议工件；在线文档不能替代锁定版本的契约测试。
-- 尚需在实施起步时确认：实际部署是单宿主还是对外多租户；首个验收类别优先 CAAC 还是航空手册；可用 GPU/内存、吞吐目标与样本获取方式。默认先以可信内网、复杂 PDF/手册影子评测推进，这些信息不阻塞 P0 本地修复。
-- 本轮只完成现状分析和待办制定；生产代码、默认路由及依赖未修改，也未将任何 Provider 标记为已准入。
+本次文档修订检查 Markdown 差异及 `git diff --check`。真实样本的质量与耗时改善、并发竞态修复及部署验证，待对应开发项实现后验证。

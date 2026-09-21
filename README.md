@@ -34,8 +34,8 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可选 DashScope-compatible 二阶段 rerank provider，支持阿里 Qwen 排序模型与安全降级
 - 启动期能力真实性校验：未知 parser / index / provider 名称、mock provider 与占位解析器默认被拒绝，能力状态通过 `/health` 与 `/v1/runtime` 的 `capabilities` 报告暴露（`accepting_jobs` / `formal_parse_ready` / `degraded_capabilities`）
-- run 级产物快照与原子发布（P0-03 第 1 批，SQLite）：`begin_run → staged → seal → publish` 在单个事务内切换 active 指针，失败时旧正式版本保持完整；未发布时 `/v1/parse/documents/{doc_id}/publication` 返回明确 `not_ready`
-- 发布准入校验（P0-04）：必需产物、占位结果、CID 乱码、OCR 失败页、error 级质量信号与阅读顺序阈值共同决定 run 的 `validation_status`；必需产物写入失败即任务失败（检查发生在 `DONE` 之前），可选产物失败只产生降级
+- 独立的 SQLite RunStore 快照与发布事务：`begin_run → staged → seal → publish` 可原子切换 active 指针，事务失败保留旧版；默认解析与正文读取尚未全面接入，不能据此宣称端到端原子交付
+- 发布准入校验（P0-04 部分）：`publish_run()` 已接必需产物、占位、CID、OCR 失败及阅读顺序等共享规则；默认执行已将必需视图写入检查移到 `DONE` 之前，用途质量与默认发布链路仍需收口
 - 租户边界（P0-07）：`tenant_scope = "enforced"` 时由宿主注入的已认证租户决定归属，请求参数只能复述；job / 导出 / 文档资源按持久化租户授权，越界返回与"不存在"相同的响应
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
@@ -49,17 +49,19 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 当前交付状态：`0.1.0 可交付灰度版`。中小文档可直接试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版结论见 [docs/release-notes.md](docs/release-notes.md)。
 
-可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：P0-01 配置与能力真实性、P0-02 契约冻结、P0-04 发布准入、P0-07 租户边界已实施；P0-03 快照与原子发布已完成 SQLite 垂直闭环与读取身份一致性，索引层隔离待做；P0-05 故障回归与迁移工具已实施，Postgres 演练待做；P0-06 前半（corpus 校验与发布门禁）已实施。
+可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：配置真实性、run 契约、SQLite 发布事务、共享质量校验、租户边界、迁移与 corpus/release 门禁已有实现。默认解析仍写活层，正文读取尚未固定到已发布 run；发布身份字段不代表正文一致性已闭环，P0-03/P0-04 按部分完成管理，生产与 Postgres 验收仍有待办。
+
+下一轮重点是解析效果与性能提升：先保住原生结构，让阅读、检索和导出共用文档产物，再改善段落、版面与表格，通过局部 OCR 和缓存减少重复处理，并修复正文与发布版本不一致的问题。改造同时替换、合并和删除被淘汰的逻辑。验收采用同样本修改前后的结果与耗时对比；MinerU 接入、成本管理和完整领域包平台移出本轮。这些待办尚未实施。
 
 ## 建议演进路径
 
-1. 先在当前仓库把 ParseCore 的契约、状态机和产品接入边界定稿。
-2. 再把真实解析器、任务队列、数据库和向量检索逐步替换进来。
-3. 以 ParseCore 自检门禁、可选入口鉴权和受控灰度接入目标产品；单一宿主历史资料只保留为归档证据。
+1. 先打通 Word 合并表格的原生结构保留与下游一致性，复用现有产物层；同步推进段落保真和现用 SQLite 发布一致性修复。
+2. 将相同产物约定用于一种 PDF 表格，改善区域阅读顺序、错列和跨页问题，按需做局部 OCR/模型增强并复用缓存。
+3. 每条链路迁移时移除重复结构重建、旧改写和无用兜底；用同一批样本检查结构、输出一致性与耗时，通过必要回归后交付。
 
 ## 文档导航
 
-- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮现状核查与待办入口，涵盖成功语义、版本快照、质量准入、原子发布、MinerU 影子接入及领域包演进（P0-01、P0-02 已实施，P0-03 第 1 批与 P0-06 前半已实施，其余待实施）
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮开发入口；五项待办覆盖原生结构保真、区域与段落、表格、OCR/缓存和结果一致性，明确被替代逻辑的删除条件，以样本效果和耗时验收（文件名保留以兼容旧链接，MinerU 已移出本轮）
 - [docs/adr-p0-02-run-publication-contract.md](docs/adr-p0-02-run-publication-contract.md)：run / 状态 / 发布指针契约冻结（P0-02）；明确 `done` 不等于 `published`、三套状态机、存储能力与 SQLite/Postgres 迁移设计
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、25 项故障注入验证与未完成范围
@@ -74,12 +76,12 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - [docs/go-live-readiness.md](docs/go-live-readiness.md)：主线版本进入产品灰度前的必做项、遗留问题分级与回滚口径
 - [docs/self-check-gate.md](docs/self-check-gate.md)：默认自检门禁、退出码语义与当前性能/可靠性结论
 - [docs/performance-stability.md](docs/performance-stability.md)：分层 CI、上传保护与 OCR benchmark 的执行口径
-- [docs/parsecore-product-upgrade-plan.md](docs/parsecore-product-upgrade-plan.md)：面向产品、研发、接入方的升级执行文档，明确本地 Provider、统一 IR、质量门禁和阅读页主路线（不含外部 OCR API）
-- [docs/parsecore-productization-spec.md](docs/parsecore-productization-spec.md)：P1-P7 产品化规格说明书，含代码级差距分析（✅已实现/⚠️部分实现/❌未实现）、字段级变更和验收标准，取代 todo 作为权威源
+- [docs/parsecore-product-upgrade-plan.md](docs/parsecore-product-upgrade-plan.md)：历史本地 Provider 升级方案；当前路线与优先级以本轮修订开发入口为准
+- [docs/parsecore-productization-spec.md](docs/parsecore-productization-spec.md)：既有 P1-P7 产品化接口与验收规格；本轮开发优先级与最新状态以修订开发入口为准
 - [docs/parsecore-productization-quality-assessment.md](docs/parsecore-productization-quality-assessment.md)：P1-P7 产品化完成质量评估、验证结果、风险和修复建议
 - [docs/parsecore-productization-todo.md](docs/parsecore-productization-todo.md)：后续阶段产品化待办（历史快照，已被 spec 取代）
 - [docs/parsecore-data-quality-pipeline-plan.md](docs/parsecore-data-quality-pipeline-plan.md)：中等改动升级计划，覆盖异步解析、结构化表格、质量信号与未来深度改造承接
-- [docs/local-provider-ir-upgrade-plan.md](docs/local-provider-ir-upgrade-plan.md)：本地 Provider、统一 IR、RAG 覆盖审计与阅读页排版质量升级方案
+- [docs/local-provider-ir-upgrade-plan.md](docs/local-provider-ir-upgrade-plan.md)：历史本地 Provider 与 IR 技术方案及验收记录；不代表本轮继续扩大解析引擎或重构范围
 - [docs/gray-deployment.md](docs/gray-deployment.md)：queue-worker + Postgres + pgvector 灰度推荐配置与回滚口径
 
 ## 目录结构

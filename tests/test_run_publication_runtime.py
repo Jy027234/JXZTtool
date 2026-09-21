@@ -61,7 +61,9 @@ def _block(block_id: str, text: str, *, doc_id: str) -> Block:
 
 
 class RuntimePublicationTests(unittest.TestCase):
-    def test_parsed_but_unpublished_document_reports_not_ready(self) -> None:
+    def test_a_submitted_parse_publishes_and_reads_pin_that_run(self) -> None:
+        # TODO item 5: the current execution path is wired to the run store, so a
+        # successful submit publishes and the read serves that run.
         from parsecore.bootstrap import build_runtime
 
         with TemporaryWorkspace(CONFIG) as workspace:
@@ -78,13 +80,14 @@ class RuntimePublicationTests(unittest.TestCase):
                 )
             )
             state = runtime.publication_state(doc_id="doc-1")
+            snapshot = runtime.get_document(doc_id="doc-1")
 
-        # The legacy signal fired…
         self.assertEqual(outcome.job.state.value, "done")
-        # …but nothing is published, and the state says so explicitly.
-        self.assertFalse(state["formal_version_available"])
-        self.assertEqual(state["consumer_signal"], "not_ready")
-        self.assertIsNone(state["active_run_id"])
+        self.assertTrue(state["formal_version_available"])
+        self.assertEqual(state["consumer_signal"], "published")
+        self.assertEqual(snapshot["publication"]["served_run_id"], state["active_run_id"])
+        self.assertTrue(snapshot["publication"]["pinned"])
+        self.assertEqual(state["publication_generation"], 1)
 
     def test_publishing_through_the_runtime_switches_the_pointer(self) -> None:
         from parsecore.bootstrap import build_runtime
@@ -92,6 +95,9 @@ class RuntimePublicationTests(unittest.TestCase):
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
             self.assertTrue(runtime.run_publication_ready)
+            # A fresh document has no published version yet.
+            before = runtime.publication_state(doc_id="doc-1")
+            self.assertEqual(before["publication_generation"], 0)
 
             result = runtime.publish_run(
                 doc_id="doc-1",

@@ -334,12 +334,11 @@ class ConcurrentPartTests(FaultRegressionTestCase):
                 ]
                 self.assertEqual(live, [text])
 
-    def test_shared_block_id_across_documents_is_displaced_loudly(self) -> None:
-        # The live tier keys blocks by a globally unique ``block_id`` while
-        # readers scope by tenant/doc. Two documents that reuse an id (which a
-        # pre-P0-03 database could contain) cannot both hold it; publishing the
-        # second displaces the first's row, and that must be recorded as an event
-        # rather than silently losing content.
+    def test_shared_block_id_across_documents_is_refused_not_deleted(self) -> None:
+        # The live tier keys blocks by a globally unique ``block_id`` while reads
+        # are scoped by tenant/doc, so two documents cannot both hold one id.
+        # Refusing the second publish keeps the first document's artifacts intact;
+        # deleting them to make room would be data loss, not conflict resolution.
         first = self._stage_and_seal(
             text="v1",
             claim_token="claim-1",
@@ -365,10 +364,75 @@ class ConcurrentPartTests(FaultRegressionTestCase):
             ids=("shared-blk", "shared-chk"),
         )
         self.store.record_validation(parse_run_id=second.parse_run_id, status="passed")
+
+        with self.assertRaises(PublishError) as captured:
+            self.store.publish_run(
+                parse_run_id=second.parse_run_id,
+                expected_generation=0,
+                expected_source_version="sha256:v2",
+                claim_token="claim-2",
+            )
+        self.assertIn("collision", str(captured.exception))
+
+        # doc-a keeps its published version and its live artifacts …
+        self.assertEqual(
+            [
+                block.content
+                for block in self.jobs.get_blocks(doc_id="doc-a", tenant_id=self.tenant_id)
+            ],
+            ["v1"],
+        )
+        self.assertEqual(
+            self.store.publication_state(doc_id="doc-a", tenant_id=self.tenant_id)[
+                "active_run_id"
+            ],
+            first.parse_run_id,
+        )
+        # … and doc-b is simply not published.
+        self.assertIsNone(
+            self.store.publication_state(doc_id="doc-b", tenant_id=self.tenant_id)["active_run_id"]
+        )
+        self.assertEqual(
+            self.store.get_run(parse_run_id=second.parse_run_id).publication_status,
+            PublicationStatus.UNPUBLISHED.value,
+        )
+        # Nothing was removed from any document.
+        self.assertNotIn(
+            "artifact_id_displaced",
+            [event["event_type"] for event in self.store.pending_publication_events()],
+        )
+
+    def test_distinct_ids_across_documents_both_publish(self) -> None:
+        # The collision check must not block the normal independent case.
+        first = self._stage_and_seal(
+            text="a",
+            claim_token="claim-1",
+            source_version="sha256:a",
+            doc_id="doc-a",
+            expected_generation=0,
+            ids=("a-blk", "a-chk"),
+        )
+        self.store.record_validation(parse_run_id=first.parse_run_id, status="passed")
+        self.store.publish_run(
+            parse_run_id=first.parse_run_id,
+            expected_generation=0,
+            expected_source_version="sha256:a",
+            claim_token="claim-1",
+        )
+
+        second = self._stage_and_seal(
+            text="b",
+            claim_token="claim-2",
+            source_version="sha256:b",
+            doc_id="doc-b",
+            expected_generation=0,
+            ids=("b-blk", "b-chk"),
+        )
+        self.store.record_validation(parse_run_id=second.parse_run_id, status="passed")
         result = self.store.publish_run(
             parse_run_id=second.parse_run_id,
             expected_generation=0,
-            expected_source_version="sha256:v2",
+            expected_source_version="sha256:b",
             claim_token="claim-2",
         )
 
@@ -376,19 +440,17 @@ class ConcurrentPartTests(FaultRegressionTestCase):
         self.assertEqual(
             [
                 block.content
+                for block in self.jobs.get_blocks(doc_id="doc-a", tenant_id=self.tenant_id)
+            ],
+            ["a"],
+        )
+        self.assertEqual(
+            [
+                block.content
                 for block in self.jobs.get_blocks(doc_id="doc-b", tenant_id=self.tenant_id)
             ],
-            ["v2"],
+            ["b"],
         )
-        # The displacement is visible, not silent.
-        events = [
-            event
-            for event in self.store.pending_publication_events()
-            if event["event_type"] == "artifact_id_displaced"
-        ]
-        self.assertEqual(len(events), 1)
-        self.assertIn("block:shared-blk", events[0]["payload"]["displaced"])
-        self.assertIn("chunk:shared-chk", events[0]["payload"]["displaced"])
 
     def test_a_part_rerun_replaces_only_its_own_document(self) -> None:
         keep = self._publish_first()

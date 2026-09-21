@@ -1447,20 +1447,26 @@ class SQLiteRunStore:
             (tenant_id, doc_id),
         )
         # ``block_id`` / ``chunk_id`` are globally unique in the live tier while
-        # readers scope by ``tenant/doc``. When an id collides across documents
-        # (which a pre-P0-03 database could produce, and which synthetic part
-        # documents do by construction), the colliding row is removed at the
-        # moment it would break the insert, so a document that is not being
-        # published keeps its artifacts. The displacement is logged as an event
-        # rather than silently ignored.
-        displaced: list[str] = []
+        # readers scope by ``tenant/doc``.  Two documents cannot both hold the
+        # same id, so a collision is *refused* here instead of resolved by
+        # deleting the other document's row: deleting another document's
+        # artifacts to make room is data loss, not conflict resolution.  Nothing
+        # has been inserted yet at this point, so refusing leaves the previously
+        # published version of every document untouched.
+        colliding = _colliding_artifact_ids(
+            conn,
+            block_rows=block_rows,
+            chunk_rows=chunk_rows,
+            tenant_id=tenant_id,
+            doc_id=doc_id,
+        )
+        if colliding:
+            raise PublishError(
+                f"artifact id collision with another document; refusing to publish run"
+                f" {parse_run_id}: {', '.join(colliding[:5])}"
+                + (" …" if len(colliding) > 5 else "")
+            )
         for row in block_rows:
-            removed = conn.execute(
-                "DELETE FROM blocks WHERE block_id = ? AND NOT (tenant_id = ? AND doc_id = ?)",
-                (row["block_id"], tenant_id, doc_id),
-            ).rowcount
-            if removed:
-                displaced.append(f"block:{row['block_id']}")
             payload = json.loads(row["payload_json"])
             conn.execute(
                 "INSERT INTO blocks (block_id, doc_id, tenant_id, run_id, position, type, content, metadata_json)"
@@ -1477,12 +1483,6 @@ class SQLiteRunStore:
                 ),
             )
         for row in chunk_rows:
-            removed = conn.execute(
-                "DELETE FROM chunks WHERE chunk_id = ? AND NOT (tenant_id = ? AND doc_id = ?)",
-                (row["chunk_id"], tenant_id, doc_id),
-            ).rowcount
-            if removed:
-                displaced.append(f"chunk:{row['chunk_id']}")
             payload = json.loads(row["payload_json"])
             conn.execute(
                 "INSERT INTO chunks ("
@@ -1522,29 +1522,11 @@ class SQLiteRunStore:
                     _utc_now(),
                 ),
             )
-        if displaced:
-            conn.execute(
-                "INSERT OR IGNORE INTO publication_events ("
-                " event_id, tenant_id, doc_id, parse_run_id, event_type,"
-                " publication_generation, payload_json, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    f"evt-{uuid4().hex[:16]}",
-                    tenant_id,
-                    doc_id,
-                    parse_run_id,
-                    "artifact_id_displaced",
-                    None,
-                    _canonical({"displaced": sorted(set(displaced))}),
-                    _utc_now(),
-                ),
-            )
         return {
             "blocks": len(block_rows),
             "chunks": len(chunk_rows),
             "views": len(view_rows),
             "manifest_blocks": int((manifest.get("counts") or {}).get("blocks", 0)),
-            "displaced_ids": sorted(set(displaced)),
         }
 
     @staticmethod
@@ -1585,6 +1567,38 @@ class SQLiteRunStore:
             created_at=str(value("created_at", "")),
             updated_at=str(value("updated_at", "")),
         )
+
+
+def _colliding_artifact_ids(
+    conn: sqlite3.Connection,
+    *,
+    block_rows: Sequence[sqlite3.Row],
+    chunk_rows: Sequence[sqlite3.Row],
+    tenant_id: str,
+    doc_id: str,
+) -> list[str]:
+    """Ids in this run that already belong to a *different* document.
+
+    The live tier keys ``blocks``/``chunks`` by a globally unique id while reads
+    are scoped by ``tenant/doc``, so an id held by another document cannot also be
+    published here.  Returning the colliding ids lets the caller refuse the write
+    instead of deleting the other document's rows.
+    """
+
+    colliding: list[str] = []
+    for row in block_rows:
+        owner = conn.execute(
+            "SELECT tenant_id, doc_id FROM blocks WHERE block_id = ?", (row["block_id"],)
+        ).fetchone()
+        if owner is not None and (owner["tenant_id"] != tenant_id or owner["doc_id"] != doc_id):
+            colliding.append(f"block:{row['block_id']}")
+    for row in chunk_rows:
+        owner = conn.execute(
+            "SELECT tenant_id, doc_id FROM chunks WHERE chunk_id = ?", (row["chunk_id"],)
+        ).fetchone()
+        if owner is not None and (owner["tenant_id"] != tenant_id or owner["doc_id"] != doc_id):
+            colliding.append(f"chunk:{row['chunk_id']}")
+    return colliding
 
 
 def _block_payload(block: Any) -> dict[str, Any]:

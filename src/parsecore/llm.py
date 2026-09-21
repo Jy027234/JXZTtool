@@ -170,6 +170,13 @@ class LlmBoundaryRefiner:
     everything else passes through unchanged. On any failure (network,
     malformed JSON, hard call cap reached) the original paragraph is kept,
     so this layer can never cause a parse regression.
+
+    Execution state is **per request**, not per instance.  The refiner is built
+    once in ``bootstrap`` and injected into a shared parser, so instance-level
+    counters meant that one document's ``reset()`` cleared another document's
+    call budget and cache while it was still running.  ``begin_request()``
+    returns a :class:`RefinerRequestState` that the caller threads through its
+    own parse, and the instance keeps only the configuration.
     """
 
     _DEFAULT_SYSTEM = (
@@ -193,10 +200,69 @@ class LlmBoundaryRefiner:
         self._calls_used = 0
         self._calls_failed = 0
 
-    def reset(self) -> None:
-        """Clear per-document state. Call once per document."""
+    def begin_request(self) -> "RefinerRequestState":
+        """Start a per-request state.
 
-        self._cache.clear()
+        The returned object holds this document's call budget, cache and counters.
+        Two documents parsed concurrently through the same shared refiner get
+        independent state, so neither can reset the other's budget.
+        """
+
+        return RefinerRequestState(
+            client=self._client,
+            system=self._system,
+            max_calls=self._max_calls,
+        )
+
+    def reset(self) -> None:
+        """Deprecated no-op kept for callers that still call it.
+
+        It exists only so an older call site cannot fail; instance state no longer
+        participates in a parse. Use :meth:`begin_request` instead.
+        """
+
+        return None
+
+    @property
+    def calls_used(self) -> int:
+        """Always 0: call accounting lives on the per-request state."""
+
+        return 0
+
+    @property
+    def calls_failed(self) -> int:
+        """Always 0: call accounting lives on the per-request state."""
+
+        return 0
+
+    def refine_paragraph(self, paragraph: str) -> list[str]:
+        """One-off refinement using a fresh request state.
+
+        Convenience for callers that refine a single paragraph; a full parse must
+        use :meth:`begin_request` so the call budget spans the whole document.
+        """
+
+        return self.begin_request().refine_paragraph(paragraph)
+
+
+class RefinerRequestState:
+    """Per-request refinement state: call budget, cache and counters."""
+
+    _SYSTEM_SUFFIX = (
+        " Respond ONLY with a JSON array of strings, no commentary, no markdown fence."
+    )
+
+    def __init__(
+        self,
+        *,
+        client: QwenDashscopeLlmClient,
+        system: str,
+        max_calls: int,
+    ) -> None:
+        self._client = client
+        self._system = system
+        self._max_calls = max(0, int(max_calls))
+        self._cache: dict[str, list[str]] = {}
         self._calls_used = 0
         self._calls_failed = 0
 
@@ -207,6 +273,10 @@ class LlmBoundaryRefiner:
     @property
     def calls_failed(self) -> int:
         return self._calls_failed
+
+    @property
+    def calls_remaining(self) -> int:
+        return max(0, self._max_calls - self._calls_used)
 
     def refine_paragraph(self, paragraph: str) -> list[str]:
         """Return refined sub-paragraphs, or ``[paragraph]`` on any failure."""

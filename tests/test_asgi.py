@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 
 from parsecore.asgi import BackgroundParseRunner, _project_pages, create_app
 from parsecore.bootstrap import build_runtime
-from parsecore.models import Block, BlockType, ParseJobState, ParseRequest
+from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest
 from parsecore.stubs import FakeEmbeddingProvider
 from tests.support import TemporaryWorkspace, build_docx_table
 from unittest.mock import patch
@@ -2129,7 +2129,9 @@ gate_status = "pending"
             self.assertEqual(body["pages"][0]["page_type"], "front_matter")
             self.assertIn("Maintenance Manual", body["pages"][0]["text"])
             self.assertEqual(body["pages"][0]["tables_markdown"], [])
-            self.assertEqual(body["pages"][0]["confidence"], 1.0)
+            # The DOCX parser does not measure per-page confidence, so the
+            # projection reports "not measured" instead of a perfect score.
+            self.assertIsNone(body["pages"][0]["confidence"])
 
     def test_parse_upload_endpoint_returns_parser_service_shape(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
@@ -3162,10 +3164,23 @@ class ParseQueueApiTests(unittest.TestCase):
                         },
                     ),
                 )
-                with patch.object(runtime_obj, "_load_blocks_for_request", return_value=blocks), patch.object(
+                # Publishing validates the staged artifacts, so the patched
+                # shortcut must return the chunk its block implies.
+                chunks = (
+                    Chunk(
+                        chunk_id="ocr-trace-chunk-1",
+                        doc_id="ocr-trace-doc",
+                        block_ids=(blocks[0].block_id,),
+                        text=blocks[0].content,
+                        semantic_role="paragraph",
+                    ),
+                )
+                with patch.object(
+                    runtime_obj, "_load_blocks_for_request", return_value=blocks
+                ), patch.object(
                     runtime_obj,
                     "_load_chunks_for_request",
-                    return_value=(),
+                    return_value=chunks,
                 ):
                     payload = {
                         "file_base64": base64.b64encode(doc.read_bytes()).decode("ascii"),

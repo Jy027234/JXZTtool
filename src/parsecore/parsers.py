@@ -28,7 +28,11 @@ from .contracts import ParserAdapter
 from .garble import detect_page_garble_reason
 from .models import Block, BlockType, ParseRequest, SemanticRole
 from .ocr import OcrConfigurationError, OcrRequestError, build_ocr_engine
-from .ocr_cache import PageOcrCache, get_default_cache
+from .ocr_cache import (
+    PageOcrCache,
+    get_default_cache,
+    ocr_cache_identity,
+)
 
 
 _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
@@ -1253,7 +1257,9 @@ def _build_markdown_provider_blocks(
                 "source_kind": source_kind,
                 "position": position,
                 "page_position": position,
-                "confidence": 1.0,
+                # No ``confidence`` here: a Markdown conversion does not measure
+                # recognition confidence, and writing a constant 1.0 made every
+                # consumer treat an unmeasured value as a perfect score.
             }, parser_name=provider_name, provider_id=provider_name, provider_version=provider_version)
             content = str(segment.get("text") or "").strip()
             if block_type == BlockType.TABLE:
@@ -1992,6 +1998,21 @@ class PdfTextParser(ParserAdapter):
         self._finish_parse_flight(cache_key, flight, result=result)
         return self._annotate_parse_cache_state(result, hit=False)
 
+    def _refiner_for_request(self) -> Any:
+        """Per-parse refiner state, or the refiner itself for older injectors.
+
+        A refiner that implements ``begin_request()`` (the built-in LLM refiner)
+        gets fresh state. A host-injected object without it is used as-is, so the
+        injection contract for custom refiners does not change.
+        """
+
+        if self._boundary_refiner is None:
+            return None
+        begin = getattr(self._boundary_refiner, "begin_request", None)
+        if callable(begin):
+            return begin()
+        return self._boundary_refiner
+
     def _parse_uncached(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
         request_enable_ocr = _resolve_request_enable_ocr(request)
@@ -2046,10 +2067,11 @@ class PdfTextParser(ParserAdapter):
             or effective_layout_reading_order_enabled
         )
 
-        if self._boundary_refiner is not None:
-            reset = getattr(self._boundary_refiner, "reset", None)
-            if callable(reset):
-                reset()
+        # Per-request refiner state: the refiner instance is shared across
+        # concurrent parses (one instance is injected in bootstrap), so counters
+        # and cache must not live on it.  ``begin_request()`` also replaces the
+        # old ``reset()`` call, which cleared another document's budget.
+        boundary_refiner = self._refiner_for_request()
 
         reader = PdfReader(request.file_path)
         page_texts = [page.extract_text() or "" for page in reader.pages]
@@ -2119,6 +2141,7 @@ class PdfTextParser(ParserAdapter):
                 ocr_page_text_fn=ocr_page_text_fn,
                 ocr_cache=effective_ocr_cache,
                 ocr_cache_fast_path=effective_ocr_cache_fast_path,
+                ocr_cache_identity=ocr_cache_identity(self._ocr_provider_settings),
                 page_numbers=adaptive_layout_page_numbers,
                 table_page_numbers=adaptive_table_page_numbers,
                 figure_page_numbers=adaptive_figure_page_numbers,
@@ -2207,10 +2230,10 @@ class PdfTextParser(ParserAdapter):
                     merge_threshold=self._semantic_merge_threshold,
                     split_threshold=self._semantic_split_threshold,
                 )
-            if self._boundary_refiner is not None:
+            if boundary_refiner is not None:
                 paragraphs = _refine_low_confidence_paragraphs(
                     paragraphs,
-                    refiner=self._boundary_refiner,
+                    refiner=boundary_refiner,
                     min_length=self._llm_min_length,
                     min_markers=self._llm_min_markers,
                 )
@@ -4808,6 +4831,7 @@ def _extract_pdfplumber_layout(
     ] | None = None,
     ocr_cache: "PageOcrCache | None" = None,
     ocr_cache_fast_path: bool = True,
+    ocr_cache_identity: tuple[str, str] | None = None,
     page_numbers: set[int] | None = None,
     table_page_numbers: set[int] | None = None,
     figure_page_numbers: set[int] | None = None,
@@ -4818,7 +4842,19 @@ def _extract_pdfplumber_layout(
     Returns an empty list when pdfplumber is unavailable; callers should treat
     that as "dual channel disabled for this run" and fall through to pypdf
     behaviour without raising.
+
+    ``ocr_cache_identity`` is ``(provider_tag, options_repr)`` from
+    :func:`~parsecore.ocr_cache.ocr_cache_identity`.  It is required whenever
+    ``ocr_cache`` is enabled: caching one engine's output under a fixed key would
+    keep serving it after the OCR provider or its options changed.
     """
+
+    if ocr_cache is not None and ocr_cache.enabled and ocr_cache_identity is None:
+        raise ValueError(
+            "ocr_cache_identity is required when ocr_cache is enabled; "
+            "call ocr_cache_identity(settings) from the caller"
+        )
+    cache_provider_tag, cache_options_repr = ocr_cache_identity or ("unknown", "")
 
     try:
         import pdfplumber  # type: ignore
@@ -4862,8 +4898,8 @@ def _extract_pdfplumber_layout(
                 cached_ocr_entry = ocr_cache.get_entry(
                     file_path=file_path,
                     page_number=index,
-                    provider_tag="rapidocr",
-                    options_repr="",
+                    provider_tag=cache_provider_tag,
+                    options_repr=cache_options_repr,
                 )
                 cached_ocr_text = (
                     cached_ocr_entry.get("text")
@@ -4991,8 +5027,8 @@ def _extract_pdfplumber_layout(
                     _cache_hit_entry = ocr_cache.get_entry(
                         file_path=file_path,
                         page_number=index,
-                        provider_tag="rapidocr",
-                        options_repr="",
+                        provider_tag=cache_provider_tag,
+                        options_repr=cache_options_repr,
                     )
                     if _cache_hit_entry is not None:
                         cached_text = _cache_hit_entry.get("text")
@@ -5030,10 +5066,10 @@ def _extract_pdfplumber_layout(
                             ocr_cache.put(
                                 file_path=file_path,
                                 page_number=index,
-                                provider_tag="rapidocr",
+                                provider_tag=cache_provider_tag,
                                 text=recovered_text,
                                 lines=ocr_lines,
-                                options_repr="",
+                                options_repr=cache_options_repr,
                             )
                     elif ocr_attempt_reason is not None:
                         ocr_rejection_reason = ocr_error_reason or "quality_not_improved"

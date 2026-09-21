@@ -379,7 +379,12 @@ api_key_env = "PARSECORE_TEST_EMBED_KEY"
 
 
 class PlaceholderResultTests(unittest.TestCase):
-    def test_placeholder_parse_is_flagged_and_not_a_formal_result(self) -> None:
+    def test_placeholder_parse_is_flagged_and_not_delivered(self) -> None:
+        # A placeholder parser is a development escape hatch, and since P0-04 the
+        # publication gate rejects a placeholder result.  So the job fails instead
+        # of delivering placeholder text, which is exactly what "占位探针不能产生
+        # 正式结果" requires.  The flag is still recorded, because the failure must
+        # say *why* it was not delivered.
         with TemporaryWorkspace(
             _config(
                 parser_name="mineru-local",
@@ -390,29 +395,34 @@ class PlaceholderResultTests(unittest.TestCase):
                 "spec.docx", ["Maintenance Manual", "Apply torque"]
             )
             runtime = build_runtime(workspace.config_path)
-            outcome = runtime.submit(
-                ParseRequest(
-                    doc_id="doc-placeholder",
-                    file_path=str(document_path),
-                    media_type=DOCX_MEDIA_TYPE,
+            with self.assertRaises(RuntimeError) as captured:
+                runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-placeholder",
+                        file_path=str(document_path),
+                        media_type=DOCX_MEDIA_TYPE,
+                    )
                 )
-            )
-            stored_job = runtime.get_job(job_id=outcome.job.job_id)
+            job = runtime.job_store.get_latest_job(doc_id="doc-placeholder")
+            state = runtime.publication_state(doc_id="doc-placeholder")
             report = runtime.capability_report()
 
-        self.assertIsNotNone(outcome.placeholder_result)
-        assert outcome.placeholder_result is not None
-        self.assertEqual(
-            outcome.placeholder_result["placeholder_parser"], "mineru-local"
-        )
-        self.assertFalse(outcome.placeholder_result["formal_result"])
-        self.assertEqual(outcome.placeholder_result["result_grade"], "placeholder")
-        self.assertIn("placeholder_result", (stored_job.options or {}))
+        self.assertIn("validation_rejected", str(captured.exception))
+        self.assertIsNotNone(job)
+        self.assertEqual(job.state.value, "failed")
+        self.assertIn("validation_rejected", str(job.failure_reason))
+        # The reason the result was refused is recorded on the job.
+        placeholder_note = (job.options or {}).get("placeholder_result") or {}
+        self.assertEqual(placeholder_note.get("placeholder_parser"), "mineru-local")
         self.assertIn("mineru-local", report["placeholder_parsers"])
         self.assertFalse(report["formal_parse_ready"])
+        # Nothing placeholder was published, so no formal version exists.
+        self.assertIsNone(state["active_run_id"])
+        self.assertEqual(state["consumer_signal"], "not_ready")
 
-    def test_placeholder_result_is_attached_to_api_payload(self) -> None:
-        from parsecore.api_payloads import _parse_success_response
+    def test_placeholder_flag_is_recorded_on_the_job(self) -> None:
+        from parsecore.models import Block, BlockType
+        from parsecore.run_store import RunArtifacts
 
         with TemporaryWorkspace(
             _config(
@@ -420,15 +430,74 @@ class PlaceholderResultTests(unittest.TestCase):
                 project_extra="allow_placeholder_parsers = true",
             )
         ) as workspace:
-            document_path = workspace.create_docx("spec.docx", ["Maintenance Manual"])
             runtime = build_runtime(workspace.config_path)
-            outcome = runtime.submit(
-                ParseRequest(
-                    doc_id="doc-placeholder-api",
-                    file_path=str(document_path),
-                    media_type=DOCX_MEDIA_TYPE,
-                )
+            # Publish explicitly so the rejection path is observable next to the
+            # recorded flag, without depending on submit()'s failure handling.
+            result = runtime.publish_run(
+                doc_id="doc-placeholder-flag",
+                artifacts=RunArtifacts(
+                    blocks=(
+                        Block(
+                            block_id="ph-1",
+                            doc_id="doc-placeholder-flag",
+                            type=BlockType.PARAGRAPH,
+                            content="placeholder text",
+                            metadata={"page": 1},
+                        ),
+                    ),
+                    views={"pages": [{"page_number": 1, "text": "placeholder text"}]},
+                ),
+                job_id="job-ph",
+                placeholder_parsers=("mineru-local",),
             )
+
+        self.assertFalse(result["published"])
+        self.assertEqual(result["validation_report"]["status"], "rejected")
+        self.assertIn(
+            "placeholder_result", result["validation_report"]["rejection_codes"]
+        )
+
+    def test_placeholder_result_is_attached_to_api_payload(self) -> None:
+        from parsecore.api_payloads import _parse_success_response
+        from parsecore.models import Block, BlockType, Chunk
+        from parsecore.models import ParseJob, ParseJobState
+        from parsecore.models import ParseOutcome
+
+        # The payload contract for a placeholder outcome is unchanged even though
+        # the gate now refuses to publish one.
+        job = ParseJob(
+            job_id="job-placeholder-api",
+            doc_id="doc-placeholder-api",
+            file_path="spec.docx",
+            state=ParseJobState.DONE,
+        )
+        blocks = (
+            Block(
+                block_id="ph-1",
+                doc_id="doc-placeholder-api",
+                type=BlockType.PARAGRAPH,
+                content="placeholder text",
+                metadata={"page": 1, "parser": "mineru-local"},
+            ),
+        )
+        outcome = ParseOutcome(
+            job=job,
+            blocks=blocks,
+            chunks=(
+                Chunk(
+                    chunk_id="ph-c1",
+                    doc_id="doc-placeholder-api",
+                    block_ids=("ph-1",),
+                    text="placeholder text",
+                ),
+            ),
+            placeholder_result={
+                "placeholder_parser": "mineru-local",
+                "result_grade": "placeholder",
+                "formal_result": False,
+                "error_code": "placeholder_parsers_not_allowed",
+            },
+        )
 
         payload = _parse_success_response(
             outcome, file_name="spec.docx", mime_type=DOCX_MEDIA_TYPE, enable_ocr=False

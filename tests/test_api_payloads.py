@@ -847,7 +847,9 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
         self.assertEqual(reader_blocks_by_source[("blk-figure",)]["type"], "figure")
         self.assertEqual(reader_blocks_by_source[("blk-figure",)]["semantic_role"], "image")
         self.assertEqual(reader_blocks_by_source[("blk-figure",)]["source_kind"], "pdf_image")
-        self.assertEqual(reader_blocks_by_source[("blk-figure",)]["confidence"], 1.0)
+        # Unmeasured confidence is reported as ``None`` rather than a perfect
+        # score: the sample figure metadata carries no confidence value.
+        self.assertIsNone(reader_blocks_by_source[("blk-figure",)]["confidence"])
         self.assertEqual(reader_blocks_by_source[("blk-figure",)]["alt_text"], "Hydraulic workflow figure")
         self.assertEqual(reader_blocks_by_source[("blk-figure",)]["figure"]["figure_type"], "flowchart")
         self.assertIn("rag_coverage", reader["index_manifest"])

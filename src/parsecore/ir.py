@@ -586,7 +586,10 @@ def _ir_block(block: Block, *, index: int, source_version_key: str = "") -> dict
         "text": block.content,
         "bbox": resolved_bbox,
         "reading_order": _safe_int(metadata.get("reading_order", metadata.get("page_position")), default=index),
-        "confidence": _optional_float(metadata.get("confidence"), default=1.0),
+        # ``None`` when the source did not provide a confidence. Defaulting to 1.0
+        # published an unmeasured value as a perfect score, which every downstream
+        # gate then treated as measured evidence.
+        "confidence": _optional_float(metadata.get("confidence"), default=None),
         "source_kind": source_kind,
         "display_kind": _display_kind(block_type=block.type, semantic_role=role),
         "reader_policy": reader_policy,
@@ -688,7 +691,7 @@ def _ir_tables(
                 "header_rows": _safe_int(table.get("header_rows"), default=0),
                 "cells": [dict(cell) for cell in table.get("cells", []) if isinstance(cell, Mapping)],
                 "caption": str(table.get("table_title") or table.get("caption") or ""),
-                "confidence": _optional_float(table.get("confidence"), default=1.0),
+                "confidence": _optional_float(table.get("confidence"), default=None),
                 "reader_policy": "table",
                 "index_policy": "index_table_summary_and_cells" if table.get("cells") or table.get("text") else "skip_empty_table",
                 "quality_flags": warnings,

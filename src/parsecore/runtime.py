@@ -18,7 +18,7 @@ from .config import (
     local_provider_route_plan_payload,
     quality_gate_payload,
 )
-from .publication import ARTIFACT_PROFILES
+from .publication import ARTIFACT_PROFILES, ValidationStatus
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, RerankProvider, TranslationAdapter
 from .events import JobEventLogger, ParseStageTimer
 from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
@@ -500,6 +500,28 @@ class EventAggregator:
         return "\n".join(lines)
 
 
+def _source_version_of(request: ParseRequest) -> str | None:
+    """Immutable input identity recorded on the run."""
+
+    value = request.options.get("source_hash") or request.options.get("source_integrity_hash")
+    if isinstance(value, Mapping):
+        value = value.get("source_hash")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _source_size_of(request: ParseRequest) -> int:
+    raw = request.options.get("source_size_bytes")
+    if raw is None:
+        integrity = request.options.get("source_integrity")
+        if isinstance(integrity, Mapping):
+            raw = integrity.get("source_size_bytes")
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ParseRuntime:
     def __init__(
         self,
@@ -838,6 +860,165 @@ class ParseRuntime:
             "latest_job_used_as_formal_version": False,
         }
 
+    def _uses_run_publication(self, *, doc_id: str, tenant_id: str | None) -> bool:
+        """Whether this document's executions must go through the run store.
+
+        True when the backend can publish atomically *and* the document already
+        has (or is about to get) a published version.  In that case writing the
+        live tables directly would overwrite a formal version with an attempt
+        that may never be published.
+        """
+
+        if not self.run_publication_ready:
+            return False
+        if self.run_store is None:  # pragma: no cover - guarded by run_publication_ready
+            return False
+        state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+        return bool(state.get("active_run_id")) or True
+
+    def _begin_execution_run(
+        self,
+        *,
+        request: ParseRequest,
+        job_id: str,
+        claim_token: str | None,
+    ):
+        """Allocate the run for this execution, or ``None`` when unused."""
+
+        if not self._uses_run_publication(doc_id=request.doc_id, tenant_id=request.tenant_id):
+            return None
+        assert self.run_store is not None
+        return self.run_store.begin_run(
+            job_id=job_id,
+            doc_id=request.doc_id,
+            tenant_id=request.tenant_id,
+            source_version=_source_version_of(request),
+            source_bytes=_source_size_of(request),
+            profile=str(request.options.get("profile") or "default"),
+            artifact_profile=str(self.settings.runtime.run_artifact_profile or "default"),
+            claim_token=claim_token,
+            expected_generation=int(
+                self.publication_state(
+                    doc_id=request.doc_id, tenant_id=request.tenant_id
+                ).get("publication_generation", 0)
+            ),
+        )
+
+    def _publish_execution_run(
+        self,
+        *,
+        run: Any,
+        request: ParseRequest,
+        blocks: Sequence[Any],
+        chunks: Sequence[Any],
+        views: Mapping[str, Sequence[Mapping[str, Any]]],
+        claim_token: str | None,
+        placeholder_parsers: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Stage, seal, validate and publish one execution.
+
+        A failure here is an execution failure: the job must not be reported as a
+        successful delivery, and the previously published version stays as it is.
+        """
+
+        assert self.run_store is not None
+        self.run_store.set_execution_status(
+            parse_run_id=run.parse_run_id, status="running", claim_token=claim_token
+        )
+        self.run_store.save_run_artifacts(
+            parse_run_id=run.parse_run_id,
+            artifacts=RunArtifacts(blocks=tuple(blocks), chunks=tuple(chunks), views=dict(views)),
+            claim_token=claim_token,
+        )
+        self.run_store.set_execution_status(
+            parse_run_id=run.parse_run_id, status="succeeded", claim_token=claim_token
+        )
+        seal = self.run_store.seal_run(parse_run_id=run.parse_run_id, claim_token=claim_token)
+        report = validate_run(
+            blocks=blocks,
+            chunks=chunks,
+            views=views,
+            artifact_profile=str(self.settings.runtime.run_artifact_profile or "default"),
+            required_artifacts=seal.required_artifacts,
+            options=self._validation_options(),
+            placeholder_parsers=placeholder_parsers,
+        )
+        self.run_store.record_validation(
+            parse_run_id=run.parse_run_id,
+            status=report.status,
+            reason=report.reason,
+            metrics=report.metrics,
+        )
+        state = self.publication_state(doc_id=request.doc_id, tenant_id=request.tenant_id)
+        # The expected generation is read here, not when the run began: a part
+        # refresh inside the same execution may have published the parent in
+        # between, and a stale expectation would refuse an otherwise valid publish.
+        expected_generation = int(state.get("publication_generation", 0))
+        try:
+            result = self.run_store.publish_run(
+                parse_run_id=run.parse_run_id,
+                expected_source_version=_source_version_of(request),
+                expected_generation=expected_generation,
+                claim_token=claim_token,
+                durable_index=isinstance(self.index, PgVectorIndex),
+                profile=str(self.settings.runtime.run_artifact_profile or "default"),
+            )
+        except PublishError as exc:
+            # "Not publishable" is not the same as "the parse failed".
+            #
+            # ``needs_review`` means the document parsed and a human must decide:
+            # the run keeps its validation report, the job is not an execution
+            # failure, and the previous published version (if any) stays
+            # authoritative.  ``rejected`` means there is nothing deliverable —
+            # a placeholder result, garbled text, a missing required artifact — so
+            # it follows the normal failure path and the caller sees why.
+            if report.status is ValidationStatus.NEEDS_REVIEW:
+                self.event_logger.log(
+                    "run_not_published_pending_review",
+                    doc_id=request.doc_id,
+                    parse_run_id=run.parse_run_id,
+                    validation_status=report.status.value,
+                    reason=report.reason,
+                )
+                return {
+                    "published": False,
+                    "reason": exc.code,
+                    "message": str(exc),
+                    "parse_run_id": run.parse_run_id,
+                    "doc_id": request.doc_id,
+                    "tenant_id": str(request.tenant_id or "default"),
+                    "execution_status": "succeeded",
+                    "validation_status": report.status.value,
+                    "consumer_signal": state.get("consumer_signal") or "not_ready",
+                    "active_run_id": state.get("active_run_id"),
+                    "publication_generation": state.get("publication_generation", 0),
+                    "validation_report": report.as_payload(),
+                }
+            raise
+        payload = result.as_payload()
+        payload["validation_report"] = report.as_payload()
+        return payload
+
+    def _document_views_for_snapshot(
+        self, *, job: Any, blocks: Sequence[Any]
+    ) -> dict[str, Sequence[Mapping[str, Any]]]:
+        """The pages/lines/records view rows for a snapshot.
+
+        Shared by the live write path and the staged artifact path so a published
+        run and a live-tier write can never disagree about what the views are.
+        """
+
+        from .api_payloads import _document_view_rows
+
+        snapshot = {
+            "doc_id": getattr(job, "doc_id", ""),
+            "job": job,
+            "blocks": tuple(blocks),
+            "chunks": (),
+            "partition_parts": [],
+        }
+        return _document_view_rows(snapshot)
+
     def _validation_options(self) -> dict[str, Any]:
         """Thresholds the shared validation rules should use.
 
@@ -1040,6 +1221,12 @@ class ParseRuntime:
             quota_units=job.quota_units,
         )
         request, job = self._prepare_request_for_execution(request=request, job=job)
+        # TODO item 5: when this document's content is published through the run
+        # store, the execution stages artifacts instead of writing the live
+        # tables, so a failed attempt cannot destroy the published version.
+        execution_run = self._begin_execution_run(
+            request=request, job_id=job.job_id, claim_token=claim_token
+        )
         previous_knowledge_snapshot = self._previous_knowledge_unit_snapshot(current_job=job)
         started_at = time.monotonic()
         stage_timer = ParseStageTimer(
@@ -1083,7 +1270,7 @@ class ParseRuntime:
                         placeholder_parser=placeholder_parser,
                     )
                 self._record_ocr_observability(request=request, blocks=blocks)
-            if not self._is_rerun_chunks_only(request):
+            if not self._is_rerun_chunks_only(request) and execution_run is None:
                 with stage_timer.stage("persist_blocks"):
                     self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
                     self.job_store.save_blocks(
@@ -1141,11 +1328,12 @@ class ParseRuntime:
                     previous_parse_run_id=str(previous_knowledge_snapshot.get("parse_run_id") or ""),
                 )
                 self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
-                self.job_store.save_chunks(
-                    doc_id=request.doc_id,
-                    chunks=chunks,
-                    tenant_id=request.tenant_id,
-                )
+                if execution_run is None:
+                    self.job_store.save_chunks(
+                        doc_id=request.doc_id,
+                        chunks=chunks,
+                        tenant_id=request.tenant_id,
+                    )
                 self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
                 self.index.upsert(
                     doc_id=request.doc_id,
@@ -1154,15 +1342,40 @@ class ParseRuntime:
                     document=document,
                     index_manifest=index_manifest,
                 )
-                # P0-04: persist required artifacts *before* declaring the job
-                # done.  Marking DONE clears the claim, which would make a later
-                # required-artifact failure unretryable and turn the real error
-                # into "stale_claim" while the job still reads as done.
-                self._assert_required_view_delivery(
-                    job=job,
-                    persisted=self._persist_document_views(job=job, blocks=blocks),
-                    artifact="reader",
-                )
+                # Required artifacts and publication happen *before* DONE.
+                # Marking DONE clears the claim, which would make a later
+                # required-artifact or publication failure unretryable and turn
+                # the real error into "stale_claim" while the job still reads as
+                # done.
+                if execution_run is not None:
+                    publication = self._publish_execution_run(
+                        run=execution_run,
+                        request=request,
+                        blocks=blocks,
+                        chunks=chunks,
+                        views=self._document_views_for_snapshot(job=job, blocks=blocks),
+                        claim_token=claim_token,
+                        # Only the placeholder parser that actually produced these
+                        # blocks counts. Passing every configured placeholder made
+                        # a document parsed by a real parser fail whenever an
+                        # unrelated placeholder existed in the config.
+                        placeholder_parsers=(
+                            (placeholder_parser,) if placeholder_parser else ()
+                        ),
+                    )
+                    self.event_logger.log(
+                        "run_published_for_job",
+                        job_id=job.job_id,
+                        doc_id=job.doc_id,
+                        parse_run_id=publication.get("parse_run_id"),
+                        publication_generation=publication.get("publication_generation"),
+                    )
+                else:
+                    self._assert_required_view_delivery(
+                        job=job,
+                        persisted=self._persist_document_views(job=job, blocks=blocks),
+                        artifact="reader",
+                    )
                 final_job = self._update_job_state(
                     job_id=job.job_id,
                     state=ParseJobState.DONE,
@@ -2201,6 +2414,62 @@ class ParseRuntime:
             parts.append(part_payload)
         return parts
 
+    def publish_merged_parent_run(
+        self,
+        *,
+        job: Any,
+        doc_id: str,
+        tenant_id: str | None,
+        claim_token: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Publish the parent document's current merged artifacts as a new run.
+
+        Called after a part rerun merged its artifacts, so the parent's published
+        run always describes what the live tier holds. Returns ``None`` when run
+        publication is not in use for this backend.
+        """
+
+        if not self.run_publication_ready or self.run_store is None:
+            return None
+        blocks = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=tenant_id))
+        chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=tenant_id))
+        if not blocks:
+            return None
+        request = ParseRequest(
+            doc_id=doc_id,
+            file_path=str(getattr(job, "file_path", "") or ""),
+            media_type=getattr(job, "media_type", None),
+            options=dict(getattr(job, "options", None) or {}),
+            tenant_id=str(tenant_id or getattr(job, "tenant_id", "default") or "default"),
+            quota_key=str(getattr(job, "quota_key", "default") or "default"),
+            quota_units=int(getattr(job, "quota_units", 1) or 1),
+        )
+        run = self._begin_execution_run(
+            request=request,
+            job_id=str(getattr(job, "job_id", "") or doc_id),
+            claim_token=claim_token,
+        )
+        if run is None:
+            return None
+        try:
+            return self._publish_execution_run(
+                run=run,
+                request=request,
+                blocks=blocks,
+                chunks=chunks,
+                views=self._document_views_for_snapshot(job=job, blocks=blocks),
+                claim_token=claim_token,
+            )
+        except PublishError as exc:
+            self.event_logger.log(
+                "merged_parent_run_not_published",
+                doc_id=doc_id,
+                parse_run_id=run.parse_run_id,
+                error_code=exc.code,
+                error=str(exc),
+            )
+            return None
+
     def refresh_partitioned_parent(
         self,
         *,
@@ -2274,6 +2543,14 @@ class ParseRuntime:
             if not blocks_for_views:
                 blocks_for_views = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
             self._persist_document_views(job=parent_job, blocks=blocks_for_views)
+        # The merge is complete: publish it so the parent's published run
+        # describes the merged artifacts a reader will actually get.
+        self.publish_merged_parent_run(
+            job=parent_job,
+            doc_id=doc_id,
+            tenant_id=parent_job.tenant_id,
+            claim_token=getattr(parent_job, "claim_token", None),
+        )
         return parent_job
 
     def _refresh_partitioned_parent_incremental(

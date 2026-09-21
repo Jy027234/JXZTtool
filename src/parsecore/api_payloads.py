@@ -3953,7 +3953,10 @@ def _structured_cells(
                     "row_index": row_index,
                     "col_index": col_index,
                     "text": str(value or ""),
-                    "confidence": 1.0,
+                    # No confidence: a grid cell read from a source table was not
+                    # scored by anything, and a constant 1.0 turned "unmeasured"
+                    # into "certain" for every consumer.
+                    "confidence": None,
                     "source_page_number": page_number,
                     "source_table_index": table_index,
                     "warnings": [],
@@ -4706,7 +4709,7 @@ def _structured_pages(
                 "text": page.get("text", ""),
                 "table_ids": table_ids_by_page.get(page_number, []),
                 "quality_signal_codes": signal_codes_by_page.get(page_number, []),
-                "confidence": page.get("confidence", 1.0),
+                "confidence": page.get("confidence"),
                 "reading_order_confidence": page.get("reading_order_confidence"),
             }
         )
@@ -5534,7 +5537,9 @@ def _project_pages(blocks: tuple[Block, ...]) -> list[dict[str, Any]]:
             "tables_markdown": entry["tables_markdown"],
             "tables": entry["tables"],
             "artifacts": entry["artifacts"],
-            "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 1.0,
+            # Average of the block confidences that exist; ``None`` when none do,
+            # so "no measurement" is not reported as perfect confidence.
+            "confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
         }
         image_descriptions = [
             description

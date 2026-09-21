@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,81 @@ from typing import Any
 
 _DEFAULT_CACHE_DIR = Path("var") / "cache" / "ocr"
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+#: Default page-entry bound.  20k pages is roughly 80 large scanned documents;
+#: enough to be useful, small enough that the directory cannot run away.
+_DEFAULT_MAX_ENTRIES = 20000
+
+#: Result-affecting OCR settings that must be part of the cache key.
+#:
+#: A cache key that omits the provider or its options serves one engine's output
+#: as another engine's result, which is a silent correctness bug rather than a
+#: performance one: switching ``providers.ocr.provider`` or its ``options`` would
+#: keep returning the previous engine's text.
+_OCR_IDENTITY_KEYS: tuple[str, ...] = (
+    "provider",
+    "base_url",
+    "model",
+    "lang",
+    "language",
+    "engine",
+    "options",
+    "det_model",
+    "rec_model",
+    "cls_model",
+)
+
+
+def ocr_cache_identity(settings: Any = None) -> tuple[str, str]:
+    """Return ``(provider_tag, options_repr)`` for an OCR provider configuration.
+
+    ``provider_tag`` names the engine; ``options_repr`` is a stable hash of the
+    settings that change its output.  Both are required in the cache key.
+    """
+
+    if settings is None:
+        return "unknown", ""
+
+    provider = str(
+        _setting(settings, "provider") or _setting(settings, "name") or "unknown"
+    ).strip().lower()
+    provider = provider or "unknown"
+    payload: dict[str, Any] = {}
+    for key in _OCR_IDENTITY_KEYS:
+        if key in {"provider", "name"}:
+            continue
+        value = _setting(settings, key)
+        if value in (None, "", (), []):
+            continue
+        payload[key] = value
+    if not payload:
+        return provider, ""
+    return provider, hashlib.sha256(_stable_repr(payload).encode("utf-8")).hexdigest()[:16]
+
+
+def _setting(settings: Any, name: str) -> Any:
+    if isinstance(settings, dict):
+        return settings.get(name)
+    return getattr(settings, name, None)
+
+
+def _stable_repr(value: Any) -> str:
+    if isinstance(value, dict):
+        return json.dumps(
+            {str(key): _plain(item) for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))},
+            ensure_ascii=False,
+            sort_keys=False,
+        )
+    return json.dumps(_plain(value), ensure_ascii=False, sort_keys=True)
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _key(
@@ -66,6 +142,7 @@ class PageOcrCache:
         cache_dir: str | Path | None = None,
         *,
         ttl_seconds: float = _DEFAULT_TTL_SECONDS,
+        max_entries: int = _DEFAULT_MAX_ENTRIES,
     ) -> None:
         self._cache_dir: Path | None
         if cache_dir is None:
@@ -75,6 +152,10 @@ class PageOcrCache:
         else:
             self._cache_dir = Path(cache_dir)
         self._ttl = float(ttl_seconds)
+        # 0 disables the bound.  The bound exists because the page cache had only
+        # a TTL: a long-running deployment with many distinct documents grows the
+        # directory without limit until the TTL expires.
+        self._max_entries = max(0, int(max_entries))
 
     @property
     def enabled(self) -> bool:
@@ -144,22 +225,89 @@ class PageOcrCache:
         options_repr: str = "",
         file_bytes: bytes | None = None,
     ) -> None:
-        """Write OCR text and optional line locators; ignore write failures."""
+        """Write OCR text and optional line locators; ignore write failures.
+
+        The write is atomic (temp file + ``os.replace``): a reader must never see
+        a half-written entry, because the reader treats unparsable JSON as a miss
+        and would silently re-run OCR while the writer is still flushing.
+        """
+
         if not self.enabled:
             return
         k = _key(file_bytes, file_path, page_number, provider_tag, options_repr)
         path = self._path(k)
+        payload = json.dumps(
+            {"ts": time.time(), "text": text, "lines": lines or []},
+            ensure_ascii=False,
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(
-                    {"ts": time.time(), "text": text, "lines": lines or []},
-                    ensure_ascii=False,
-                ),
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
                 encoding="utf-8",
+                dir=str(path.parent),
+                prefix=f".{k}.",
+                suffix=".tmp",
+                delete=False,
             )
+            temp_path = Path(handle.name)
+            try:
+                with handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+            except BaseException:
+                temp_path.unlink(missing_ok=True)
+                raise
         except OSError:
             pass  # cache write failure is not fatal
+        else:
+            self._enforce_capacity()
+
+    def _enforce_capacity(self) -> int:
+        """Drop the oldest entries when the entry bound is exceeded."""
+
+        if self._max_entries <= 0 or self._cache_dir is None:
+            return 0
+        try:
+            entries = list(self._cache_dir.rglob("*.json"))
+        except OSError:
+            return 0
+        overflow = len(entries) - self._max_entries
+        if overflow <= 0:
+            return 0
+        aged: list[tuple[float, Path]] = []
+        for entry_path in entries:
+            try:
+                aged.append((entry_path.stat().st_mtime, entry_path))
+            except OSError:
+                continue
+        aged.sort()
+        removed = 0
+        for _mtime, entry_path in aged[:overflow]:
+            try:
+                entry_path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def stats(self) -> dict[str, Any]:
+        """Entry count and bound, for observability."""
+
+        if self._cache_dir is None:
+            return {"enabled": False, "entries": 0, "max_entries": self._max_entries}
+        try:
+            entries = len(list(self._cache_dir.rglob("*.json")))
+        except OSError:
+            entries = 0
+        return {
+            "enabled": self.enabled,
+            "entries": entries,
+            "max_entries": self._max_entries,
+            "ttl_seconds": self._ttl,
+        }
 
     def evict_expired(self) -> int:
         """Remove all entries that have exceeded their TTL.  Returns evicted count."""

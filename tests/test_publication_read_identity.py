@@ -70,22 +70,37 @@ class PublicationReadContextTests(unittest.TestCase):
             )
         )
 
-    def _publish(self, runtime, *, doc_id: str = "doc-1", text: str = "formal text"):
+    _publish_sequence = 0
+
+    def _publish(
+        self,
+        runtime,
+        *,
+        doc_id: str = "doc-1",
+        text: str = "formal text",
+        expected_generation: int = 0,
+    ):
+        # A distinct id per publication: reusing a block id inside the same
+        # document would be an id collision, which the store refuses.
+        type(self)._publish_sequence += 1
+        sequence = type(self)._publish_sequence
         return runtime.publish_run(
             doc_id=doc_id,
             artifacts=RunArtifacts(
-                blocks=(_block("b1", text, doc_id=doc_id),),
+                blocks=(_block(f"blk-{sequence}", text, doc_id=doc_id),),
                 views={"pages": [{"page_number": 1, "text": text}]},
             ),
-            job_id=f"job-{doc_id}",
-            source_version=f"sha256:{text}",
+            job_id=f"job-{doc_id}-{sequence}",
+            source_version=f"sha256:{text}-{sequence}",
+            expected_generation=expected_generation,
         )
 
-    def test_unpublished_document_states_that_it_serves_no_run(self) -> None:
+    def test_an_unknown_document_states_that_it_serves_no_run(self) -> None:
+        # A submitted parse now publishes (TODO item 5), so "no served run" is the
+        # state of a document that was never parsed.
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
-            self._seed_document(workspace, runtime)
-            snapshot = runtime.get_document(doc_id="doc-1")
+            snapshot = runtime.get_document(doc_id="never-parsed")
 
         context = snapshot["publication"]
         self.assertIsNone(context["served_run_id"])
@@ -97,7 +112,9 @@ class PublicationReadContextTests(unittest.TestCase):
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
             self._seed_document(workspace, runtime)
-            published = self._publish(runtime)
+            # The seed already published generation 1; publish again to check the
+            # served identity follows the newest published run.
+            published = self._publish(runtime, expected_generation=1, text="second")
             snapshot = runtime.get_document(doc_id="doc-1")
 
         context = snapshot["publication"]
@@ -106,7 +123,7 @@ class PublicationReadContextTests(unittest.TestCase):
         self.assertTrue(context["pinned"])
         self.assertEqual(context["publication_status"], "published")
         self.assertEqual(context["consumer_signal"], "published")
-        self.assertEqual(context["publication_generation"], 1)
+        self.assertEqual(context["publication_generation"], 2)
 
     def test_every_projection_reports_the_same_run(self) -> None:
         from parsecore.api_payloads import _document_projection
@@ -114,7 +131,7 @@ class PublicationReadContextTests(unittest.TestCase):
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
             self._seed_document(workspace, runtime)
-            published = self._publish(runtime)
+            published = self._publish(runtime, expected_generation=1)
             snapshot = runtime.get_document(doc_id="doc-1")
 
         served = {
@@ -139,7 +156,7 @@ class PublicationReadContextTests(unittest.TestCase):
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
             self._seed_document(workspace, runtime)
-            self._publish(runtime)
+            self._publish(runtime, expected_generation=1)
             snapshot = runtime.get_document(doc_id="doc-1")
 
             for projection, schema_name in sample_schema_for.items():
@@ -154,7 +171,7 @@ class PublicationReadContextTests(unittest.TestCase):
             with TestClient(app) as client:
                 runtime = client.app.state.runtime
                 self._seed_document(workspace, runtime)
-                published = self._publish(runtime)
+                published = self._publish(runtime, expected_generation=1)
 
                 served = {}
                 for path, projection in (
@@ -173,22 +190,14 @@ class PublicationReadContextTests(unittest.TestCase):
         with TemporaryWorkspace(CONFIG) as workspace:
             runtime = build_runtime(workspace.config_path)
             self._seed_document(workspace, runtime)
-            first = self._publish(runtime, text="v1")
+            # The seed published generation 1; ``before`` is that run.
+            before_state = runtime.publication_state(doc_id="doc-1")
             before = runtime.get_document(doc_id="doc-1")["publication"]
 
-            second = runtime.publish_run(
-                doc_id="doc-1",
-                artifacts=RunArtifacts(
-                    blocks=(_block("b2", "v2", doc_id="doc-1"),),
-                    views={"pages": [{"page_number": 1, "text": "v2"}]},
-                ),
-                job_id="job-2",
-                source_version="sha256:v2",
-                expected_generation=1,
-            )
+            second = self._publish(runtime, text="v2", expected_generation=1)
             after = runtime.get_document(doc_id="doc-1")["publication"]
 
-        self.assertEqual(before["served_run_id"], first["parse_run_id"])
+        self.assertEqual(before["served_run_id"], before_state["active_run_id"])
         self.assertEqual(after["served_run_id"], second["parse_run_id"])
         self.assertEqual(after["publication_generation"], 2)
 
