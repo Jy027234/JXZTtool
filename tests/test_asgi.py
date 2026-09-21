@@ -1874,6 +1874,10 @@ gate_status = "pending"
                     self.assertEqual(current.status_code, 200)
                     if current.json()["state"] == ParseJobState.DONE.value:
                         break
+                    # Wait for the inline worker instead of spinning: 30 immediate
+                    # polls can elapse before a busy machine finishes the parse,
+                    # which made this test fail under load for no real reason.
+                    time.sleep(0.05)
 
                 planned = client.post(
                     "/v1/parse/documents/doc-pdf-api-parts/parts/plan",

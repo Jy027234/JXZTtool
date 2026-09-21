@@ -5927,6 +5927,103 @@ def _should_rebuild_multi_column_text(page: Any, *, column_count_hint: int) -> b
         return False
 
 
+@dataclass(slots=True, frozen=True)
+class _PageTextLine:
+    """One visual line of a page, with the geometry needed to place it."""
+
+    text: str
+    x0: float
+    x1: float
+    top: float
+
+
+def _page_text_lines(page: Any) -> list[_PageTextLine]:
+    """Read the page as whole lines.
+
+    Whole lines are the unit that makes a two-column page readable: a line that
+    crosses the gutter (a page header, a spanning title, a full-width table row)
+    belongs to the page flow, while a line that stays inside one column belongs
+    to that column.  Cropping the page into bands instead cuts those lines in
+    half, which is how a title ends up as "飞行" plus "行运行手册".
+    """
+
+    extract = getattr(page, "extract_text_lines", None)
+    if not callable(extract):
+        return []
+    try:
+        raw_lines = extract() or []
+    except Exception:
+        return []
+    lines: list[_PageTextLine] = []
+    for entry in raw_lines:
+        if not isinstance(entry, Mapping):
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            lines.append(
+                _PageTextLine(
+                    text=text,
+                    x0=float(entry["x0"]),
+                    x1=float(entry["x1"]),
+                    top=float(entry["top"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    lines.sort(key=lambda item: (item.top, item.x0))
+    return lines
+
+
+def _line_spans_columns(line: _PageTextLine, *, width: float) -> bool:
+    """Whether a line crosses the middle of the page instead of a single column."""
+
+    if width <= 0.0:
+        return False
+    if line.x1 - line.x0 >= width * 0.55:
+        return True
+    return line.x0 <= width * 0.48 and line.x1 >= width * 0.52
+
+
+def _line_column(line: _PageTextLine, *, width: float) -> int:
+    """Which column a line belongs to (0 = left, 1 = right)."""
+
+    if line.x1 <= width * 0.48:
+        return 0
+    if line.x0 >= width * 0.52:
+        return 1
+    return 0 if (line.x0 + line.x1) / 2.0 < width / 2.0 else 1
+
+
+def _order_page_lines_by_region(lines: Sequence[_PageTextLine], *, width: float) -> str:
+    """Order lines by region: the page flow around each column block.
+
+    Content above the first gutter-crossing line is emitted in reading order,
+    then each column is read to its end, then the next spanning line, and so on.
+    A column is never interleaved with its neighbour, which is what produced the
+    stray half-titles and mis-ordered rows of the previous band crop.
+    """
+
+    blocks: list[str] = []
+    column_lines: list[list[str]] = [[], []]
+
+    def _flush_columns() -> None:
+        for buffer in column_lines:
+            if buffer:
+                blocks.append("\n".join(buffer))
+                buffer.clear()
+
+    for line in lines:
+        if _line_spans_columns(line, width=width):
+            _flush_columns()
+            blocks.append(line.text)
+            continue
+        column_lines[_line_column(line, width=width)].append(line.text)
+    _flush_columns()
+    return "\n\n".join(block for block in blocks if block.strip())
+
+
 def _extract_text_by_columns(
     page: Any,
     bboxes: Sequence[tuple[float, float, float, float]],
@@ -5935,34 +6032,25 @@ def _extract_text_by_columns(
 ) -> str:
     """Extract text region-by-region to preserve multi-column reading order.
 
-    Used only for pages already flagged as likely multi-column. Single-column
-    pages continue to use the existing page-wide extraction path.
+    Used only for pages already flagged as likely multi-column.  Lines are placed
+    by the region they belong to (page flow / left column / right column) instead
+    of being cut out of a fixed band, so a spanning title, a repeating header row
+    or a full-width table row stays whole and keeps its position.
     """
 
+    filtered = _filter_page_excluding_bboxes(page, bboxes)
     if column_count <= 1:
         return _extract_text_excluding_bboxes(page, bboxes) if bboxes else (page.extract_text() or "")
 
-    filtered = _filter_page_excluding_bboxes(page, bboxes)
-    width = float(page.width or 0.0)
-    height = float(page.height or 0.0)
-    if width <= 0.0 or height <= 0.0:
+    width = float(getattr(filtered, "width", 0.0) or 0.0)
+    if width <= 0.0:
         return filtered.extract_text() or ""
 
-    column_width = width / float(column_count)
-    parts: list[str] = []
-    for index in range(column_count):
-        x0 = index * column_width
-        x1 = width if index == column_count - 1 else (index + 1) * column_width
-        try:
-            region = filtered.crop((x0, 0.0, x1, height))
-            text = (region.extract_text() or "").strip()
-        except Exception:
-            text = ""
-        if text:
-            parts.append(text)
-    if parts:
-        return "\n\n".join(parts)
-    return filtered.extract_text() or ""
+    lines = _page_text_lines(filtered)
+    if not lines:
+        return filtered.extract_text() or ""
+    ordered = _order_page_lines_by_region(lines, width=width)
+    return ordered or (filtered.extract_text() or "")
 
 
 def _estimate_column_count(

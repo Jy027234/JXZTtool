@@ -1,0 +1,208 @@
+"""Two-column reading order: place lines by region, never cut them in half.
+
+The previous implementation cropped the page into fixed vertical bands, so any
+line that crossed the gutter was split: on a real 飞行运行手册 page the header
+"飞行运行手册" came back as "飞行" in the left band and "行运行手册" in the
+right one, the "*-状态符号…" footnote lost its tail, and the list rows were
+separated from their own right-hand values.  These tests pin the line-level
+region order that replaced it.
+"""
+
+from __future__ import annotations
+
+import unittest
+
+from parsecore.parsers import _extract_text_by_columns
+
+
+class _FakePage:
+    """A pdfplumber-like page built from explicit word geometry.
+
+    Words on one baseline are grouped into lines unless a horizontal gap wider
+    than ``_X_TOLERANCE`` separates them, which is how pdfplumber keeps the two
+    columns of a page apart.
+    """
+
+    _X_TOLERANCE = 15.0
+
+    def __init__(self, words, *, width=595.0, height=842.0, line_api=True):
+        self.width = width
+        self.height = height
+        self.words = [dict(word) for word in words]
+        self._line_api = line_api
+
+    def filter(self, predicate):
+        kept = _FakePage([], width=self.width, height=self.height, line_api=self._line_api)
+        kept.words = [word for word in self.words if predicate(word)]
+        return kept
+
+    def extract_text(self):
+        return "\n".join(line["text"] for line in self._lines())
+
+    def extract_text_lines(self):
+        if not self._line_api:
+            raise AttributeError("extract_text_lines")
+        return self._lines()
+
+    def _lines(self):
+        rows: dict[int, list[dict]] = {}
+        for word in self.words:
+            rows.setdefault(round(float(word["top"]) / 3.0), []).append(word)
+        lines = []
+        for key in sorted(rows):
+            group = sorted(rows[key], key=lambda item: float(item["x0"]))
+            current = [group[0]]
+            for word in group[1:]:
+                if float(word["x0"]) - float(current[-1]["x1"]) > self._X_TOLERANCE:
+                    lines.append(self._line(current))
+                    current = [word]
+                else:
+                    current.append(word)
+            lines.append(self._line(current))
+        return lines
+
+    @staticmethod
+    def _line(group: list[dict]) -> dict:
+        return {
+            "text": " ".join(str(word["text"]) for word in group),
+            "x0": float(group[0]["x0"]),
+            "x1": float(group[-1]["x1"]),
+            "top": float(group[0]["top"]),
+            "bottom": float(group[0]["top"]) + 10.0,
+        }
+
+
+def _word(text, x0, x1, top):
+    return {"text": text, "x0": x0, "x1": x1, "top": top, "bottom": top + 10.0}
+
+
+#: Page width 600: left column 60-280, right column 320-540, gutter in between.
+LEFT = (60.0, 280.0)
+RIGHT = (320.0, 540.0)
+
+
+class TwoColumnReadingOrderTests(unittest.TestCase):
+    def test_a_spanning_title_is_not_cut_at_the_gutter(self) -> None:
+        page = _FakePage(
+            [
+                _word("飞行运行手册", 200, 400, 20),
+                _word("左栏第一行", *LEFT, 100),
+                _word("左栏第二行", *LEFT, 130),
+                _word("右栏第一行", *RIGHT, 100),
+                _word("右栏第二行", *RIGHT, 130),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertIn("飞行运行手册", text)
+        self.assertNotIn("运行手册\n", text.split("左栏")[0].replace("飞行运行手册", ""))
+        self.assertEqual(
+            text.split("\n\n"),
+            ["飞行运行手册", "左栏第一行\n左栏第二行", "右栏第一行\n右栏第二行"],
+        )
+
+    def test_a_full_width_row_keeps_its_own_line(self) -> None:
+        # A repeating table header and its rows cross the gutter as one line:
+        # they belong to the page flow, not to either column.
+        page = _FakePage(
+            [
+                _word("飞行运行手册", 200, 400, 20),
+                _word("编号 章节 * 日期 编号 章节 * 日期", 88, 544, 160),
+                _word("0.1-1 第 0 章 N 0.2-1 第 0 章 R", 84, 563, 200),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertEqual(
+            text.split("\n\n"),
+            [
+                "飞行运行手册",
+                "编号 章节 * 日期 编号 章节 * 日期",
+                "0.1-1 第 0 章 N 0.2-1 第 0 章 R",
+            ],
+        )
+
+    def test_the_same_values_as_column_lines_are_read_column_by_column(self) -> None:
+        # Same content, but each column's value is its own line: now the regions
+        # are two columns and each one is read to its end.
+        page = _FakePage(
+            [
+                _word("编号", 88, 300, 160),
+                _word("编号", 320, 544, 160),
+                _word("0.1-1", 84, 300, 200),
+                _word("0.2-1", 320, 563, 200),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertEqual(text.split("\n\n"), ["编号\n0.1-1", "编号\n0.2-1"])
+
+    def test_a_mid_page_heading_starts_a_new_column_region(self) -> None:
+        page = _FakePage(
+            [
+                _word("左栏上", *LEFT, 100),
+                _word("右栏上", *RIGHT, 100),
+                _word("第 2 章 系统说明", 150, 450, 300),
+                _word("左栏下", *LEFT, 400),
+                _word("右栏下", *RIGHT, 400),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertEqual(
+            text.split("\n\n"),
+            ["左栏上", "右栏上", "第 2 章 系统说明", "左栏下", "右栏下"],
+        )
+
+    def test_lines_never_move_across_a_column(self) -> None:
+        page = _FakePage(
+            [
+                _word("左一", *LEFT, 100),
+                _word("右一", *RIGHT, 100),
+                _word("左二", *LEFT, 130),
+                _word("右二", *RIGHT, 130),
+                _word("左三", *LEFT, 160),
+                _word("右三", *RIGHT, 160),
+            ]
+        )
+
+        blocks = _extract_text_by_columns(page, [], column_count=2).split("\n\n")
+
+        self.assertEqual(blocks, ["左一\n左二\n左三", "右一\n右二\n右三"])
+
+    def test_an_excluded_table_region_is_left_out(self) -> None:
+        page = _FakePage(
+            [
+                _word("正文行", *LEFT, 100),
+                _word("表格单元", 200, 400, 200),
+                _word("后续正文", *LEFT, 300),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [(150.0, 190.0, 450.0, 260.0)], column_count=2)
+
+        self.assertIn("正文行", text)
+        self.assertIn("后续正文", text)
+        self.assertNotIn("表格单元", text)
+
+    def test_a_single_column_page_keeps_the_existing_path(self) -> None:
+        page = _FakePage([_word("单栏正文", 60, 540, 100)])
+
+        self.assertEqual(
+            _extract_text_by_columns(page, [], column_count=1), "单栏正文"
+        )
+
+    def test_a_page_without_line_geometry_falls_back_to_plain_text(self) -> None:
+        page = _FakePage(
+            [_word("左栏", *LEFT, 100), _word("右栏", *RIGHT, 100)], line_api=False
+        )
+
+        self.assertEqual(_extract_text_by_columns(page, [], column_count=2), "左栏\n右栏")
+
+
+if __name__ == "__main__":
+    unittest.main()
