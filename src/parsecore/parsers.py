@@ -7216,7 +7216,17 @@ def _page_text_lines(page: Any) -> list[_PageTextLine]:
     belongs to the page flow, while a line that stays inside one column belongs
     to that column.  Cropping the page into bands instead cuts those lines in
     half, which is how a title ends up as "飞行" plus "行运行手册".
+
+    Lines are grouped from words, not taken from the reader's own line API: that
+    API joins two columns that share a baseline into one line ("…requires a" +
+    "Remove the retaining ring…"), which hides the gutter and made a genuinely
+    two-column page look single-column.  A gap wider than a word space starts a
+    new line, so each column keeps its own.
     """
+
+    word_lines = _page_word_lines(page)
+    if word_lines:
+        return word_lines
 
     extract = getattr(page, "extract_text_lines", None)
     if not callable(extract):
@@ -7248,6 +7258,65 @@ def _page_text_lines(page: Any) -> list[_PageTextLine]:
     return lines
 
 
+def _page_word_lines(page: Any) -> list[_PageTextLine]:
+    """Group words into lines, splitting wherever the gap is a column gutter."""
+
+    extract_words = getattr(page, "extract_words", None)
+    if not callable(extract_words):
+        return []
+    try:
+        words = list(extract_words() or [])
+    except Exception:
+        return []
+    if not words:
+        return []
+    width = float(getattr(page, "width", 0.0) or 0.0)
+    gap_tolerance = max(12.0, width * 0.03) if width > 0.0 else 12.0
+    rows: dict[int, list[Mapping[str, Any]]] = {}
+    for word in words:
+        if not isinstance(word, Mapping) or not str(word.get("text") or "").strip():
+            continue
+        try:
+            top = float(word["top"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        rows.setdefault(round(top / 2.0), []).append(word)
+    lines: list[_PageTextLine] = []
+    for key in sorted(rows):
+        group = sorted(rows[key], key=lambda item: float(item["x0"]))
+        current: list[Mapping[str, Any]] = [group[0]]
+        for word in group[1:]:
+            try:
+                gap = float(word["x0"]) - float(current[-1]["x1"])
+            except (KeyError, TypeError, ValueError):
+                gap = 0.0
+            if gap > gap_tolerance:
+                lines.append(_line_from_words(current))
+                current = [word]
+            else:
+                current.append(word)
+        lines.append(_line_from_words(current))
+    return [line for line in lines if line.text]
+
+
+def _line_from_words(words: Sequence[Mapping[str, Any]]) -> _PageTextLine:
+    texts = [str(word.get("text") or "") for word in words]
+    try:
+        x0 = float(words[0]["x0"])
+        x1 = float(words[-1]["x1"])
+        top = float(words[0]["top"])
+        bottom = float(words[-1].get("bottom", words[-1].get("top", top)))
+    except (KeyError, TypeError, ValueError):
+        return _PageTextLine(text="", x0=0.0, x1=0.0, top=0.0, bottom=0.0)
+    return _PageTextLine(
+        text=" ".join(part for part in texts if part).strip(),
+        x0=x0,
+        x1=x1,
+        top=top,
+        bottom=max(bottom, top),
+    )
+
+
 def _line_spans_columns(line: _PageTextLine, *, width: float) -> bool:
     """Whether a line crosses the middle of the page instead of a single column."""
 
@@ -7268,22 +7337,61 @@ def _line_column(line: _PageTextLine, *, width: float) -> int:
     return 0 if (line.x0 + line.x1) / 2.0 < width / 2.0 else 1
 
 
-def _order_page_lines_by_region(lines: Sequence[_PageTextLine], *, width: float) -> str:
-    """Order lines by region: the page flow around each column block.
+def _order_page_lines_by_region(
+    lines: Sequence[_PageTextLine], *, width: float, height: float = 0.0
+) -> str:
+    """Order lines by region, then merge the wrapped lines inside each region.
 
     Content above the first gutter-crossing line is emitted in reading order,
     then each column is read to its end, then the next spanning line, and so on.
     A column is never interleaved with its neighbour, which is what produced the
     stray half-titles and mis-ordered rows of the previous band crop.
+
+    Inside a region the visual lines are one paragraph's worth of text, not
+    separate paragraphs: they are joined like the running text they are.  A line
+    that is its own region type -- a figure/table caption, a footnote -- always
+    starts its own block, so a caption between two paragraphs is not swallowed by
+    either.
     """
 
     blocks: list[str] = []
-    column_lines: list[list[str]] = [[], []]
+    column_lines: list[list[_PageTextLine]] = [[], []]
+
+    def _flush_region(buffer: Sequence[_PageTextLine]) -> None:
+        # A region is one block, and the wrapped lines inside it are one paragraph:
+        # joining them is what turns a column of visual lines back into running
+        # text.  A caption or a footnote ends the block it interrupts, so it is
+        # never read as part of the paragraph around it.
+        region_lines: list[str] = []
+
+        def _flush_lines() -> None:
+            if region_lines:
+                blocks.append("\n".join(region_lines))
+                region_lines.clear()
+
+        paragraph = ""
+        for line in buffer:
+            if _page_line_kind(line, height=height) != _PAGE_LINE_BODY:
+                if paragraph:
+                    region_lines.append(paragraph)
+                    paragraph = ""
+                _flush_lines()
+                blocks.append(line.text)
+                continue
+            if paragraph and _joins_into_paragraph(paragraph, line.text):
+                paragraph = _merge_wrapped_lines(paragraph, line.text)
+                continue
+            if paragraph:
+                region_lines.append(paragraph)
+            paragraph = line.text
+        if paragraph:
+            region_lines.append(paragraph)
+        _flush_lines()
 
     def _flush_columns() -> None:
         for buffer in column_lines:
             if buffer:
-                blocks.append("\n".join(buffer))
+                _flush_region(buffer)
                 buffer.clear()
 
     for line in lines:
@@ -7291,9 +7399,92 @@ def _order_page_lines_by_region(lines: Sequence[_PageTextLine], *, width: float)
             _flush_columns()
             blocks.append(line.text)
             continue
-        column_lines[_line_column(line, width=width)].append(line.text)
+        column_lines[_line_column(line, width=width)].append(line)
     _flush_columns()
     return "\n\n".join(block for block in blocks if block.strip())
+
+
+#: Line kinds a region can hold.  Only body lines are merged into paragraphs.
+_PAGE_LINE_BODY = "body"
+_PAGE_LINE_CAPTION = "caption"
+_PAGE_LINE_FOOTNOTE = "footnote"
+
+#: A figure/table caption: "图 1", "表 2-1", "Figure 3", "Table 4".
+_PAGE_CAPTION_PATTERN = re.compile(
+    r"^\s*(?:图|表|附图|附表|Figure|Fig\.?|Table|Tab\.?)"
+    r"\s*[0-9一二三四五六七八九十]{1,4}(?:\s*[-–—.．]\s*[0-9一二三四五六七八九十]{1,4})?"
+    r"\s*(?:[:：.、]|\s|$)",
+    re.IGNORECASE,
+)
+#: A footnote line: it starts with a note marker.
+_PAGE_FOOTNOTE_PATTERN = re.compile(
+    r"^\s*(?:[*†‡§]|注\s*[:：]|Notes?\s*[:：]|Sources?\s*[:：]"
+    r"|[0-9]{1,2}\s*[.)、]|[（(][0-9]{1,2}[)）]|[a-z]\s*[.)])\s*\S"
+)
+#: A line that opens a new item instead of continuing the previous one.
+_PAGE_LIST_ITEM_PATTERN = re.compile(
+    r"^\s*(?:[（(]?[0-9]{1,3}[)）.、]|[•·▪◦※]|[-–—]\s|[（(][一二三四五六七八九十]{1,3}[)）])"
+)
+_PAGE_SENTENCE_END = "。．.！!？?；;：:…"
+#: Below this length a line is a label or a table value, not a wrapped sentence.
+_PAGE_MERGE_MIN_CHARS = 10
+_CJK_PATTERN = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
+
+
+def _page_line_kind(line: _PageTextLine, *, height: float) -> str:
+    """What a visual line is: body text, a caption, or a footnote.
+
+    The distinction is what keeps a caption from being merged into the paragraph
+    above it.  A footnote needs both cues -- a note marker and the bottom band of
+    the page -- because numbered body lines exist in the middle of a page too.
+    """
+
+    text = str(line.text or "").strip()
+    if not text:
+        return _PAGE_LINE_BODY
+    if _PAGE_CAPTION_PATTERN.match(text):
+        return _PAGE_LINE_CAPTION
+    if height > 0.0 and line.top >= height * 0.9 and _PAGE_FOOTNOTE_PATTERN.match(text):
+        return _PAGE_LINE_FOOTNOTE
+    return _PAGE_LINE_BODY
+
+
+def _joins_into_paragraph(previous: str, current: str) -> bool:
+    """Whether ``current`` continues the paragraph ``previous`` belongs to."""
+
+    left = str(previous or "").strip()
+    right = str(current or "").strip()
+    if not left or not right:
+        return False
+    # A short line is a label, a heading or a table value: it does not continue a
+    # wrapped sentence, and a wrapped sentence is never that short.
+    if len(left) < _PAGE_MERGE_MIN_CHARS:
+        return False
+    if left.endswith(tuple(_PAGE_SENTENCE_END)):
+        return False
+    if _PAGE_LIST_ITEM_PATTERN.match(right):
+        return False
+    return True
+
+
+def _merge_wrapped_lines(previous: str, current: str) -> str:
+    """Join two lines of one paragraph the way the source reads them.
+
+    Chinese text continues without a space; Latin text needs one.  A hyphen at the
+    end of a line that split a word is dropped, which is what the reader does.
+    """
+
+    left = str(previous or "").rstrip()
+    right = str(current or "").lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.endswith("-") and right[:1].islower():
+        return left[:-1] + right
+    if _CJK_PATTERN.match(left[-1]) and _CJK_PATTERN.match(right[0]):
+        return left + right
+    return f"{left} {right}"
 
 
 def _extract_text_by_columns(
@@ -7321,7 +7512,9 @@ def _extract_text_by_columns(
     lines = _page_text_lines(filtered)
     if not lines:
         return filtered.extract_text() or ""
-    ordered = _order_page_lines_by_region(lines, width=width)
+    ordered = _order_page_lines_by_region(
+        lines, width=width, height=float(getattr(filtered, "height", 0.0) or 0.0)
+    )
     return ordered or (filtered.extract_text() or "")
 
 

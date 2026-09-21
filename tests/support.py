@@ -159,6 +159,66 @@ def build_simple_pdf_bytes(pages: list[list[str]]) -> bytes:
     return b"".join(chunks)
 
 
+def build_positioned_pdf_bytes(pages: list[list[tuple[float, float, str]]]) -> bytes:
+    """A one-font PDF whose text is placed at explicit coordinates.
+
+    ``build_simple_pdf_bytes`` flows text from a single left margin, which cannot
+    express a two-column page.  Each entry is ``(x, y, text)`` in PDF points from
+    the bottom-left corner, the way a layout sample needs to be written.
+    """
+
+    objects: list[bytes] = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"PLACEHOLDER_PAGES")
+
+    page_object_ids: list[int] = []
+    font_object_id = 3 + len(pages) * 2
+
+    for page_index, lines in enumerate(pages):
+        page_object_id = 3 + page_index * 2
+        content_object_id = page_object_id + 1
+        page_object_ids.append(page_object_id)
+        page_object = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_object_id} 0 R >> >> /Contents {content_object_id} 0 R >>"
+        ).encode("ascii")
+        objects.append(page_object)
+
+        stream_lines = [b"BT", b"/F1 12 Tf"]
+        for x, y, text in lines:
+            escaped = _escape_pdf_text(str(text)).encode("latin-1", errors="replace")
+            stream_lines.append(f"1 0 0 1 {float(x):.2f} {float(y):.2f} Tm".encode("ascii"))
+            stream_lines.append(b"(" + escaped + b") Tj")
+        stream_lines.append(b"ET")
+        stream = b"\n".join(stream_lines)
+        content_object = (
+            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream"
+        )
+        objects.append(content_object)
+
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    kids = b" ".join(f"{page_object_id} 0 R".encode("ascii") for page_object_id in page_object_ids)
+    objects[1] = b"<< /Type /Pages /Kids [" + kids + b"] /Count " + str(len(page_object_ids)).encode("ascii") + b" >>"
+
+    chunks = [b"%PDF-1.4\n"]
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(sum(len(chunk) for chunk in chunks))
+        chunks.append(f"{index} 0 obj\n".encode("ascii"))
+        chunks.append(body)
+        chunks.append(b"\nendobj\n")
+
+    xref_offset = sum(len(chunk) for chunk in chunks)
+    chunks.append(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    chunks.append(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        chunks.append(f"{offset:010d} 00000 n \n".encode("ascii"))
+    chunks.append(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return b"".join(chunks)
+
+
 class TemporaryWorkspace:
     def __init__(self, config_template: str) -> None:
         self.config_template = config_template
@@ -235,4 +295,15 @@ class TemporaryWorkspace:
         target = self.root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(build_simple_pdf_bytes(pages))
+        return target
+
+    def create_positioned_pdf(
+        self, name: str, pages: list[list[tuple[float, float, str]]]
+    ) -> Path:
+        """A PDF with explicit text coordinates (two-column layouts, captions)."""
+
+        assert self.root is not None
+        target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(build_positioned_pdf_bytes(pages))
         return target

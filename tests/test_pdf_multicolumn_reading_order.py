@@ -204,5 +204,122 @@ class TwoColumnReadingOrderTests(unittest.TestCase):
         self.assertEqual(_extract_text_by_columns(page, [], column_count=2), "左栏\n右栏")
 
 
+class ParagraphMergingInsideARegionTests(unittest.TestCase):
+    """Wrapped lines of one paragraph are joined; separate facts are not."""
+
+    def test_wrapped_chinese_lines_are_joined_without_a_space(self) -> None:
+        page = _FakePage(
+            [
+                _word("本手册规定了主机轮的检查要求与适用范围，", *LEFT, 100),
+                _word("并给出对应的验收判据与记录格式。", *LEFT, 115),
+                _word("维修单位应按本手册执行并保留记录，", *RIGHT, 100),
+                _word("不得自行降低检查标准或省略步骤。", *RIGHT, 115),
+            ]
+        )
+
+        blocks = _extract_text_by_columns(page, [], column_count=2).split("\n\n")
+
+        self.assertEqual(
+            blocks,
+            [
+                "本手册规定了主机轮的检查要求与适用范围，并给出对应的验收判据与记录格式。",
+                "维修单位应按本手册执行并保留记录，不得自行降低检查标准或省略步骤。",
+            ],
+        )
+
+    def test_a_finished_sentence_and_a_new_item_start_their_own_line(self) -> None:
+        # Sentence-final punctuation ends a paragraph, and a numbered item opens a
+        # new one, so neither is welded onto the previous line.
+        page = _FakePage(
+            [
+                _word("第一段已经完整结束了，不会再接下一行内容。", *LEFT, 100),
+                _word("第二段从这里重新开始并继续展开说明。", *LEFT, 115),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertEqual(
+            text.split("\n"),
+            [
+                "第一段已经完整结束了，不会再接下一行内容。",
+                "第二段从这里重新开始并继续展开说明。",
+            ],
+        )
+
+    def test_latin_lines_are_joined_with_a_space_and_a_split_word_is_repaired(self) -> None:
+        page = _FakePage(
+            [
+                _word("The inspection procedure requires a torque wrench", *LEFT, 100),
+                _word("and a calibrated gauge for every measurement.", *LEFT, 115),
+                _word("Do not reuse a component whose surface is", *LEFT, 130),
+                _word("dam-", *LEFT, 145),
+                _word("aged by heat or corrosion.", *LEFT, 160),
+            ]
+        )
+
+        text = _extract_text_by_columns(page, [], column_count=2)
+
+        self.assertIn(
+            "The inspection procedure requires a torque wrench and a calibrated gauge for every measurement.",
+            text,
+        )
+        self.assertIn("damaged by heat or corrosion.", text)
+
+    def test_a_caption_between_paragraphs_keeps_its_own_block(self) -> None:
+        # A caption is a region type of its own: it must not be swallowed by the
+        # paragraph above it, and the paragraph below it is a separate block.
+        page = _FakePage(
+            [
+                _word("拆卸前应先释放系统压力并断开电源，", *LEFT, 100),
+                _word("确认压力表读数为零后方可继续作业。", *LEFT, 115),
+                _word("图 1 液压系统泄压示意", *LEFT, 130),
+                _word("安装时按相反顺序执行并检查密封件，", *LEFT, 145),
+                _word("力矩值见表 2 的规定。", *LEFT, 160),
+            ]
+        )
+
+        blocks = _extract_text_by_columns(page, [], column_count=2).split("\n\n")
+
+        self.assertEqual(
+            blocks,
+            [
+                "拆卸前应先释放系统压力并断开电源，确认压力表读数为零后方可继续作业。",
+                "图 1 液压系统泄压示意",
+                "安装时按相反顺序执行并检查密封件，力矩值见表 2 的规定。",
+            ],
+        )
+
+    def test_a_footnote_at_the_page_bottom_is_its_own_block(self) -> None:
+        page = _FakePage(
+            [
+                _word("正文段落说明检查项目与判定依据，", *LEFT, 100),
+                _word("并按顺序记录每一项结果。", *LEFT, 115),
+                _word("注：表中数值为参考值，实际以工卡为准。", 60, 540, 800),
+            ]
+        )
+
+        blocks = _extract_text_by_columns(page, [], column_count=2).split("\n\n")
+
+        self.assertEqual(blocks[-1], "注：表中数值为参考值，实际以工卡为准。")
+        self.assertEqual(blocks[0], "正文段落说明检查项目与判定依据，并按顺序记录每一项结果。")
+
+    def test_a_numbered_body_line_in_the_middle_is_not_a_footnote(self) -> None:
+        # The same marker in the middle of the page is body text: only the bottom
+        # band plus a marker makes a footnote.
+        page = _FakePage(
+            [
+                _word("1. 检查项目如下说明并逐条执行确认。", *LEFT, 300),
+                _word("2. 完成后再进行复核并签字确认。", *LEFT, 315),
+            ]
+        )
+
+        blocks = _extract_text_by_columns(page, [], column_count=2).split("\n\n")
+
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("1. 检查项目如下说明并逐条执行确认。", blocks[0])
+        self.assertIn("2. 完成后再进行复核并签字确认。", blocks[0])
+
+
 if __name__ == "__main__":
     unittest.main()
