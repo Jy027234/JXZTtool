@@ -1927,6 +1927,13 @@ class PdfTextParser(ParserAdapter):
         self._layout_reading_order_enabled = bool(
             post_process.get("layout_reading_order", self._dual_channel_enabled)
         )
+        # On-demand OCR of picture regions that carry no text at all (a scanned
+        # insert, a photographed plate on an otherwise digital page).  Off by
+        # default: reading a picture costs a render plus an engine call, and the
+        # text it produces is transcribed, not extracted, so a caller asks for it.
+        self._ocr_image_regions_enabled = bool(
+            post_process.get("ocr_image_regions", False)
+        )
         # A3+.1: run the expensive layout/table/figure pass only on pages
         # that show layout evidence.  This stays opt-in at the library level;
         # the product config enables it for the default PDF route.  Explicit
@@ -2293,12 +2300,13 @@ class PdfTextParser(ParserAdapter):
         # Only the lines that cannot be trusted, and never for an explicit
         # full-page OCR request: that one asks for the whole page.
         regions: list[tuple[float, float, float, float]] = []
+        image_regions: list[tuple[float, float, float, float]] = []
+        try:
+            page_width = float(getattr(page, "width", 0.0) or 0.0)
+            page_height = float(getattr(page, "height", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            page_width = page_height = 0.0
         if not force_full_page:
-            try:
-                page_width = float(getattr(page, "width", 0.0) or 0.0)
-                page_height = float(getattr(page, "height", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                page_width = page_height = 0.0
             regions = _ocr_enhancement_regions(
                 lines=native_lines,
                 table_bboxes=table_bboxes,
@@ -2307,28 +2315,37 @@ class PdfTextParser(ParserAdapter):
                 page_width=page_width,
                 page_height=page_height,
             )
-        if reason is None and not regions:
+            if self._ocr_image_regions_enabled:
+                image_regions = _image_ocr_regions(
+                    page=page,
+                    native_lines=native_lines,
+                    table_bboxes=table_bboxes,
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+        if reason is None and not regions and not image_regions:
             return None, None, None, timings
         if reason is None:
-            # The page as a whole reads fine; only some lines do not.  Saying so
-            # keeps the reason auditable instead of looking like a page-level
-            # fallback that was not needed.
-            reason = "mixed_page_regions"
+            # The page as a whole reads fine; only some lines do not -- or only a
+            # picture needs reading.  Saying which keeps the reason auditable
+            # instead of looking like a page-level fallback that was not needed.
+            reason = "mixed_page_regions" if regions else "image_regions"
         attempt_started = time.monotonic()
         engine, engine_error_reason, timings.engine_init_elapsed_s = self._ensure_pdf_ocr_engine()
         if engine is None:
             timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
             return None, reason, engine_error_reason or "provider_unavailable", timings
-        if regions:
+        if regions or image_regions:
             merged_lines, region_failure = _enhance_page_regions(
                 page=page,
                 engine=engine,
-                regions=regions,
+                regions=[*regions, *image_regions],
                 native_lines=native_lines,
                 resolution=self._ocr_render_resolution,
                 confidence_threshold=self._ocr_confidence_threshold,
                 merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
                 timings=timings,
+                image_regions=image_regions,
             )
             timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
             if merged_lines is None:
@@ -2828,6 +2845,18 @@ class PdfTextParser(ParserAdapter):
                         ocr_bbox = _bbox_union_from_line_records(ocr_lines)
                         if ocr_bbox is not None:
                             metadata["bbox"] = ocr_bbox
+                        # Text transcribed from a picture is countable on the block
+                        # that carries it: a consumer (or a gate) can find the
+                        # sentences that came from an image instead of the page's
+                        # own text layer without walking every line.
+                        picture_lines = [
+                            line
+                            for line in ocr_lines
+                            if str(line.get("source_kind") or "") == "pdf_ocr_image_region"
+                        ]
+                        if picture_lines:
+                            metadata["ocr_image_region_lines"] = len(picture_lines)
+                            metadata["source_kind"] = "pdf_ocr_image_region"
                 if fast_text_profile:
                     metadata["profile_fast_text_path"] = True
                 if page_number in stripped_page_numbers:
@@ -6759,6 +6788,10 @@ def _extract_ocr_region_lines(
 #: page is never re-read piece by piece without limit.
 _OCR_MAX_REGIONS_PER_PAGE = 4
 _OCR_MAX_REGION_AREA_RATIO = 0.6
+#: A picture smaller than this share of the page is a logo or a bullet glyph, and
+#: one larger than the maximum is the page raster itself: neither is a text insert.
+_OCR_MIN_IMAGE_REGION_AREA_RATIO = 0.03
+_OCR_MAX_IMAGE_REGION_AREA_RATIO = 0.5
 
 
 def _boxes_overlap(left: Sequence[float], right: Sequence[float]) -> bool:
@@ -6884,6 +6917,79 @@ def _ocr_enhancement_regions(
     return kept
 
 
+def _image_ocr_regions(
+    *,
+    page: Any,
+    native_lines: Sequence[_PageTextLine],
+    table_bboxes: Sequence[tuple[float, float, float, float]],
+    page_width: float,
+    page_height: float,
+) -> list[tuple[float, float, float, float]]:
+    """Picture regions that hold no text and are worth reading.
+
+    A digital page can carry a scanned insert: a photographed nameplate, a
+    stamped drawing.  No text layer exists for it, so the region enhancement that
+    repairs unreadable *text* never sees it.  Only a picture with no page text on
+    top of it qualifies -- an image behind text is a background or a watermark,
+    and reading it would only duplicate what the page already says.  A region
+    inside a table belongs to the table block, and a region covering most of the
+    page is the page.
+    """
+
+    images = list(getattr(page, "images", ()) or ())
+    if not images:
+        return []
+    page_area = max(1.0, float(page_width) * float(page_height))
+    candidates: list[tuple[float, float, float, float]] = []
+    for image in images:
+        bbox = _image_bbox(image)
+        if bbox is None:
+            continue
+        x0, top, x1, bottom = bbox
+        width = max(0.0, x1 - x0)
+        height = max(0.0, bottom - top)
+        area = width * height
+        if area <= 0.0 or area / page_area < _OCR_MIN_IMAGE_REGION_AREA_RATIO:
+            continue
+        if area / page_area > _OCR_MAX_IMAGE_REGION_AREA_RATIO:
+            continue
+        if any(_boxes_overlap(bbox, table_bbox) for table_bbox in table_bboxes):
+            continue
+        if any(
+            _boxes_overlap((line.x0, line.top, line.x1, line.bottom or line.top), bbox)
+            for line in native_lines
+        ):
+            continue
+        candidates.append(bbox)
+    candidates.sort(key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True)
+    kept: list[tuple[float, float, float, float]] = []
+    covered = 0.0
+    for bbox in candidates[: _OCR_MAX_REGIONS_PER_PAGE]:
+        covered += max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+        kept.append(bbox)
+    return kept
+
+
+def _image_bbox(image: Any) -> tuple[float, float, float, float] | None:
+    """A picture's page box, from the mapping or object a reader exposes."""
+
+    def value(name: str) -> Any:
+        if isinstance(image, Mapping):
+            return image.get(name)
+        return getattr(image, name, None)
+
+    try:
+        x0 = float(value("x0"))
+        x1 = float(value("x1"))
+        top = float(value("top"))
+        bottom = float(value("bottom"))
+    except (TypeError, ValueError):
+        return None
+    if x1 <= x0 or bottom <= top:
+        return None
+    return (x0, top, x1, bottom)
+
+
 def _native_page_lines(
     page: Any,
     *,
@@ -6986,8 +7092,14 @@ def _enhance_page_regions(
     confidence_threshold: float,
     merge_line_gap_ratio: float,
     timings: _OcrStageTimings,
+    image_regions: Sequence[tuple[float, float, float, float]] = (),
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Read each enhancement region and merge it with the page's own lines."""
+    """Read each enhancement region and merge it with the page's own lines.
+
+    Text recovered from a picture region is labelled as such: it is a
+    transcription of an image, not the page's own text, and a consumer has to be
+    able to tell the two apart (and point back at the region it came from).
+    """
 
     merged_records: list[dict[str, Any]] = []
     replaced: list[_PageTextLine] = []
@@ -7009,7 +7121,13 @@ def _enhance_page_regions(
         if not records:
             continue
         enhanced += 1
-        replaced.extend(_lines_intersecting(native_lines, region))
+        from_picture = any(_boxes_overlap(region, image_region) for image_region in image_regions)
+        if from_picture:
+            records = [
+                dict(record, source_kind="pdf_ocr_image_region") for record in records
+            ]
+        else:
+            replaced.extend(_lines_intersecting(native_lines, region))
         merged_records.extend(records)
     if not merged_records:
         return None, failure

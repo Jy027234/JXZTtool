@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 
 from parsecore.parsers import (
     PdfTextParser,
+    _image_ocr_regions,
     _merge_native_and_ocr_lines,
     _ocr_enhancement_regions,
     _OcrStageTimings,
@@ -156,6 +157,134 @@ class EnhancementRegionTests(unittest.TestCase):
             table_bboxes=(),
             min_cid_tokens=5,
             min_cid_char_ratio=0.12,
+            page_width=300.0,
+            page_height=400.0,
+        )
+        self.assertEqual(regions, [])
+
+
+class PictureRegionTests(unittest.TestCase):
+    """待办 4: a scanned insert on a digital page is read only when asked for."""
+
+    def _page_with_picture(self, *, picture_top: float = 180.0) -> _FakePage:
+        page = _FakePage(
+            [_line(USABLE_ONE, 100.0), _line(USABLE_TWO, 320.0)],
+            width=300.0,
+            height=400.0,
+        )
+        # A 200x100pt picture covering a sixth of the page, with no text on it.
+        page.images = [
+            {"x0": 60.0, "top": picture_top, "x1": 260.0, "bottom": picture_top + 100.0}
+        ]
+        return page
+
+    def test_a_picture_region_is_read_when_the_caller_asks_for_it(self) -> None:
+        page = self._page_with_picture()
+        engine = _RecordingEngine(
+            [(_box(2.0, 2.0, 120.0, 14.0), "320-366-701-0", 0.93)]
+        )
+        parser = _parser(ocr_image_regions=True)
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, reason, error, timings = parser._maybe_recover_page_with_ocr(
+                page, [], 1, "\n".join([USABLE_ONE, USABLE_TWO])
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(reason, "image_regions")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(len(page.cropped), 1)
+        # The picture's text is added, and the page's own text is untouched.
+        self.assertIn("320-366-701-0", text or "")
+        self.assertIn(USABLE_ONE, text or "")
+        self.assertIn(USABLE_TWO, text or "")
+        # It is labelled as a transcription of an image, not as page text.
+        self.assertIn(
+            "pdf_ocr_image_region",
+            {line["source_kind"] for line in timings.ocr_lines},
+        )
+        recovered = next(
+            line
+            for line in timings.ocr_lines
+            if line["source_kind"] == "pdf_ocr_image_region"
+        )
+        x0, top, x1, bottom = recovered["bbox"]
+        crop = page.cropped[0]
+        self.assertGreaterEqual(x0, crop[0] - 1.0)
+        self.assertGreaterEqual(top, crop[1] - 1.0)
+        self.assertLessEqual(x1, crop[2] + 1.0)
+        self.assertLessEqual(bottom, crop[3] + 1.0)
+
+    def test_a_picture_region_is_left_alone_by_default(self) -> None:
+        # Reading a picture costs a render plus an engine call and produces
+        # transcribed, not extracted, text: it is an explicit request.
+        page = self._page_with_picture()
+        engine = _RecordingEngine(
+            [(_box(2.0, 2.0, 120.0, 14.0), "320-366-701-0", 0.93)]
+        )
+        parser = _parser()
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                page, [], 1, "\n".join([USABLE_ONE, USABLE_TWO])
+            )
+
+        self.assertIsNone(text)
+        self.assertIsNone(reason)
+        self.assertIsNone(error)
+        self.assertEqual(engine.calls, 0)
+        self.assertEqual(page.cropped, [])
+
+    def test_a_picture_under_the_text_is_not_read(self) -> None:
+        # An image behind text is a background or a watermark: reading it would
+        # only repeat what the page already says.
+        page = _FakePage([_line(USABLE_ONE, 100.0), _line(USABLE_TWO, 320.0)], width=300.0, height=400.0)
+        page.images = [{"x0": 40.0, "top": 90.0, "x1": 280.0, "bottom": 140.0}]
+        engine = _RecordingEngine([])
+        parser = _parser(ocr_image_regions=True)
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, reason, _error, _timings = parser._maybe_recover_page_with_ocr(
+                page, [], 1, "\n".join([USABLE_ONE, USABLE_TWO])
+            )
+
+        self.assertIsNone(text)
+        self.assertIsNone(reason)
+        self.assertEqual(engine.calls, 0)
+
+    def test_a_tiny_picture_and_a_full_page_picture_are_not_regions(self) -> None:
+        tiny = _FakePage([_line(USABLE_ONE, 100.0)], width=300.0, height=400.0)
+        tiny.images = [{"x0": 10.0, "top": 10.0, "x1": 30.0, "bottom": 20.0}]
+        full = _FakePage([_line(USABLE_ONE, 100.0)], width=300.0, height=400.0)
+        full.images = [{"x0": 0.0, "top": 0.0, "x1": 300.0, "bottom": 400.0}]
+
+        self.assertEqual(
+            _image_ocr_regions(
+                page=tiny,
+                native_lines=_page_text_lines(tiny),
+                table_bboxes=(),
+                page_width=300.0,
+                page_height=400.0,
+            ),
+            [],
+        )
+        self.assertEqual(
+            _image_ocr_regions(
+                page=full,
+                native_lines=_page_text_lines(full),
+                table_bboxes=(),
+                page_width=300.0,
+                page_height=400.0,
+            ),
+            [],
+        )
+
+    def test_a_picture_inside_a_table_belongs_to_the_table(self) -> None:
+        page = self._page_with_picture()
+        regions = _image_ocr_regions(
+            page=page,
+            native_lines=_page_text_lines(page),
+            table_bboxes=[(50.0, 170.0, 270.0, 290.0)],
             page_width=300.0,
             page_height=400.0,
         )

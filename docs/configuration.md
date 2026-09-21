@@ -785,6 +785,7 @@ ocr_merge_line_gap_ratio = 1.6
 | `ocr_render_resolution` | OCR 渲染分辨率，越高越慢。 |
 | `ocr_confidence_threshold` | OCR 结果置信度阈值。 |
 | `ocr_merge_line_gap_ratio` | OCR 行合并间距比例。 |
+| `ocr_image_regions` | 按需 OCR **无文字的图片区域**（扫描插图/铭牌/图号）；默认 `false`。开启后每条恢复行标 `source_kind = "pdf_ocr_image_region"` 并保留页坐标，块上给出 `ocr_image_region_lines` 计数；只增不改原生文字。实测约 2.6–3.1 s/页（每页最多 4 个区域），且插图小字会有误读，故默认关闭。 |
 | `parse_cache` | 是否在同一 worker 内缓存同源重解析结果；默认库行为关闭，生产配置可按固定样本验证后开启。 |
 | `parse_cache_max_entries` | 同一 `pdf-text` parser 的缓存 LRU 上限，控制重解析缓存的内存边界。 |
 
