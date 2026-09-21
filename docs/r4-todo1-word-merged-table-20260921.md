@@ -2,7 +2,7 @@
 
 日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一、条目 `kind` 语义迁移）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义、区域素材落盘与入产物族均已实施；剩余见第 11 节
+状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义、区域素材落盘与入产物族均已实施；剩余见第 12 节
 
 ## 1. 这一项解决什么
 
@@ -381,7 +381,43 @@ region_assets = true  → job done，run 已封存
 Ran 1042 tests / OK (skipped=6)
 ```
 
-## 11. 未完成（同一待办）
+## 11. 素材保留与回收（本次补齐）
+
+素材进产物族之后紧接着的问题是：谁负责删、删的时候会不会把正在生效的证据删掉。规则只有一条——
+**正式版本与待决策的预览，证据不动**：
+
+| 对象 | 处理 |
+| --- | --- |
+| 文档当前 `active_run_id`（正式版本） | 永不回收：读者看到的正文就指向它 |
+| 文档当前 `preview_run_id`（待复核、复核后仍可发布） | 永不回收：删了就等于把"还能发布"变成"发布必失败" |
+| 其它已封存 run（`superseded` / `withdrawn` 等）超过保留期 | 回收：先删文件、再删描述行（顺序如此，失败时留下的是"描述指向已删文件"而不是"文件无主"） |
+| 文件已不存在 | 计入 `missing_files`，仍删除描述行（run 不再声称拥有它） |
+| 默认保留期 | `[runtime] region_asset_retention_seconds`（默认 2592000 = 30 天） |
+
+入口：`ParseRuntime.cleanup_region_assets(tenant_id=…, doc_id=…, retention_seconds=…, dry_run=True)`
+——默认 **dry-run**，返回 `{scanned_runs, protected_runs, eligible_runs, deleted_files, freed_bytes,
+missing_files, runs, errors}`，真实删除时才写 `region_assets_collected` 事件。
+
+顺带修掉一个既有缺陷：`publication_state()` 的"预览"查询只排除了 `published`，于是**被取代的旧版本
+也会被当成"待复核预览"**（`publication_status = superseded` 满足旧条件）。这既误导读者（明明已经定过
+的事又被当成待决策），也会让保留策略把旧版本当成受保护对象而永不回收。现在预览只取
+`publication_status = unpublished` 的已封存 run。
+
+验证：
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1046 tests / OK (skipped=6)
+
+用例（tests/test_region_assets.py 新增 4 项）：
+  正式版本保留证据（单 run，retention=0 也不回收）、待复核预览受保护、
+  被取代的旧 run 被回收且文件确实删除、dry-run 不删任何文件、
+  文件已缺失时计入 missing_files 并清掉描述行
+实测（临时工作区、真实几何 PDF）：dry-run 报告 {eligible_runs: 1, deleted_files: 1} 而文件仍在；
+  execute 后旧 run 文件消失、正式版本文件仍在、protected_runs 只含正式版本。
+```
+
+## 12. 未完成（同一待办）
 
 1. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
    （`_markdown_table_cells()`，TextParser / PyMuPDF4LLM / Docling 的降级路径）本身没有合并
@@ -389,8 +425,8 @@ Ran 1042 tests / OK (skipped=6)
 2. **`export` 产物族**：`assets` 已有 staging 面，`export` 仍然没有，`records` 这类要求 export 的
    profile 依旧封存失败（与 assets 不同，export 是打包结果而非解析产物，是否值得进 run store 需要
    单独判断）。
-3. **素材的清理与保留**：`run_assets` 只记录描述，指向对象存储里的文件；这些文件的保留/回收策略
-   （按 `part_artifact_retention_seconds` 之类过期清理）尚未实现，删除 run 也不会删除文件。
+3. **素材清理的操作入口**：`cleanup_region_assets()` 只有运行时 API，还没有 `parsecore.cli` 子命令与
+   定时执行入口（对比 `cleanup-provider-comparison-artifacts` 已有 CLI）；宿主目前需要自己调度。
 4. **Word/Excel 的区域素材**：`source_region` 目前只有 PDF 侧产生，本功能对 Word/Excel 不适用。
 5. **Docling 的图片/公式落盘**：Docling 直映路径的图片仍只保留图注与来源，公式只保留转写文本并
    标未核验。
@@ -398,7 +434,7 @@ Ran 1042 tests / OK (skipped=6)
    真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
    验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 12. 回滚
+## 13. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；

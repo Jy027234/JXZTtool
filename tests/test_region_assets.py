@@ -313,5 +313,174 @@ class RegionAssetPublicationTests(unittest.TestCase):
         self.assertFalse(state["formal_version_available"])
 
 
+class RegionAssetRetentionTests(unittest.TestCase):
+    def _publish_with_assets(self, runtime, *, doc_id: str, block_id: str, source: Path, text: str) -> dict:
+        blocks, assets, _failure = write_region_assets(
+            source_path=str(source),
+            blocks=(_region_block(block_id, kind="pdf_table", bbox=[50.0, 100.0, 300.0, 200.0]),),
+            root=local_object_store_root(runtime.settings.object_store),
+            doc_id=doc_id,
+        )
+        return runtime.publish_run(
+            doc_id=doc_id,
+            artifacts=RunArtifacts(
+                blocks=blocks,
+                views={"pages": [{"page_number": 1, "text": text}]},
+                assets=tuple(asset.as_payload() for asset in assets),
+            ),
+            job_id=f"job-{doc_id}",
+            source_version=f"sha256:{text}",
+            validation_status="passed",
+            expected_generation=None,
+        )
+
+    def test_the_formal_version_keeps_its_evidence_and_the_old_run_is_collected(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            first = self._publish_with_assets(
+                runtime, doc_id="doc-retention", block_id="doc-retention-t-1", source=document_path, text="v1"
+            )
+            second = self._publish_with_assets(
+                runtime, doc_id="doc-retention", block_id="doc-retention-t-2", source=document_path, text="v2"
+            )
+            first_run = runtime.run_store.get_run(parse_run_id=first["parse_run_id"])
+            second_run = runtime.run_store.get_run(parse_run_id=second["parse_run_id"])
+            by_run = {
+                run["parse_run_id"]: [Path(asset["path"]) for asset in run["assets"]]
+                for run in runtime.run_store.list_run_assets(doc_id="doc-retention")
+            }
+            first_files = by_run[first["parse_run_id"]]
+            second_files = by_run[second["parse_run_id"]]
+
+            preview = runtime.cleanup_region_assets(doc_id="doc-retention", retention_seconds=0)
+            after_dry_run_exists = [path.exists() for path in first_files]
+            after_dry_run_second = [path.exists() for path in second_files]
+            executed = runtime.cleanup_region_assets(
+                doc_id="doc-retention", retention_seconds=0, dry_run=False
+            )
+            remaining_runs = runtime.run_store.list_run_assets(doc_id="doc-retention")
+            first_exists = [path.exists() for path in first_files]
+            second_exists = [path.exists() for path in second_files]
+
+        # The dry run reports what would go and removes nothing.
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["eligible_runs"], 1)
+        self.assertEqual(preview["deleted_files"], 1)
+        self.assertTrue(all(after_dry_run_exists))
+        # The superseded run is collected, the active formal version is not.
+        self.assertEqual(executed["eligible_runs"], 1)
+        self.assertEqual(executed["deleted_files"], 1)
+        self.assertEqual([run["parse_run_id"] for run in remaining_runs], [second["parse_run_id"]])
+        self.assertEqual(first_run.publication_status, "superseded")
+        self.assertEqual(second_run.publication_status, "published")
+        self.assertFalse(any(first_files[i].exists() for i in range(len(first_files))))
+        self.assertEqual([run["parse_run_id"] for run in remaining_runs], [second["parse_run_id"]])
+        self.assertIn(second["parse_run_id"], executed["protected_runs"])
+
+    def test_the_active_formal_version_is_never_collected(self) -> None:
+        # The one case that must hold unconditionally: a document's formal version
+        # keeps its evidence, whatever the retention window says.
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            published = self._publish_with_assets(
+                runtime, doc_id="doc-single", block_id="doc-single-t-1", source=document_path, text="v1"
+            )
+            files = [
+                Path(asset["path"])
+                for run in runtime.run_store.list_run_assets(doc_id="doc-single")
+                for asset in run["assets"]
+            ]
+            result = runtime.cleanup_region_assets(
+                doc_id="doc-single", retention_seconds=0, dry_run=False
+            )
+            still_there = [path.exists() for path in files]
+            remaining = runtime.run_store.list_run_assets(doc_id="doc-single")
+
+        self.assertEqual(result["eligible_runs"], 0)
+        self.assertEqual(result["deleted_files"], 0)
+        self.assertTrue(all(still_there))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["parse_run_id"], published["parse_run_id"])
+        self.assertIn(published["parse_run_id"], result["protected_runs"])
+
+    def test_a_protected_preview_is_never_collected(self) -> None:
+        config = PDF_CONFIG.replace(
+            "region_assets = true",
+            'region_assets = true\nrun_artifact_profile = "assets-only"',
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            published = self._publish_with_assets(
+                runtime,
+                doc_id="doc-preview",
+                block_id="doc-preview-t-1",
+                source=document_path,
+                text="v1",
+            )
+            # A newer run that only awaits a decision: its evidence may still be
+            # published by a reviewer, so it is protected too.
+            blocks, assets, _failure = write_region_assets(
+                source_path=str(document_path),
+                blocks=(_region_block("doc-preview-t-2", kind="pdf_table", bbox=[50.0, 100.0, 300.0, 200.0]),),
+                root=local_object_store_root(runtime.settings.object_store),
+                doc_id="doc-preview",
+            )
+            runtime.publish_run(
+                doc_id="doc-preview",
+                artifacts=RunArtifacts(
+                    blocks=blocks,
+                    views={"pages": [{"page_number": 1, "text": "v2"}]},
+                    assets=tuple(asset.as_payload() for asset in assets),
+                ),
+                job_id="job-preview-2",
+                source_version="sha256:v2",
+                quality_signals=(
+                    {"code": "test_review_required", "severity": "warning", "message": "review"},
+                ),
+            )
+            state = runtime.publication_state(doc_id="doc-preview")
+            result = runtime.cleanup_region_assets(
+                doc_id="doc-preview", retention_seconds=0, dry_run=False
+            )
+            remaining = runtime.run_store.list_run_assets(doc_id="doc-preview")
+
+        self.assertEqual(state["consumer_signal"], "published")
+        self.assertIsNotNone(state["preview_run_id"])
+        self.assertEqual(result["eligible_runs"], 0)
+        self.assertEqual(result["deleted_files"], 0)
+        self.assertEqual(len(remaining), 2)
+        self.assertIn(published["parse_run_id"], result["protected_runs"])
+
+    def test_a_missing_file_is_counted_and_does_not_fail_the_cleanup(self) -> None:
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            first = self._publish_with_assets(
+                runtime, doc_id="doc-missing", block_id="doc-missing-t-1", source=document_path, text="v1"
+            )
+            self._publish_with_assets(
+                runtime, doc_id="doc-missing", block_id="doc-missing-t-2", source=document_path, text="v2"
+            )
+            for asset in runtime.run_store.list_run_assets(doc_id="doc-missing"):
+                if asset["parse_run_id"] == first["parse_run_id"]:
+                    Path(asset["assets"][0]["path"]).unlink()
+
+            result = runtime.cleanup_region_assets(
+                doc_id="doc-missing", retention_seconds=0, dry_run=False
+            )
+            remaining = runtime.run_store.list_run_assets(doc_id="doc-missing")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["missing_files"], 1)
+        self.assertEqual(result["deleted_files"], 0)
+        # The descriptor is dropped even though the file was already gone, so the
+        # run stops claiming material it does not have.
+        self.assertEqual(len(remaining), 1)
+        self.assertNotEqual(remaining[0]["parse_run_id"], first["parse_run_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

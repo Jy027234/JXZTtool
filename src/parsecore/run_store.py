@@ -1141,6 +1141,74 @@ class SQLiteRunStore:
             or str(reviewed.get("reviewer") or "").strip()
         )
 
+    def list_run_assets(
+        self, *, tenant_id: str | None = None, doc_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        """Region assets grouped by the run that owns them.
+
+        One row per run with assets: identity, when it was created and sealed, how
+        it was published, and the files it claims.  A retention job decides from
+        this without touching the filesystem per run.
+        """
+
+        normalized_tenant = _normalize_tenant(tenant_id) if tenant_id is not None else None
+        query = (
+            "SELECT a.parse_run_id, a.tenant_id, a.doc_id, a.path, a.sha256, a.bytes,"
+            " r.created_at, r.sealed_at, r.publication_status, r.validation_status"
+            " FROM run_assets a JOIN parse_runs r ON r.parse_run_id = a.parse_run_id"
+        )
+        conditions: list[str] = []
+        params: list[Any] = []
+        if normalized_tenant is not None:
+            conditions.append("a.tenant_id = ?")
+            params.append(normalized_tenant)
+        if doc_id:
+            conditions.append("a.doc_id = ?")
+            params.append(str(doc_id))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY a.parse_run_id, a.position"
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = grouped.get(str(row["parse_run_id"]))
+            if entry is None:
+                entry = {
+                    "parse_run_id": str(row["parse_run_id"]),
+                    "tenant_id": str(row["tenant_id"]),
+                    "doc_id": str(row["doc_id"]),
+                    "created_at": str(row["created_at"] or ""),
+                    "sealed_at": str(row["sealed_at"] or ""),
+                    "publication_status": str(row["publication_status"] or ""),
+                    "validation_status": str(row["validation_status"] or ""),
+                    "count": 0,
+                    "bytes": 0,
+                    "assets": [],
+                }
+                grouped[str(row["parse_run_id"])] = entry
+            entry["count"] = int(entry["count"]) + 1
+            entry["bytes"] = int(entry["bytes"]) + int(row["bytes"] or 0)
+            entry["assets"].append(
+                {
+                    "path": str(row["path"]),
+                    "sha256": str(row["sha256"]),
+                    "bytes": int(row["bytes"] or 0),
+                }
+            )
+        return tuple(grouped.values())
+
+    def delete_run_assets(self, *, parse_run_id: str) -> int:
+        """Drop a run's asset descriptors after their files have been removed."""
+
+        with self._write_transaction() as conn:
+            self._require_run(conn, parse_run_id)
+            cursor = conn.execute(
+                "DELETE FROM run_assets WHERE parse_run_id = ?", (str(parse_run_id),)
+            )
+            deleted = int(cursor.rowcount or 0)
+        return deleted
+
     def get_active_run(
         self, *, doc_id: str, tenant_id: str | None = None
     ) -> RunRecord | None:
@@ -1262,8 +1330,12 @@ class SQLiteRunStore:
                 ).fetchone()
                 active = self._row_to_run(active_row) if active_row else None
             preview_row = conn.execute(
+                # A preview is a run that was never published and is waiting for a
+                # decision.  A superseded or withdrawn run is an older version, not
+                # a pending one: reporting it as a preview would offer a reader a
+                # decision that has already been made.
                 "SELECT * FROM parse_runs WHERE tenant_id = ? AND doc_id = ?"
-                " AND execution_status = ? AND publication_status != ?"
+                " AND execution_status = ? AND publication_status = ?"
                 " AND validation_status NOT IN (?, ?, ?)"
                 " AND sealed_at IS NOT NULL"
                 " ORDER BY created_at DESC LIMIT 1",
@@ -1271,7 +1343,7 @@ class SQLiteRunStore:
                     tenant,
                     str(doc_id),
                     ExecutionStatus.SUCCEEDED.value,
-                    PublicationStatus.PUBLISHED.value,
+                    PublicationStatus.UNPUBLISHED.value,
                     ValidationStatus.REJECTED.value,
                     ValidationStatus.ERROR.value,
                     ValidationStatus.NOT_RUN.value,

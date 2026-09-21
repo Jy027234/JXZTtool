@@ -1877,6 +1877,110 @@ class ParseRuntime:
             )
         return updated
 
+    def cleanup_region_assets(
+        self,
+        *,
+        tenant_id: str | None = None,
+        doc_id: str | None = None,
+        retention_seconds: int | None = None,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Collect region asset files whose run is neither formal nor pending.
+
+        The material a run claims as its evidence must not disappear while it is
+        still the version a reader is served, or the run an operator may still
+        publish: those two are protected.  Everything else past the retention
+        window is removed, files first and descriptors second, so a failure leaves
+        a run that can still be verified rather than a descriptor pointing at
+        nothing.
+        """
+
+        if self.run_store is None:
+            return {
+                "status": "unavailable",
+                "reason": "run_store_backend_unsupported",
+                "dry_run": bool(dry_run),
+            }
+        window = (
+            int(retention_seconds)
+            if retention_seconds is not None
+            else int(self.settings.runtime.region_asset_retention_seconds)
+        )
+        cutoff = time.time() - max(0, window)
+        runs = self.run_store.list_run_assets(tenant_id=tenant_id, doc_id=doc_id)
+        docs = {str(run["doc_id"]) for run in runs}
+        protected_runs: set[str] = set()
+        for document in docs:
+            state = self.publication_state(doc_id=document, tenant_id=tenant_id)
+            for key in ("active_run_id", "preview_run_id"):
+                value = str(state.get(key) or "")
+                if value:
+                    protected_runs.add(value)
+        collected: list[dict[str, Any]] = []
+        deleted_files = 0
+        freed_bytes = 0
+        missing_files = 0
+        errors: list[str] = []
+        for run in runs:
+            parse_run_id = str(run["parse_run_id"])
+            if parse_run_id in protected_runs:
+                continue
+            if _rfc3339_timestamp(run.get("created_at")) > cutoff:
+                continue
+            files = [asset for asset in run.get("assets") or ()]
+            collected.append(
+                {
+                    "parse_run_id": parse_run_id,
+                    "doc_id": str(run.get("doc_id") or ""),
+                    "publication_status": str(run.get("publication_status") or ""),
+                    "count": len(files),
+                    "bytes": int(run.get("bytes") or 0),
+                }
+            )
+            for asset in files:
+                path = Path(str(asset.get("path") or ""))
+                if not path.exists():
+                    missing_files += 1
+                    continue
+                if dry_run:
+                    deleted_files += 1
+                    freed_bytes += int(asset.get("bytes") or 0)
+                    continue
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except OSError as exc:
+                    errors.append(f"{parse_run_id}:{path.name}:{type(exc).__name__}")
+                    continue
+                deleted_files += 1
+                freed_bytes += size
+            if not dry_run:
+                try:
+                    self.run_store.delete_run_assets(parse_run_id=parse_run_id)
+                except Exception as exc:  # pragma: no cover - store failure path
+                    errors.append(f"{parse_run_id}:descriptors:{type(exc).__name__}")
+        if not dry_run and collected:
+            self.event_logger.log(
+                "region_assets_collected",
+                runs=len(collected),
+                files=deleted_files,
+                bytes=freed_bytes,
+                missing_files=missing_files,
+            )
+        return {
+            "status": "ok" if not errors else "degraded",
+            "dry_run": bool(dry_run),
+            "retention_seconds": max(0, window),
+            "scanned_runs": len(runs),
+            "protected_runs": sorted(protected_runs),
+            "eligible_runs": len(collected),
+            "deleted_files": deleted_files,
+            "freed_bytes": freed_bytes,
+            "missing_files": missing_files,
+            "runs": collected,
+            "errors": errors,
+        }
+
     def _persist_document_views(
         self,
         *,
@@ -6364,6 +6468,18 @@ def _normalize_chunk_index_layer(value: str | None) -> str:
     if normalized in {"primary", "high_precision"}:
         return normalized
     return "primary"
+
+
+def _rfc3339_timestamp(value: Any) -> float:
+    """A stored timestamp as a number, or 0.0 when it cannot be read."""
+
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _block_region_assets(blocks: Sequence[Any]) -> tuple[dict[str, Any], ...]:
