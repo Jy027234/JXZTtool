@@ -12,6 +12,11 @@ from math import isfinite, sqrt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .assets import (
+    local_object_store_root,
+    region_assets_manifest,
+    write_region_assets,
+)
 from .capabilities import build_capability_report
 from .config import (
     ParseCoreSettings,
@@ -1407,6 +1412,7 @@ class ParseRuntime:
                         placeholder_parser=placeholder_parser,
                     )
                 self._record_ocr_observability(request=request, blocks=blocks)
+            blocks = self._attach_region_assets(job=job, request=request, blocks=blocks)
             if not self._is_rerun_chunks_only(request) and execution_run is None:
                 with stage_timer.stage("persist_blocks"):
                     self._ensure_active_claim(job_id=job.job_id, claim_token=claim_token)
@@ -1801,6 +1807,64 @@ class ParseRuntime:
             return "optional"
         requirement = profile.requirement_for(artifact)
         return requirement.value if hasattr(requirement, "value") else str(requirement)
+
+    def _attach_region_assets(
+        self, *, job: Any, request: ParseRequest, blocks: Sequence[Any]
+    ) -> tuple[Any, ...]:
+        """Keep the picture behind each table/figure region, when asked for.
+
+        Off unless ``runtime.region_assets`` is set, and only for a local object
+        store -- the same boundary the upload and export paths use.  A failure
+        here degrades the delivery (the locator is still published) instead of
+        failing the parse: the picture is material, not the result.
+        """
+
+        if not bool(self.settings.runtime.region_assets):
+            return tuple(blocks)
+        root = local_object_store_root(self.settings.object_store)
+        if root is None:
+            self.event_logger.log(
+                "region_assets_skipped",
+                job_id=str(getattr(job, "job_id", "") or ""),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                reason="region_assets_require_local_object_store",
+                object_store=str(self.settings.object_store or ""),
+            )
+            return tuple(blocks)
+        try:
+            updated, assets, failure = write_region_assets(
+                source_path=str(getattr(job, "file_path", "") or ""),
+                blocks=blocks,
+                root=root,
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                resolution=int(self.settings.runtime.region_asset_resolution or 144),
+            )
+        except Exception as exc:  # pragma: no cover - the writer reports its own failures
+            self.event_logger.log(
+                "region_assets_failed",
+                job_id=str(getattr(job, "job_id", "") or ""),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                error=str(exc),
+            )
+            return tuple(blocks)
+        if assets:
+            manifest = region_assets_manifest(assets)
+            self.event_logger.log(
+                "region_assets_written",
+                job_id=str(getattr(job, "job_id", "") or ""),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                count=int(manifest["count"]),
+                total_bytes=int(manifest["total_bytes"]),
+                resolution=int(self.settings.runtime.region_asset_resolution or 144),
+            )
+        elif failure is not None:
+            self.event_logger.log(
+                "region_assets_skipped",
+                job_id=str(getattr(job, "job_id", "") or ""),
+                doc_id=str(getattr(job, "doc_id", "") or ""),
+                reason=str(failure),
+            )
+        return updated
 
     def _persist_document_views(
         self,

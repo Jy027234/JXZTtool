@@ -2,7 +2,7 @@
 
 日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一、条目 `kind` 语义迁移）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义均已实施；剩余见第 9 节
+状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义、区域素材落盘均已实施；剩余见第 10 节
 
 ## 1. 这一项解决什么
 
@@ -304,21 +304,63 @@ SealError: chunks reference blocks that are not part of this run:
 这是"重跑合并"的读一致性问题（待办 5 的"失败重跑不能覆盖旧正式结果 / 重复提交不产生错版"），
 本轮只记录现象与机制，修复放在待办 5。
 
-## 9. 未完成（同一待办）
+## 9. 区域素材落盘（本次补齐：从"可重建定位"到"已保存素材"）
+
+待办 1 的口径是"图片、公式、脚注遵循**先保留，后理解**：在本轮处理到的内容中保存原始素材或可重建
+定位"。此前只做到了后半句：表块与图片块带 `source_region`（页号、点坐标、原点、旋转、页尺寸、
+`crop_fraction`），消费方可以自己裁剪，但**素材本身没有落盘**。
+
+现在补上前半句：`src/parsecore/assets.py` 按区域渲染 PNG 并登记摘要。
+
+| 项 | 行为 |
+| --- | --- |
+| 开关 | `[runtime] region_assets = true`（默认 **false**）；`region_asset_resolution`（默认 144 dpi）。未开启时不渲染、不写文件、块元数据不变 |
+| 存储边界 | 只写 `local://` 对象存储（与上传、导出一致的边界），路径 `<store>/regions/<doc_id>/<block_id>.png`；非本地存储时记录 `region_assets_skipped` 并原样返回块 |
+| 渲染 | 优先 PyMuPDF（`get_pixmap(clip=...)`），无 fitz 时回退 pdfplumber `crop().to_image()` |
+| 区域框 | 超出页面的框**按页裁剪**（不是补白）：素材是页面上真实存在的那一部分，描述里记的就是裁剪后的框 |
+| 登记 | 块元数据 `asset` = `{schema_version, kind, page_number, bbox, crop_fraction, page_width/page_height, rotation_degrees, path, sha256, bytes, width, height, resolution, verified: false}`；`region_assets_manifest()` 给出整份摘要（条数、总字节、逐条摘要） |
+| 核验状态 | `verified: false` 是刻意的：素材已保存，但"这张图是否等于来源区域"没有做视觉核对，不冒充已验证 |
+| 失败语义 | 素材是可选产物：渲染/写盘失败只记事件（`region_assets_failed` / `region_assets_skipped`），不让解析失败，定位信息照常发布 |
+
+真实样本（`36d65cd6b61346e28e97dbaf829646de.pdf`，`dual_channel`，同一台机器）：
+
+| | 关闭（默认） | 开启 |
+| --- | --- | --- |
+| 解析耗时 | 26.4 s | 42.0 s（+15.6 s，+59%） |
+| blocks / tables / figures | 1866 / 44 / 411 | 1866 / 44 / 411（不变） |
+| 素材 | 0 | **455**（`pdf_figure` 411 + `pdf_table` 44），15,025,614 字节（约 33 KB/张） |
+| 抽样核对 | — | 第 3 页 `pdf_figure` 412×96、25,438 字节，`sha256` 与磁盘文件一致 |
+
+即：一份 297 页目录图册的素材约 15 MB、约 16 秒，块与表格指标完全不变；这也是默认关闭的理由——
+不看不用的图不必先渲染。
+
+用例（[tests/test_region_assets.py](../tests/test_region_assets.py)，新增 6 项）：表/图区域各写出一张
+可校验的 PNG（摘要、字节数、尺寸、来源框与 `crop_fraction` 都在描述里，无区域的块不被改动）、
+来源缺失与倒置框不写任何文件、超出页面的框按页裁剪、`local://` 之外的存储不写、运行时开关关闭时
+一次渲染都不发生、没有区域的一次完整解析不受影响。
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1036 tests / OK (skipped=6)
+```
+
+## 10. 未完成（同一待办）
 
 1. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
    （`_markdown_table_cells()`，TextParser / PyMuPDF4LLM / Docling 的降级路径）本身没有合并
    信息，只能给出扁平行，不会有 `table_cells`——这是格式能力差异，不是待补的分支。
-2. **PDF 来源定位**：表块与图片块现在带 `source_region`（页号、点坐标、原点、页面旋转、页尺寸
-   与 `crop_fraction`），见[待办 3 报告第 7 节](r4-todo3-pdf-catalog-table-20260921.md)；
-   Word 侧仍用块/单元格标识，不填物理页码，Excel 的工作表与单元格范围沿用原有字段。
-3. **Docling 的图片/公式落盘**：图片目前只保留图注与来源，未保存原图；公式只保留转写文本并标
-   未核验，没有做区域图保留。
-4. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
+2. **素材进入产物族（assets）**：文件与摘要已就绪，但 run store 的 `assets` 产物族（staging 面 +
+   manifest 校验）仍未实现，因此 `assets-only` 这类要求 assets 的 profile 还不能封存；当前素材只
+   通过块元数据 `asset` 引用，不参与发布判定。
+3. **Word/Excel 的区域素材**：`source_region` 目前只有 PDF 侧产生；Word 用段落/表格标识、Excel 用
+   工作表与单元格范围，都没有像素框，因此本功能对它们不适用（也没有伪造框）。
+4. **Docling 的图片/公式落盘**：Docling 直映路径的图片仍只保留图注与来源，公式只保留转写文本并
+   标未核验。
+5. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
    真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
    验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 10. 回滚
+## 11. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；

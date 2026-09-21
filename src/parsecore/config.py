@@ -72,6 +72,13 @@ class RuntimeSettings:
     run_publication_enabled: bool = True
     # Artifact profile the run store seals against (see ARTIFACT_PROFILES).
     run_artifact_profile: str = "default"
+    # 待办 1/3: keep the picture behind a table or figure region.  Off by default:
+    # one render per region (455 regions on the 297-page sample) is real work, and
+    # a document that never looks at the picture does not need it.  Writes into a
+    # local:// object store only, and records a digest per asset.
+    region_assets: bool = False
+    # Render resolution for those region assets.
+    region_asset_resolution: int = 144
     # P0-07: who is trusted to decide which tenant a request belongs to.
     # ``trusted`` keeps the historical behaviour (the caller's tenant_id
     # parameter is the tenant).  ``enforced`` requires a host-authenticated
@@ -779,6 +786,10 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             allow_mock_providers=bool(runtime.get("allow_mock_providers", False)),
             run_publication_enabled=bool(runtime.get("run_publication_enabled", True)),
             run_artifact_profile=str(runtime.get("run_artifact_profile", "default")),
+            region_assets=bool(runtime.get("region_assets", False)),
+            region_asset_resolution=max(
+                36, int(runtime.get("region_asset_resolution", 144) or 144)
+            ),
             tenant_scope=str(runtime.get("tenant_scope", "trusted") or "trusted").strip().lower(),
             tenant_header=str(runtime.get("tenant_header", "x-parsecore-tenant") or "x-parsecore-tenant").strip().lower(),
         ),
