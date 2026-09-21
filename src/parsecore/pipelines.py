@@ -271,7 +271,9 @@ class DocumentSummaryStage:
             "block_count": len(document.blocks),
             "item_count": len(document.items),
             "page_count": len(page_numbers),
-            "item_kinds": role_counts,
+            # Counted by semantic role, so the key says so: ``kind`` on an item is
+            # the content form, not the role.
+            "semantic_roles": role_counts,
         }
         metadata["manual_anatomy"] = manual_anatomy
         metadata["structure_quality"] = structure_quality
@@ -312,6 +314,9 @@ class TableStructureStage:
         enriched_items = 0
         skipped_items = 0
         for item in document.items:
+            # ``kind`` is the content form, so a table is selected as a table even
+            # when its role is something narrower (an effective-page list is still
+            # a grid, and it needs the same structure enrichment).
             if str(item.kind).strip().lower() != "table":
                 updated_items.append(item)
                 continue
@@ -476,10 +481,10 @@ def _build_docx_section_chunks(
         text = str(unit.text or "").strip()
         if not text:
             continue
-        block_type = str(metadata.get("block_type") or metadata.get("kind") or "").strip().lower()
+        content_form = str(metadata.get("kind") or "").strip().lower()
         is_section_heading = bool(metadata.get("is_section_heading"))
 
-        if role == "title" and block_type == "title" and not is_section_heading:
+        if role == "title" and content_form == "title" and not is_section_heading:
             flush_group()
             flush_section()
             chunks.append(
@@ -583,8 +588,7 @@ def _build_document_knowledge_units(document: ParsedDocumentArtifact) -> tuple[D
 
 def _knowledge_unit_from_item(doc_id: str, item: DocumentArtifactItem, *, index: int) -> DocumentKnowledgeUnit:
     metadata = dict(item.metadata or {})
-    provenance = dict(item.provenance or {})
-    role = str(item.semantic_role or metadata.get("semantic_role") or item.kind or "paragraph").strip().lower()
+    role = str(item.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
     unit_type = _knowledge_unit_type(item=item, semantic_role=role)
     text = _knowledge_unit_text(item=item, unit_type=unit_type)
     should_index = bool(text) and role not in _ARTIFACT_SEMANTIC_ROLES
@@ -592,8 +596,8 @@ def _knowledge_unit_from_item(doc_id: str, item: DocumentArtifactItem, *, index:
     unit_metadata.update(
         {
             "item_id": item.item_id,
+            # The content form; the unit's own ``semantic_role`` carries the use.
             "kind": item.kind,
-            "block_type": str(provenance.get("block_type") or metadata.get("kind") or "").strip().lower(),
         }
     )
     if unit_type == "table":
@@ -694,13 +698,12 @@ def _knowledge_unit_figure_summary(item: DocumentArtifactItem) -> dict[str, Any]
 
 
 def _knowledge_unit_type(*, item: DocumentArtifactItem, semantic_role: str) -> str:
-    block_type = str((item.provenance or {}).get("block_type") or "").strip().lower()
-    kind = str(item.kind or "").strip().lower()
-    if block_type == "table" or kind == "table" or semantic_role == "table":
+    content_form = str(item.kind or "").strip().lower()
+    if content_form == "table" or semantic_role == "table":
         return "table"
-    if block_type == "image" or kind == "image" or semantic_role == "image":
+    if content_form == "image" or semantic_role == "image":
         return "figure_caption"
-    if block_type == "title" or semantic_role == "title":
+    if content_form == "title" or semantic_role == "title":
         return "title"
     if semantic_role in _STRUCTURED_UNIT_ROLES:
         return semantic_role
@@ -771,8 +774,9 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _item_block_type(item: DocumentArtifactItem) -> str:
-    metadata = item.metadata or {}
-    return str(item.provenance.get("block_type") or metadata.get("kind") or "").strip().lower()
+    """The form the item's content takes (``kind``), never its role."""
+
+    return str(item.kind or "").strip().lower()
 
 
 def _item_page_type(item: DocumentArtifactItem) -> str:
@@ -1273,22 +1277,23 @@ def _build_document_items(blocks: Sequence[Block]) -> list[DocumentArtifactItem]
         metadata = dict(block.metadata)
         semantic_role = str(metadata.get("semantic_role") or block.type.value)
         metadata["semantic_role"] = semantic_role
-        metadata.setdefault("item_kind", semantic_role)
         metadata.setdefault("structure_tags", _build_structure_tags(metadata=metadata, semantic_role=semantic_role))
         items.append(
             DocumentArtifactItem(
                 item_id=f"itm-{position}",
                 block_ids=(block.block_id,),
-                kind=semantic_role,
+                # ``kind`` is the form the content takes, ``semantic_role`` its use
+                # in the document.  They used to be the same string, which meant a
+                # warning paragraph could not be told apart from the step list
+                # inside it.  The block the item was read from is the form.
+                kind=block.type.value,
                 semantic_role=semantic_role,
                 text=block.content,
                 page_number=_safe_int(metadata.get("page")),
                 metadata=metadata,
                 provenance={
-                    "block_type": block.type.value,
                     "parser": str(metadata.get("parser") or ""),
                     "position": position,
-                    "semantic_role": semantic_role,
                 },
             )
         )

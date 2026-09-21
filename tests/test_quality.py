@@ -65,10 +65,12 @@ class StructuralAuditArtifactQualityTests(unittest.TestCase):
                 text="Useful body content",
                 page_number=1,
             ),
+            # An audit placeholder keeps the form of the content it stands in for
+            # (a paragraph); only its role says it is not real content.
             DocumentArtifactItem(
                 item_id="itm-empty-page",
                 block_ids=("blk-empty-page",),
-                kind="parse_artifact",
+                kind="paragraph",
                 semantic_role="parse_artifact",
                 text="",
                 page_number=2,
@@ -102,7 +104,7 @@ class StructuralAuditArtifactQualityTests(unittest.TestCase):
         item = DocumentArtifactItem(
             item_id="itm-ocr-empty",
             block_ids=("blk-ocr-empty",),
-            kind="parse_artifact",
+            kind="paragraph",
             semantic_role="parse_artifact",
             text="",
             page_number=1,

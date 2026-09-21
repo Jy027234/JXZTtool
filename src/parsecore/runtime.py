@@ -5332,7 +5332,6 @@ def _runtime_rag_coverage_manifest(
             role = str(
                 getattr(item, "semantic_role", "")
                 or metadata.get("semantic_role")
-                or getattr(item, "kind", "")
                 or "paragraph"
             ).strip().lower()
             text = _runtime_unit_text(item)
@@ -5417,13 +5416,12 @@ def _runtime_unit_text(item: Any) -> str:
 
 
 def _runtime_unit_type(*, item: Any, semantic_role: str) -> str:
-    block_type = str((getattr(item, "provenance", {}) or {}).get("block_type") or "").strip().lower()
-    kind = str(getattr(item, "kind", "") or "").strip().lower()
-    if block_type == "table" or kind == "table" or semantic_role == "table":
+    content_form = str(getattr(item, "kind", "") or "").strip().lower()
+    if content_form == "table" or semantic_role == "table":
         return "table"
-    if block_type == "image" or kind == "image" or semantic_role == "image":
+    if content_form == "image" or semantic_role == "image":
         return "figure_caption"
-    if block_type == "title" or semantic_role == "title":
+    if content_form == "title" or semantic_role == "title":
         return "title"
     if semantic_role in {"clause", "definition", "list_item", "procedure", "procedure_step"}:
         return semantic_role

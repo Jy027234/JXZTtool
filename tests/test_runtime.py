@@ -488,8 +488,11 @@ gate_status = "pending"
 
         self.assertGreaterEqual(description["pipeline_cache"]["hits"], 1)
         self.assertEqual(artifact.metadata["summary"]["item_count"], len(blocks))
-        self.assertEqual(artifact.items[0].kind, SemanticRole.TITLE.value)
+        # ``kind`` is the form of the content, ``semantic_role`` its use.
+        self.assertEqual(artifact.items[0].kind, BlockType.TITLE.value)
         self.assertEqual(artifact.items[0].semantic_role, SemanticRole.TITLE.value)
+        self.assertNotIn("block_type", artifact.items[0].provenance)
+        self.assertNotIn("item_kind", artifact.items[0].metadata)
         self.assertIn("role:title", artifact.items[0].metadata["structure_tags"])
         self.assertEqual(len(artifact.knowledge_units), len(artifact.items))
         self.assertEqual(artifact.knowledge_units[0].semantic_role, SemanticRole.TITLE.value)
@@ -596,12 +599,61 @@ gate_status = "pending"
         self.assertEqual(artifact.metadata["table_structure"]["enriched_items"], 1)
         self.assertEqual(artifact.items[1].metadata["table_markdown"], "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
         self.assertIn("role:table", artifact.items[1].metadata["structure_tags"])
-        self.assertEqual(artifact.items[1].provenance["semantic_role"], SemanticRole.TABLE.value)
+        self.assertEqual(artifact.items[1].kind, BlockType.TABLE.value)
         self.assertEqual(artifact.knowledge_units[1].unit_type, "table")
         self.assertEqual(artifact.knowledge_units[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
         self.assertEqual(artifact.knowledge_units[1].source_table_ids, ("itm-2",))
         self.assertEqual(chunks[1].semantic_role, SemanticRole.TABLE.value)
         self.assertEqual(chunks[1].text, "| Part | Qty |\n| --- | --- |\n| Bolt | 2 |")
+
+    def test_a_narrower_semantic_role_does_not_hide_the_content_form(self) -> None:
+        # An effective-page list is a table with a narrower role: it must still be
+        # read as a grid, not as a paragraph that happens to hold pipe characters.
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            request = ParseRequest(
+                doc_id="doc-lep-table",
+                file_path=str(workspace.root / "table.pdf"),
+                media_type="application/pdf",
+                options={
+                    "enrichment": {
+                        "table_structure": {
+                            "enabled": True,
+                            "header_rows": 1,
+                            "output_format": "markdown",
+                        }
+                    }
+                },
+            )
+            pipeline = runtime.pipeline_registry.resolve(request, purpose="parse")
+            blocks = (
+                Block(
+                    block_id="blk-lep",
+                    doc_id="doc-lep-table",
+                    type=BlockType.TABLE,
+                    content="| Page | Revision |\n| --- | --- |\n| 1 | 2 |",
+                    metadata={
+                        "page": 1,
+                        "parser": "docx-native",
+                        "semantic_role": SemanticRole.LEP_ENTRY.value,
+                        "table_type": "effective_page_list",
+                        "cells": [["Page", "Revision"], ["1", "2"]],
+                        "rows": 2,
+                        "cols": 2,
+                    },
+                ),
+            )
+
+            artifact = pipeline.build_document(request=request, blocks=blocks)
+
+        self.assertEqual(artifact.items[0].kind, BlockType.TABLE.value)
+        self.assertEqual(artifact.items[0].semantic_role, SemanticRole.LEP_ENTRY.value)
+        self.assertEqual(artifact.metadata["table_structure"]["enriched_items"], 1)
+        self.assertEqual(artifact.knowledge_units[0].unit_type, "table")
+        self.assertEqual(
+            artifact.knowledge_units[0].metadata["table_type"], "effective_page_list"
+        )
+        self.assertEqual(artifact.knowledge_units[0].metadata["table_summary"]["row_count"], 2)
 
     def test_knowledge_units_render_table_cells_without_table_stage(self) -> None:
         with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:

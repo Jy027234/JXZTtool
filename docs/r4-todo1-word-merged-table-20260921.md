@@ -1,8 +1,8 @@
 # 待办 1 交付报告：Word 合并表格结构保真 + Docling 直映结构
 
-日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一）
+日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一、条目 `kind` 语义迁移）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：Word 链路、Docling 直映、Excel 合并表达均已实施；剩余见第 8 节
+状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义均已实施；剩余见第 9 节
 
 ## 1. 这一项解决什么
 
@@ -31,7 +31,8 @@ Word 表格的合并关系在原生提取阶段就被丢了。`_docx_table_cells
 | [src/parsecore/parsers.py](../src/parsecore/parsers.py) | `DocxParser` 读取 `w:gridSpan` / `w:vMerge` / 行内 `r:` 链接（`word/_rels/document.xml.rels`），输出 `table_cells`（起始行列、`row_span`/`col_span`、`continuation`/`origin`、行内 `runs`）、`merged_cells`、`header_values`、`source_row_col_counts`；`cells` 与 Markdown 由同一网格派生。`ExcelParser._excel_table_grid()` 把工作表合并转成同一份跨度（xlsx/xls 共用），表外合并在 `source_merged_ranges` |
 | [src/parsecore/api_payloads.py](../src/parsecore/api_payloads.py) | 结构化表格优先读 `table_cells`，单元格带跨度与合并标记；`merged_cells` 一律由网格派生（不再透传解析器原值），记录表头用解析器给出的 `header_values` |
 | [src/parsecore/ir.py](../src/parsecore/ir.py) | IR 表格携带同一份 `cells`，并派生出 `merged_cells` / `header_values`，Reader 因此也能显示合并 |
-| [src/parsecore/pipelines.py](../src/parsecore/pipelines.py) | 表格增强、知识单元文本与摘要走同一个网格；合并关系进入知识单元 `table_summary` |
+| [src/parsecore/pipelines.py](../src/parsecore/pipelines.py) | 表格增强、知识单元文本与摘要走同一个网格；合并关系进入知识单元 `table_summary`；条目 `kind` 表示内容形态、`semantic_role` 表示用途语义（见第 8 节） |
+| [src/parsecore/runtime.py](../src/parsecore/runtime.py) | 知识单元形态判定与 `pipelines` 同一规则（只读 `kind`），不再从 `provenance` 兜底 |
 | [src/parsecore/payload_schemas.py](../src/parsecore/payload_schemas.py) | `document-ir` 的表格增加可选 `merged_cells` / `header_values` |
 | [tests/test_tables.py](../tests/test_tables.py)（新增） | 22 项：网格读取优先级、合并值填充、表头展开、Markdown/TSV 转义、合并记录的读取与应用 |
 | [tests/test_docx_table_grid.py](../tests/test_docx_table_grid.py)（新增） | 8 项：原生提取、结构化/记录/Reader/IR/知识单元一致性、schema 校验 |
@@ -237,23 +238,87 @@ ARJ21主轮IPC.xls                          1 表 | 表内合并 0 | 来源范�
 新增用例（`tests/test_tables.py`）：声明合并在网格上落地、网格装不下的合并仍被报出、范围标签
 不当成描述符、声明的合并不覆盖已记录的跨度、同一条合并不重复。
 
-## 8. 未完成（同一待办）
+## 8. 产物条目的 `kind` 语义迁移（本次补齐）
 
-1. **`DocumentArtifactItem.kind` 语义迁移**：目前 `kind` 仍是语义角色、内容形态由
-   `provenance["block_type"]` 表达。迁移会牵动知识单元类型判定，放在表格链路稳定后做。
-2. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
+`DocumentArtifactItem.kind` 原来存的是语义角色（`kind=semantic_role`），内容形态另存在
+`provenance["block_type"]`，`metadata["item_kind"]` 又抄了一份角色——同一个"它是什么"有三个字段，
+下游只能写三重兜底（`block_type == "table" or kind == "table" or semantic_role == "table"`）。
+一份含列表的警告因此无法表达"内容是段落、用途是警告"。
+
+现在一个字段一个含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `item.kind` | 内容形态（`BlockType`：`title` / `paragraph` / `table` / `image`） |
+| `item.semantic_role` | 用途语义（`warning` / `body_section` / `lep_entry` / `parse_artifact` …） |
+| `item.provenance` | 来源与顺序（`parser`、`position`），不再复制形态与角色 |
+| `item.metadata["kind"]` | 块元数据原样保留，与条目 `kind` 同形 |
+
+做减法（删除的重复字段与分支）：
+
+| 对象 | 处理 |
+| --- | --- |
+| `provenance["block_type"]` | 与新的 `kind` 同值 → 删除 |
+| `metadata["item_kind"]` | 与 `semantic_role` 同值且全仓无读取方 → 删除 |
+| 知识单元元数据 `block_type` | 与 `kind` 同值 → 删除，知识单元只留 `kind` + 自身 `semantic_role` |
+| `pipelines._item_block_type()`、`pipelines._knowledge_unit_type()`、`runtime._runtime_unit_type()` | 三重兜底改为只读 `kind`（形态），角色只参与角色判断 |
+| 角色取值链里的 `or item.kind` | 删除：形态不能当角色用（否则没有角色的表格块会得到角色 `table`） |
+| `metadata["summary"]["item_kinds"]` | 名为 kind、实为角色计数 → 改名 `semantic_roles`（全仓无其它读取方） |
+
+顺带修正（原语义把问题掩盖了，不是搬家的副作用）：`TableStructureStage` 以前按角色选表
+（`item.kind != "table"` 实际是角色判断），`semantic_role` 更窄的表——Word 有效页清单
+（`lep_entry`）、Excel 目录表——不会被表格结构增强；现在按内容形态选择，这些表同样渲染并进入
+知识单元。
+
+验证：
+
+```text
+.\.venv\Scripts\python.exe -m unittest tests.test_quality tests.test_runtime tests.test_docx_manual_structure tests.test_audit_placeholders
+Ran 85 tests / OK
+
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1006 tests / OK (skipped=6)
+```
+
+用例：
+
+| 场景 | 结果 |
+| --- | --- |
+| `semantic_role=lep_entry` 的表格仍按表处理（单元类型 `table`、被 table-structure 增强） | 通过（`test_a_narrower_semantic_role_does_not_hide_the_content_form`） |
+| 条目 `kind` 是块形态、`provenance` 无 `block_type`、`metadata` 无 `item_kind` | 通过（`test_pipeline_registry_warmup_and_artifact_chunking_are_active`） |
+| 审计占位条目表达为"形态 `paragraph` + 角色 `parse_artifact`" | 通过（`tests/test_quality.py`） |
+
+### 8.1 记录一个既有竞态（待办 5 处理，本次未改）
+
+`publish_merged_parent_run()` 用 `seal_run()` 校验"分块引用的块都属于本次运行"，偶发失败：
+
+```text
+SealError: chunks reference blocks that are not part of this run:
+  doc-pdf-api-parts:merged:doc-pdf-api-parts-part-2:doc-pdf-api-parts-part-2-p-1, …-title
+```
+
+在**未修改**的 `dcecacc` 上同样复现（本机 30 次单测 1 次失败；带本次改动 30 次 3 次失败，
+两者同量级），机制在 `_merged_partition_artifacts()`：它先按子任务读 `get_blocks()`、再读
+`get_chunks()`，两次读取之间子任务（inline worker）可能改写自己的产物，于是合并出的分块引用了
+新块 id、而合并块集合来自旧快照；`block_id_map` 未命中的 id 被原样保留，落库后与块集合不一致。
+这是"重跑合并"的读一致性问题（待办 5 的"失败重跑不能覆盖旧正式结果 / 重复提交不产生错版"），
+本轮只记录现象与机制，修复放在待办 5。
+
+## 9. 未完成（同一待办）
+
+1. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
    （`_markdown_table_cells()`，TextParser / PyMuPDF4LLM / Docling 的降级路径）本身没有合并
    信息，只能给出扁平行，不会有 `table_cells`——这是格式能力差异，不是待补的分支。
-3. **PDF 来源定位**：表块与图片块现在带 `source_region`（页号、点坐标、原点、页面旋转、页尺寸
+2. **PDF 来源定位**：表块与图片块现在带 `source_region`（页号、点坐标、原点、页面旋转、页尺寸
    与 `crop_fraction`），见[待办 3 报告第 7 节](r4-todo3-pdf-catalog-table-20260921.md)；
    Word 侧仍用块/单元格标识，不填物理页码，Excel 的工作表与单元格范围沿用原有字段。
-4. **Docling 的图片/公式落盘**：图片目前只保留图注与来源，未保存原图；公式只保留转写文本并标
+3. **Docling 的图片/公式落盘**：图片目前只保留图注与来源，未保存原图；公式只保留转写文本并标
    未核验，没有做区域图保留。
-5. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
+4. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
    真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
    验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 9. 回滚
+## 10. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；
