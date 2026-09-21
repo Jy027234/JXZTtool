@@ -1255,6 +1255,69 @@ class PdfTextParserOptionsTests(unittest.TestCase):
         self.assertEqual(reason, "native_text_empty")
         self.assertIsNone(error)
 
+    def test_healthy_native_text_page_never_reaches_the_ocr_engine(self) -> None:
+        # 待办 4: OCR is for the pages that need it.  A page whose text layer is
+        # intact must not pay the render + engine cost, so neither the engine nor
+        # the extraction call may happen at all.
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+        with patch.object(parser, "_ensure_pdf_ocr_engine") as engine, patch(
+            "parsecore.parsers._extract_ocr_text_from_page"
+        ) as extract:
+            recovered, reason, error, timings = parser._maybe_recover_page_with_ocr(
+                SimpleNamespace(width=595.0, height=842.0, images=[object()]),
+                [],
+                1,
+                "Apply the specified torque to the fastener before inspection.",
+            )
+
+        self.assertIsNone(recovered)
+        self.assertIsNone(reason)
+        self.assertIsNone(error)
+        engine.assert_not_called()
+        extract.assert_not_called()
+        self.assertEqual(timings.total_elapsed_s, 0.0)
+
+    def test_a_garbled_page_is_the_one_sent_to_ocr(self) -> None:
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"dual_channel": True, "ocr_bad_pages": True}},
+        )
+        extract_timings = SimpleNamespace(
+            render_elapsed_s=0.0,
+            input_prepare_elapsed_s=0.0,
+            engine_exec_elapsed_s=0.0,
+            call_elapsed_s=0.0,
+            provider_elapsed_s=0.0,
+            provider_det_elapsed_s=0.0,
+            provider_cls_elapsed_s=0.0,
+            provider_rec_elapsed_s=0.0,
+            postprocess_elapsed_s=0.0,
+            ocr_lines=[],
+        )
+        garbled = "(cid:12)(cid:13)(cid:14)(cid:15)(cid:16) torque value"
+
+        with patch.object(
+            parser, "_ensure_pdf_ocr_engine", return_value=(object(), None, 0.0)
+        ), patch(
+            "parsecore.parsers._extract_ocr_text_from_page",
+            return_value=("Torque value", None, extract_timings),
+        ):
+            recovered, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                SimpleNamespace(width=595.0, height=842.0, images=[]),
+                [],
+                1,
+                garbled,
+            )
+
+        self.assertEqual(recovered, "Torque value")
+        self.assertEqual(reason, "cid_dense")
+        self.assertIsNone(error)
+
 
 if __name__ == "__main__":
     unittest.main()

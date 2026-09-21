@@ -142,7 +142,7 @@ class LargePdfStressTests(unittest.TestCase):
                 parallel_parts=2,
             )
 
-        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["status"], "ok", json.dumps(report.get("errors"), ensure_ascii=False))
         self.assertEqual(report["parallel_parts"], 2)
         self.assertEqual(report["summary"]["executed_parts"], 2)
         self.assertEqual(len(report["errors"]), 0)
