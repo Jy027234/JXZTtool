@@ -6,7 +6,7 @@ import zipfile
 
 
 DOCX_XML = """<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
-<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">
+<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">
   <w:body>
     {paragraphs}
   </w:body>
@@ -39,6 +39,64 @@ def build_docx_table(rows: list[list[str]]) -> str:
             )
         rendered_rows.append("<w:tr>" + "".join(rendered_cells) + "</w:tr>")
     return "<w:tbl>" + "".join(rendered_rows) + "</w:tbl>"
+
+
+def _docx_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def build_docx_table_xml(rows: list[list[object]]) -> str:
+    """A Word table, with real merge and inline markup.
+
+    A cell is either a plain string or a mapping with any of:
+
+    - ``text``: cell text (used when ``runs`` is not given)
+    - ``runs``: raw ``<w:r>`` XML, for inline formatting/link cases
+    - ``col_span``: ``w:gridSpan`` (columns this cell covers)
+    - ``vmerge``: ``"restart"`` or ``"continue"`` (``w:vMerge``)
+    """
+
+    rendered_rows: list[str] = []
+    for row in rows:
+        rendered_cells: list[str] = []
+        for cell in row:
+            spec = cell if isinstance(cell, dict) else {"text": cell}
+            properties: list[str] = []
+            col_span = int(spec.get("col_span") or 1)
+            if col_span > 1:
+                properties.append(f'<w:gridSpan w:val="{col_span}"/>')
+            vmerge = str(spec.get("vmerge") or "").strip().lower()
+            if vmerge == "restart":
+                properties.append('<w:vMerge w:val="restart"/>')
+            elif vmerge:
+                properties.append("<w:vMerge/>")
+            properties_xml = f"<w:tcPr>{''.join(properties)}</w:tcPr>" if properties else ""
+            runs = spec.get("runs")
+            if runs is None:
+                runs_xml = f"<w:r><w:t>{_docx_escape(spec.get('text') or '')}</w:t></w:r>"
+            else:
+                runs_xml = "".join(str(run) for run in runs)
+            rendered_cells.append(
+                f"<w:tc>{properties_xml}<w:p>{runs_xml}</w:p></w:tc>"
+            )
+        rendered_rows.append("<w:tr>" + "".join(rendered_cells) + "</w:tr>")
+    return "<w:tbl>" + "".join(rendered_rows) + "</w:tbl>"
+
+
+DOCX_RELS_XML = """<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">
+  {relationships}
+</Relationships>
+"""
+
+
+def build_docx_hyperlink(relationship_id: str, text: str) -> str:
+    return f'<w:hyperlink r:id="{relationship_id}"><w:r><w:t>{_docx_escape(text)}</w:t></w:r></w:hyperlink>'
 
 
 def _escape_pdf_text(text: str) -> str:
@@ -143,13 +201,26 @@ class TemporaryWorkspace:
             archive.writestr("word/document.xml", document_xml)
         return target
 
-    def create_docx_with_body(self, name: str, body_xml: str) -> Path:
+    def create_docx_with_body(
+        self, name: str, body_xml: str, *, hyperlinks: dict[str, str] | None = None
+    ) -> Path:
         assert self.root is not None
         target = self.root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         document_xml = DOCX_XML.format(paragraphs=body_xml)
         with zipfile.ZipFile(target, "w") as archive:
             archive.writestr("word/document.xml", document_xml)
+            if hyperlinks:
+                relationships = "".join(
+                    '<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>'.format(
+                        relationship_id, target_url
+                    )
+                    for relationship_id, target_url in hyperlinks.items()
+                )
+                archive.writestr(
+                    "word/_rels/document.xml.rels",
+                    DOCX_RELS_XML.format(relationships=relationships),
+                )
         return target
 
     def create_text_file(self, name: str, content: str) -> Path:

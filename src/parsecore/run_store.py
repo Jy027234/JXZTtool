@@ -105,6 +105,22 @@ class PublishError(RunStoreError):
     code = "run_publish_failed"
 
 
+class PublicationPolicyError(PublishError):
+    """The validation conclusion forbids an automatic publish.
+
+    Kept apart from the other publish failures on purpose: nothing is wrong with
+    the run, the staged artifacts or the live tier — the policy simply requires a
+    human decision first.  A caller can therefore offer the run as an unpublished
+    preview instead of reporting the parse as failed.
+    """
+
+    code = "run_not_publishable_by_policy"
+
+    def __init__(self, message: str, *, policy_reason: str = "") -> None:
+        super().__init__(message)
+        self.policy_reason = str(policy_reason or "")
+
+
 class RunNotSealableError(SealError):
     """The run is in a state whose artifacts must not be frozen."""
 
@@ -875,9 +891,10 @@ class SQLiteRunStore:
                     durable_index=durable_index,
                 )
             if not allowed:
-                raise PublishError(
+                raise PublicationPolicyError(
                     f"run {parse_run_id} may not be published: {reason}"
-                    f" (validation_status={row['validation_status']})"
+                    f" (validation_status={row['validation_status']})",
+                    policy_reason=str(reason),
                 )
 
             manifest = json.loads(row["manifest_json"])

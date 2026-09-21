@@ -143,6 +143,86 @@ class RuntimePublicationTests(unittest.TestCase):
         )
         self.assertEqual(publication_entry["status"], "available")
 
+    def test_a_warning_result_completes_unpublished_instead_of_failing(self) -> None:
+        # A finding below the policy's publish threshold ("a signature page needs
+        # review") is not a parse failure.  The job must finish, the run must stay
+        # unpublished, and the document must not be reported as a formal version —
+        # otherwise a healthy parse of a real 297-page manual is reported as an
+        # execution error, and the quality gate cannot even measure it.
+        from unittest.mock import patch
+
+        from parsecore.bootstrap import build_runtime
+        from parsecore.publication import ValidationStatus
+        from parsecore.validation import ValidationReport
+
+        warning_report = ValidationReport(
+            status=ValidationStatus.WARNING,
+            reason="suspect_signature_pages",
+            warnings=("suspect_signature_pages",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            document_path = workspace.create_docx("spec.docx", ["Maintenance Manual"])
+            runtime = build_runtime(workspace.config_path)
+            with patch("parsecore.runtime.validate_run", return_value=warning_report):
+                outcome = runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-warning",
+                        file_path=str(document_path),
+                        media_type=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document"
+                        ),
+                    )
+                )
+            state = runtime.publication_state(doc_id="doc-warning")
+            runs = runtime.list_runs(doc_id="doc-warning")
+
+        self.assertEqual(outcome.job.state.value, "done")
+        self.assertIsNone(outcome.job.failure_reason)
+        self.assertFalse(state["formal_version_available"])
+        self.assertEqual(state["consumer_signal"], "not_ready")
+        self.assertIsNone(state["active_run_id"])
+        # The run and its validation report survive as an unpublished preview.
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].validation_status, "warning")
+
+    def test_a_rejected_result_fails_the_job_and_publishes_nothing(self) -> None:
+        from unittest.mock import patch
+
+        from parsecore.bootstrap import build_runtime
+        from parsecore.publication import ValidationStatus
+        from parsecore.run_store import PublishError
+        from parsecore.validation import ValidationReport
+
+        rejected_report = ValidationReport(
+            status=ValidationStatus.REJECTED,
+            reason="placeholder_result",
+            rejections=("placeholder_result",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            document_path = workspace.create_docx("spec.docx", ["Maintenance Manual"])
+            runtime = build_runtime(workspace.config_path)
+            job = runtime.start(
+                ParseRequest(
+                    doc_id="doc-rejected",
+                    file_path=str(document_path),
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "wordprocessingml.document"
+                    ),
+                )
+            )
+            with patch("parsecore.runtime.validate_run", return_value=rejected_report):
+                with self.assertRaises(PublishError):
+                    runtime.execute(job_id=job.job_id)
+            stored = runtime.job_store.get_job(job_id=job.job_id)
+            state = runtime.publication_state(doc_id="doc-rejected")
+
+        self.assertEqual(stored.state.value, "failed")
+        self.assertIn("validation_rejected", str(stored.failure_reason))
+        self.assertFalse(state["formal_version_available"])
+        self.assertIsNone(state["active_run_id"])
+
     def test_rejected_publication_reports_the_reason_and_keeps_not_ready(self) -> None:
         from parsecore.bootstrap import build_runtime
 
@@ -160,7 +240,9 @@ class RuntimePublicationTests(unittest.TestCase):
             state = runtime.publication_state(doc_id="doc-1")
 
         self.assertFalse(result["published"])
-        self.assertEqual(result["reason"], "run_publish_failed")
+        # A policy refusal is distinguishable from a broken publish: the run is
+        # fine, a human decision is missing.
+        self.assertEqual(result["reason"], "run_not_publishable_by_policy")
         self.assertIn("validation_needs_review", result["message"])
         self.assertEqual(result["consumer_signal"], "not_ready")
         self.assertIsNone(state["active_run_id"])

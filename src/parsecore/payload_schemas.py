@@ -986,6 +986,13 @@ def _ir_table_schema() -> dict[str, Any]:
                 "type": "array",
                 "items": _generic_object_schema(),
             },
+            # Present only when the source declared a merged region; Markdown
+            # cannot express one, so it travels with the structured table.
+            "merged_cells": {
+                "type": "array",
+                "items": _generic_object_schema(),
+            },
+            "header_values": _string_list_schema(),
             "caption": _string_schema(),
             "confidence": _number_schema(nullable=True),
             "reader_policy": _string_schema(),

@@ -20,6 +20,11 @@ from .publication import (
 )
 from .record_filters import collect_record_page
 from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
+from .tables import (
+    TableGrid,
+    grid_from_metadata,
+    rows_from_table_payload,
+)
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -3873,20 +3878,27 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
         metadata = block.metadata or {}
         page_number = _safe_int(metadata.get("page"), default=1)
         table_index = _safe_int(metadata.get("table_index"), default=len(tables) + 1)
-        rows = _safe_int(metadata.get("rows"), default=0)
-        cols = _safe_int(metadata.get("cols"), default=0)
-        raw_rows = _table_rows_from_metadata(metadata)
-        if not rows:
-            rows = len(raw_rows)
-        if not cols:
-            cols = max((len(row) for row in raw_rows), default=0)
+        # One grid for every consumer: the parser's structured cells when it could
+        # read real structure, otherwise its flat rows.  Merges are never guessed
+        # again downstream.
+        grid = grid_from_metadata(metadata)
+        raw_rows = grid.rows()
+        rows = _safe_int(metadata.get("rows"), default=0) or len(raw_rows)
+        cols = _safe_int(metadata.get("cols"), default=0) or max(
+            (len(row) for row in raw_rows), default=0
+        )
         table_id = f"{doc_id}:p{page_number}:t{table_index}"
         cells = _structured_cells(
-            raw_rows,
+            grid=grid,
             page_number=page_number,
             table_index=table_index,
         )
-        warnings = _table_warnings(raw_rows=raw_rows, rows=rows, cols=cols)
+        warnings = _table_warnings(
+            raw_rows=raw_rows,
+            rows=rows,
+            cols=cols,
+            declared_row_widths=metadata.get("source_row_col_counts"),
+        )
         table: dict[str, Any] = {
             "table_id": table_id,
             "source_doc_id": doc_id,
@@ -3930,38 +3942,72 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
         ):
             if key in metadata:
                 table[key] = metadata[key]
+        if "merged_cells" not in table:
+            merges = grid.merged_cells()
+            if merges:
+                table["merged_cells"] = merges
         if not cells and block.content.strip():
             table["text"] = block.content
         table["empty_cell_ratio"] = _empty_cell_ratio(raw_rows)
-        table["source_row_col_counts"] = [len(row) for row in raw_rows]
+        table["source_row_col_counts"] = _source_row_col_counts(
+            declared_row_widths=metadata.get("source_row_col_counts"),
+            raw_rows=raw_rows,
+        )
         table["ordinal"] = fallback_index
         tables.append(table)
     return tables
 
 
+def _source_row_col_counts(
+    *, declared_row_widths: Any, raw_rows: list[list[str]]
+) -> list[int]:
+    """Columns each source row declared, falling back to the flattened width."""
+
+    if isinstance(declared_row_widths, (list, tuple)) and declared_row_widths:
+        widths = [_safe_int(value, default=0) for value in declared_row_widths]
+        if any(widths):
+            return widths
+    return [len(row) for row in raw_rows]
+
+
 def _structured_cells(
-    rows: list[list[str]],
     *,
+    grid: TableGrid,
     page_number: int,
     table_index: int,
 ) -> list[dict[str, Any]]:
+    """One record per grid position, with the span the source declared.
+
+    The grid comes from :mod:`parsecore.tables`, so this function never decides
+    the shape of the table: it only labels each position for the API.  A parser
+    that read real structure (Word's ``gridSpan``/``vMerge``) therefore keeps
+    ``row_span``/``col_span``/``continuation``/``origin`` and inline ``runs`` here.
+    """
+
     cells: list[dict[str, Any]] = []
-    for row_index, row in enumerate(rows):
-        for col_index, value in enumerate(row):
-            cells.append(
-                {
-                    "row_index": row_index,
-                    "col_index": col_index,
-                    "text": str(value or ""),
-                    # No confidence: a grid cell read from a source table was not
-                    # scored by anything, and a constant 1.0 turned "unmeasured"
-                    # into "certain" for every consumer.
-                    "confidence": None,
-                    "source_page_number": page_number,
-                    "source_table_index": table_index,
-                    "warnings": [],
-                }
-            )
+    for cell in grid.cells:
+        record: dict[str, Any] = {
+            "row_index": cell.row_index,
+            "col_index": cell.col_index,
+            "text": cell.text,
+            # No confidence: a grid cell read from a source table was not scored
+            # by anything, and a constant 1.0 turned "unmeasured" into "certain"
+            # for every consumer.
+            "confidence": None,
+            "source_page_number": page_number,
+            "source_table_index": table_index,
+            "warnings": [],
+        }
+        if cell.row_span > 1 or cell.col_span > 1:
+            record["row_span"] = cell.row_span
+            record["col_span"] = cell.col_span
+            record["merged"] = True
+        if cell.continuation:
+            record["continuation"] = True
+            record["origin"] = cell.origin
+        if cell.runs:
+            record["runs"] = [dict(run) for run in cell.runs]
+        cells.append(record)
     return cells
 
 
@@ -3988,7 +4034,7 @@ def _structured_records(
         if not isinstance(table, dict):
             continue
         table_id = str(table.get("table_id") or "")
-        rows = _rows_from_structured_cells(table.get("cells"))
+        rows = rows_from_table_payload(table)
         if not rows:
             continue
         page_number = _safe_int(table.get("page_number"), default=1)
@@ -4334,27 +4380,6 @@ def _record_quality_signals(records: list[dict[str, Any]]) -> list[dict[str, Any
     return signals
 
 
-def _rows_from_structured_cells(raw_cells: Any) -> list[list[str]]:
-    if not isinstance(raw_cells, list):
-        return []
-    cells: dict[int, dict[int, str]] = {}
-    max_col = -1
-    for cell in raw_cells:
-        if not isinstance(cell, dict):
-            continue
-        row_index = _safe_int(cell.get("row_index"), default=0)
-        col_index = _safe_int(cell.get("col_index"), default=0)
-        max_col = max(max_col, col_index)
-        cells.setdefault(row_index, {})[col_index] = str(cell.get("text") or "")
-    if not cells:
-        return []
-    rows: list[list[str]] = []
-    for row_index in range(max(cells) + 1):
-        row = cells.get(row_index, {})
-        rows.append([row.get(col_index, "") for col_index in range(max_col + 1)])
-    return rows
-
-
 def _stable_record_headers(raw_headers: list[Any], col_count: int) -> list[str]:
     headers: list[str] = []
     seen: dict[str, int] = {}
@@ -4396,29 +4421,32 @@ def _records_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _table_rows_from_metadata(metadata: dict[str, Any]) -> list[list[str]]:
-    raw = metadata.get("cells")
-    if raw is None:
-        raw = metadata.get("cells_preview")
-    if not isinstance(raw, list):
-        return []
-    rows: list[list[str]] = []
-    for row in raw:
-        if isinstance(row, (list, tuple)):
-            rows.append([str(value or "") for value in row])
-        else:
-            rows.append([str(row or "")])
-    return rows
-
-
-def _table_warnings(*, raw_rows: list[list[str]], rows: int, cols: int) -> list[str]:
+def _table_warnings(
+    *,
+    raw_rows: list[list[str]],
+    rows: int,
+    cols: int,
+    declared_row_widths: Any = None,
+) -> list[str]:
     warnings: list[str] = []
     if rows == 0 or cols == 0:
         warnings.append("table_empty")
     if raw_rows and not any(cell.strip() for cell in raw_rows[0]):
         warnings.append("table_header_missing")
-    row_widths = {len(row) for row in raw_rows if row}
-    if len(row_widths) > 1:
+    # Prefer the columns the source declared: the flattened grid is padded to a
+    # rectangle, which would hide a row that is genuinely short.
+    widths = {
+        width
+        for width in (
+            {_safe_int(value, default=0) for value in declared_row_widths}
+            if isinstance(declared_row_widths, (list, tuple)) and declared_row_widths
+            else {len(row) for row in raw_rows if row}
+        )
+        # A row that declares nothing at all (a blank source row) is not a
+        # disagreement about the column count.
+        if width > 0
+    }
+    if len(widths) > 1:
         warnings.append("table_ragged_rows")
     if _empty_cell_ratio(raw_rows) > 0.5:
         warnings.append("table_empty_ratio_high")

@@ -33,6 +33,7 @@ from .ocr_cache import (
     get_default_cache,
     ocr_cache_identity,
 )
+from .tables import GridCell, TableGrid, render_markdown as _render_table_markdown
 
 
 _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
@@ -474,45 +475,280 @@ def _classify_docx_paragraph(
     )
 
 
-def _docx_table_cells(
+_DOCX_RELATIONSHIP_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _docx_hyperlink_targets(archive: zipfile.ZipFile) -> dict[str, str]:
+    """Map relationship ids to hyperlink targets.
+
+    Word stores a link's URL in ``word/_rels/document.xml.rels`` and references it
+    from the run, so the target cannot be read from ``document.xml`` alone.
+    """
+
+    try:
+        payload = archive.read("word/_rels/document.xml.rels")
+    except KeyError:
+        return {}
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return {}
+    targets: dict[str, str] = {}
+    for relation in root.findall(f".//{{{_DOCX_RELATIONSHIP_NAMESPACE}}}Relationship"):
+        if str(relation.get("Type") or "").endswith("/hyperlink"):
+            relation_id = str(relation.get("Id") or "").strip()
+            target = str(relation.get("Target") or "").strip()
+            if relation_id and target:
+                targets[relation_id] = target
+    return targets
+
+
+def _docx_attribute(node: ET.Element, local_name: str, namespaces: Mapping[str, str]) -> str:
+    """Read an attribute by local name, accepting the prefixed or namespaced form."""
+
+    value = node.get(f"{{{namespaces['w']}}}{local_name}")
+    if value is None:
+        value = node.get(local_name)
+    return str(value if value is not None else "").strip()
+
+
+def _docx_int_attribute(node: ET.Element, local_name: str, namespaces: Mapping[str, str]) -> int:
+    raw = _docx_attribute(node, local_name, namespaces)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _docx_run_is_enabled(
+    run: ET.Element, *, local_name: str, namespaces: Mapping[str, str]
+) -> bool:
+    """Whether a toggle property is on (present without ``w:val="0"/"false"``)."""
+
+    node = run.find(f"./w:rPr/w:{local_name}", namespaces)
+    if node is None:
+        return False
+    raw = _docx_attribute(node, "val", namespaces).lower()
+    return raw not in {"0", "false", "off"}
+
+
+def _docx_run_format(
+    run: ET.Element,
+    *,
+    namespaces: Mapping[str, str],
+    hyperlinks: Mapping[str, str],
+) -> dict[str, Any]:
+    """Inline formatting that changes how the text must be read or rendered.
+
+    Plain runs produce nothing: emitting unchecked formatting for every run would
+    bloat the artifact without adding information.
+    """
+
+    fmt: dict[str, Any] = {}
+    style_node = run.find("./w:rPr/w:rStyle", namespaces)
+    style = _docx_attribute(style_node, "val", namespaces) if style_node is not None else ""
+    # Word applies character emphasis through these style names by convention.
+    style_lower = style.lower()
+    if _docx_run_is_enabled(run, local_name="b", namespaces=namespaces) or "strong" in style_lower:
+        fmt["bold"] = True
+    if _docx_run_is_enabled(run, local_name="i", namespaces=namespaces) or "emphasis" in style_lower:
+        fmt["italic"] = True
+    if _docx_run_is_enabled(run, local_name="u", namespaces=namespaces):
+        fmt["underline"] = True
+    vertical = run.find("./w:rPr/w:vertAlign", namespaces)
+    if vertical is not None:
+        value = _docx_attribute(vertical, "val", namespaces).lower()
+        if value in {"superscript", "subscript"}:
+            fmt["vertical_align"] = value
+    link_key = run.get(f"{{{namespaces['w']}}}hyperlink") or run.get("hyperlink")
+    if link_key and str(link_key) in hyperlinks:
+        fmt["link"] = hyperlinks[str(link_key)]
+    return fmt
+
+
+def _docx_paragraph_runs(
+    paragraph: ET.Element,
+    *,
+    namespaces: Mapping[str, str],
+    hyperlinks: Mapping[str, str],
+) -> tuple[str, tuple[dict[str, Any], ...]]:
+    """Plain text of a paragraph plus its *formatted* fragments.
+
+    Only fragments carrying meaningful formatting are returned, so an ordinary
+    paragraph yields an empty run list and the text is the single source of truth.
+    """
+
+    text_parts: list[str] = []
+    runs: list[dict[str, Any]] = []
+
+    def _walk(node: ET.Element, inherited_link: str = "") -> None:
+        for child in list(node):
+            local_name = _xml_local_name(child.tag)
+            if local_name == "r":
+                run_text: list[str] = []
+                for inner in child.iter():
+                    inner_name = _xml_local_name(inner.tag)
+                    if inner_name == "t" and inner.text:
+                        run_text.append(inner.text)
+                    elif inner_name == "tab":
+                        run_text.append(" ")
+                    elif inner_name in {"br", "cr"}:
+                        run_text.append("\n")
+                fragment = _normalize_inline_whitespace("".join(run_text))
+                if not fragment:
+                    continue
+                text_parts.append(fragment)
+                fmt = _docx_run_format(child, namespaces=namespaces, hyperlinks=hyperlinks)
+                if inherited_link:
+                    fmt.setdefault("link", inherited_link)
+                if fmt:
+                    runs.append({"text": fragment, **fmt})
+                continue
+            if local_name == "hyperlink":
+                link_id = (
+                    child.get(f"{{{namespaces['r']}}}id")
+                    if "r" in namespaces
+                    else None
+                ) or child.get("id") or ""
+                target = hyperlinks.get(str(link_id), inherited_link)
+                _walk(child, target)
+                continue
+            _walk(child, inherited_link)
+
+    _walk(paragraph)
+    return "".join(text_parts), tuple(runs)
+
+
+def _docx_table_grid(
     table: ET.Element,
     *,
     namespaces: Mapping[str, str],
-) -> list[list[str]]:
-    rows: list[list[str]] = []
-    for row in table.findall("./w:tr", namespaces):
-        values: list[str] = []
-        for cell in row.findall("./w:tc", namespaces):
-            parts: list[str] = []
+    hyperlinks: Mapping[str, str] | None = None,
+) -> TableGrid:
+    """Read a Word table onto its real grid, preserving merges and inline format.
+
+    ``gridSpan`` widens a cell and ``vMerge`` continues the cell above, so the
+    cells must be placed by column instead of appended in document order;
+    appending them loses both the merge and the column each value belongs to.
+    """
+
+    links = hyperlinks or {}
+    #: Column index -> the cell that opened the vertical merge still running there.
+    pending_row_spans: dict[int, GridCell] = {}
+    grid: list[GridCell] = []
+    declared_row_widths: dict[int, int] = {}
+    row_count = 0
+    column_count = 0
+
+    def _replace_origin(origin: GridCell, row_span: int) -> GridCell:
+        updated = replace(origin, row_span=row_span)
+        for index, cell in enumerate(grid):
+            if cell is origin:
+                grid[index] = updated
+                break
+        return updated
+
+    for row_index, row in enumerate(table.findall("./w:tr", namespaces)):
+        raw_cells = row.findall("./w:tc", namespaces)
+        if not raw_cells:
+            continue
+        col_index = 0
+        row_has_content = False
+        for cell in raw_cells:
+            properties = cell.find("./w:tcPr", namespaces)
+            col_span = 1
+            vertical_merge = ""
+            if properties is not None:
+                span_node = properties.find("./w:gridSpan", namespaces)
+                if span_node is not None:
+                    col_span = max(1, _docx_int_attribute(span_node, "val", namespaces) or 1)
+                merge_node = properties.find("./w:vMerge", namespaces)
+                if merge_node is not None:
+                    vertical_merge = (
+                        _docx_attribute(merge_node, "val", namespaces).lower() or "continue"
+                    )
+
+            paragraph_texts: list[str] = []
+            cell_runs: list[dict[str, Any]] = []
             for paragraph in cell.findall("./w:p", namespaces):
-                info = _docx_paragraph_info(paragraph, namespaces=namespaces)
-                if info.text:
-                    parts.append(info.text)
-            values.append("\n".join(item for item in parts if item).strip())
-        if any(value for value in values):
-            rows.append(values)
-    return rows
+                paragraph_text, runs = _docx_paragraph_runs(
+                    paragraph, namespaces=namespaces, hyperlinks=links
+                )
+                if paragraph_text:
+                    paragraph_texts.append(paragraph_text)
+                cell_runs.extend(runs)
+            text = "\n".join(paragraph_texts).strip()
 
+            if vertical_merge == "continue":
+                origin = pending_row_spans.get(col_index)
+                if origin is not None:
+                    # The value belongs to the origin cell above; this position
+                    # only carries the merge continuation.
+                    merged = _replace_origin(origin, origin.row_span + 1)
+                    pending_row_spans[col_index] = merged
+                    for offset in range(col_span):
+                        grid.append(
+                            GridCell(
+                                row_index=row_index,
+                                col_index=col_index + offset,
+                                continuation=True,
+                                origin_row=merged.row_index,
+                                origin_col=merged.col_index,
+                            )
+                        )
+                    row_has_content = True
+                    col_index += col_span
+                    continue
+                # A continuation without an origin is malformed; keep the text.
+                vertical_merge = ""
 
-def _escape_markdown_table_cell(text: str) -> str:
-    return str(text or "").replace("|", "\\|").replace("\n", "<br>").strip()
+            if text:
+                row_has_content = True
+            is_row_span = vertical_merge == "restart"
+            placed = GridCell(
+                row_index=row_index,
+                col_index=col_index,
+                text=text,
+                col_span=col_span,
+                origin_row=row_index,
+                origin_col=col_index,
+                runs=tuple(cell_runs),
+            )
+            grid.append(placed)
+            if is_row_span:
+                pending_row_spans[col_index] = placed
+            else:
+                pending_row_spans.pop(col_index, None)
+            for offset in range(1, col_span):
+                grid.append(
+                    GridCell(
+                        row_index=row_index,
+                        col_index=col_index + offset,
+                        continuation=True,
+                        origin_row=row_index,
+                        origin_col=col_index,
+                    )
+                )
+            col_index += col_span
+        if row_has_content:
+            row_count += 1
+            column_count = max(column_count, col_index)
+        declared_row_widths[row_index] = col_index
 
+    if not grid:
+        return TableGrid()
+    # A row that carried only merge continuations still occupies a grid row.
+    row_count = max(row_count, max(cell.row_index for cell in grid) + 1)
+    column_count = max(column_count, max(cell.col_index for cell in grid) + 1)
+    return TableGrid(
+        cells=tuple(grid),
+        row_count=row_count,
+        column_count=column_count,
+        declared_row_widths=tuple(
+            declared_row_widths.get(index, 0) for index in range(row_count)
+        ),
+    )
 
-def _render_docx_table_markdown(rows: Sequence[Sequence[str]], *, header_rows: int = 1) -> str:
-    normalized_rows = [list(row) for row in rows if any(str(cell or "").strip() for cell in row)]
-    if not normalized_rows:
-        return ""
-    width = max((len(row) for row in normalized_rows), default=0)
-    padded = [row + [""] * (width - len(row)) for row in normalized_rows]
-    if width == 0:
-        return ""
-    rendered: list[str] = []
-    header = padded[0]
-    rendered.append("| " + " | ".join(_escape_markdown_table_cell(cell) for cell in header) + " |")
-    rendered.append("| " + " | ".join("---" for _ in header) + " |")
-    for row in padded[header_rows:]:
-        rendered.append("| " + " | ".join(_escape_markdown_table_cell(cell) for cell in row) + " |")
-    return "\n".join(rendered)
 
 
 def _normalize_excel_cell_value(value: Any) -> str:
@@ -660,7 +896,7 @@ def _excel_cells_metadata(rows: Sequence[Sequence[str]], *, max_cells: int) -> d
 
 
 def _render_excel_table_markdown(rows: Sequence[Sequence[str]]) -> str:
-    return _render_docx_table_markdown(rows)
+    return _render_table_markdown(rows)
 
 
 def _classify_docx_table(
@@ -749,9 +985,13 @@ class DocxParser(ParserAdapter):
         document_path = Path(request.file_path)
         with zipfile.ZipFile(document_path) as archive:
             document_xml = archive.read("word/document.xml")
+            hyperlinks = _docx_hyperlink_targets(archive)
 
         root = ET.fromstring(document_xml)
-        namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        namespaces = {
+            "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        }
         body = root.find("./w:body", namespaces)
         blocks: list[Block] = [
             Block(
@@ -833,13 +1073,17 @@ class DocxParser(ParserAdapter):
             if local_name != "tbl":
                 continue
 
-            cells = _docx_table_cells(child, namespaces=namespaces)
+            grid = _docx_table_grid(
+                child, namespaces=namespaces, hyperlinks=hyperlinks
+            )
+            cells = grid.rows()
             if not cells:
                 continue
             semantic_role, table_type, page_type, logical_page_label, cell_roles = _classify_docx_table(cells, state=state)
-            content = _render_docx_table_markdown(cells)
+            content = _render_table_markdown(cells)
             if not content:
                 continue
+            merges = grid.merged_cells()
             metadata = _provider_metadata({
                 "page": 1,
                 "logical_page": logical_page_index,
@@ -848,12 +1092,23 @@ class DocxParser(ParserAdapter):
                 "semantic_role": semantic_role,
                 "kind": BlockType.TABLE.value,
                 "table_type": table_type,
+                # Structured cells are the source of truth for the grid; the flat
+                # ``cells`` view and the rendered Markdown are derived from it, so
+                # a merged header cannot be guessed differently by two consumers.
+                "table_cells": [cell.as_payload() for cell in grid.cells],
                 "cells": [list(row) for row in cells],
                 "cell_semantic_roles": cell_roles,
-                "rows": len(cells),
-                "cols": max((len(row) for row in cells), default=0),
+                "rows": grid.row_count,
+                "cols": grid.column_count,
+                # Columns each source row declared: the grid is rectangular, so
+                # this is the only place a short row stays visible.
+                "source_row_col_counts": list(grid.declared_row_widths),
                 "header_rows": 1,
             }, parser_name=self.name)
+            merges = grid.merged_cells()
+            if merges:
+                metadata["merged_cells"] = merges
+                metadata["header_values"] = grid.header_values()
             if state.heading_context_open and state.last_heading_text:
                 metadata["table_title"] = state.last_heading_text
             if logical_page_label:

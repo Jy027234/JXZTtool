@@ -219,7 +219,7 @@ class ValidationWiringTests(unittest.TestCase):
             )
 
         self.assertFalse(result["published"])
-        self.assertEqual(result["reason"], "run_publish_failed")
+        self.assertEqual(result["reason"], "run_not_publishable_by_policy")
         self.assertIn("validation_rejected", result["message"])
         self.assertEqual(result["validation_report"]["status"], "rejected")
         self.assertIn(

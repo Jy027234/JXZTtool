@@ -105,7 +105,7 @@ Ran 770 tests / OK (skipped=6)
 - `blocks` / `chunks` 新增 `run_id`，历史行回填为 `'legacy'`；它只用于审计，不参与既有查询条件。
 - `/health` 的 `status` 语义不变；新增的 `run_publication` 能力项为 optional，不与交付阻塞混淆。
 - **memory:// 与 Postgres 后端仍然 `strict_publication_ready = false`**，此时 `publish_run()` 返回 `published: false, reason: run_store_not_ready`，端点报 `not_ready`。这符合 P0-01 的"能力必须真实"：宁可说不能发布，也不做非原子发布。
-- 发布失败返回稳定的错误码（`run_publish_failed` / `publication_rejected_stale` / `run_seal_failed` / `run_not_sealable`），调用方可直接分支。
+- 发布失败返回稳定的错误码（`run_publish_failed` / `run_not_publishable_by_policy` / `publication_rejected_stale` / `run_seal_failed` / `run_not_sealable`），调用方可直接分支。其中 `run_not_publishable_by_policy`（`PublicationPolicyError`）专指"校验结论要求人工决定"：run 与产物都正常，只是策略不允许自动发布，调用方可以按未发布预览处理，而不是把解析判为失败。
 
 ## 6. 本批未完成（第 2 批范围）
 

@@ -12,6 +12,11 @@ from .audit_placeholders import is_non_content_audit_placeholder
 from .config import ParserSettings
 from .contracts import ChunkBuilder, ParserAdapter
 from .models import Block, Chunk, ParseRequest
+from .tables import (
+    grid_from_metadata,
+    render_markdown as _render_table_markdown,
+    render_tsv as _render_table_tsv,
+)
 
 
 _ARTIFACT_SEMANTIC_ROLES = {
@@ -311,7 +316,8 @@ class TableStructureStage:
                 updated_items.append(item)
                 continue
 
-            cells = _normalize_table_cells(item.metadata.get("cells"))
+            grid = grid_from_metadata(item.metadata)
+            cells = grid.rows()
             if not cells:
                 skipped_items += 1
                 updated_items.append(item)
@@ -622,7 +628,7 @@ def _knowledge_unit_table_text(item: DocumentArtifactItem) -> str:
     metadata = item.metadata or {}
     caption = str(metadata.get("normalized_title") or metadata.get("table_title") or metadata.get("caption") or "").strip()
     rendered = str(metadata.get("rendered_text") or metadata.get("table_markdown") or "").strip()
-    cells = _normalize_table_cells(metadata.get("cells"))
+    cells = grid_from_metadata(metadata).rows()
     if not rendered and cells:
         rendered = _render_table_text(
             cells,
@@ -653,18 +659,28 @@ def _knowledge_unit_figure_text(item: DocumentArtifactItem) -> str:
 
 def _knowledge_unit_table_summary(item: DocumentArtifactItem) -> dict[str, Any]:
     metadata = item.metadata or {}
-    cells = _normalize_table_cells(metadata.get("cells"))
+    grid = grid_from_metadata(metadata)
+    cells = grid.rows()
     row_count = _as_int(metadata.get("rows", metadata.get("row_count")), default=len(cells))
     col_count = _as_int(
         metadata.get("cols", metadata.get("col_count")),
         default=max((len(row) for row in cells), default=0),
     )
-    return {
+    summary: dict[str, Any] = {
         "caption": str(metadata.get("normalized_title") or metadata.get("table_title") or metadata.get("caption") or ""),
         "row_count": row_count,
         "col_count": col_count,
         "has_cells": bool(cells),
     }
+    merges = grid.merged_cells()
+    if merges:
+        # Markdown cannot express a merge; the summary keeps it so a consumer can
+        # tell a merged header (and the columns it governs) from a repeated value.
+        summary["merged_cells"] = merges
+        summary["header_values"] = grid.header_values(
+            max(1, _as_int(metadata.get("header_rows"), default=1))
+        )
+    return summary
 
 
 def _knowledge_unit_figure_summary(item: DocumentArtifactItem) -> dict[str, Any]:
@@ -1476,53 +1492,14 @@ def _as_str(value: Any, *, default: str) -> str:
     return text or default
 
 
-def _normalize_table_cells(raw_cells: Any) -> list[list[str]]:
-    if not isinstance(raw_cells, Sequence) or isinstance(raw_cells, (str, bytes, bytearray)):
-        return []
-    rows: list[list[str]] = []
-    for row in raw_cells:
-        if not isinstance(row, Sequence) or isinstance(row, (str, bytes, bytearray)):
-            continue
-        normalized_row = ["" if cell is None else str(cell).strip() for cell in row]
-        if any(cell for cell in normalized_row):
-            rows.append(normalized_row)
-    return rows
-
-
 def _render_table_text(
     cells: Sequence[Sequence[str]],
     *,
     header_rows: int,
     output_format: str,
 ) -> str:
-    normalized_rows = _pad_rows(cells)
-    if not normalized_rows:
-        return ""
-    normalized_format = output_format.lower()
-    if normalized_format == "tsv":
-        return "\n".join("\t".join(row) for row in normalized_rows)
+    """Render a table with the shared grid renderer (see ``parsecore.tables``)."""
 
-    header_count = min(max(1, header_rows), len(normalized_rows))
-    header = normalized_rows[0]
-    body = normalized_rows[header_count:]
-    separator = ["---"] * len(header)
-    lines = [
-        f"| {' | '.join(header)} |",
-        f"| {' | '.join(separator)} |",
-    ]
-    if not body and header_count > 1:
-        body = normalized_rows[1:]
-    for row in body:
-        lines.append(f"| {' | '.join(row)} |")
-    return "\n".join(lines)
-
-
-def _pad_rows(rows: Sequence[Sequence[str]]) -> list[list[str]]:
-    width = max((len(row) for row in rows), default=0)
-    if width <= 0:
-        return []
-    padded: list[list[str]] = []
-    for row in rows:
-        normalized_row = [str(cell).replace("\n", " ").strip() for cell in row]
-        padded.append(normalized_row + [""] * (width - len(normalized_row)))
-    return padded
+    if output_format.lower() == "tsv":
+        return _render_table_tsv(cells)
+    return _render_table_markdown(cells, header_rows=header_rows)

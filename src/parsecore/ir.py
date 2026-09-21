@@ -7,6 +7,10 @@ import unicodedata
 from typing import Any, Mapping, Sequence
 
 from .models import Block, BlockType, Chunk
+from .tables import (
+    render_markdown as _render_table_markdown,
+    resolve_table_grid,
+)
 
 
 IR_SCHEMA_VERSION = "2026-07-ir"
@@ -672,63 +676,74 @@ def _ir_tables(
                 "cells": [dict(cell) for cell in table.get("cells", []) if isinstance(cell, Mapping)],
             }
         )
-        ir_tables.append(
-            {
-                "table_id": table_id,
-                "stable_table_id": f"{source_doc_id}:tblf:{table_fingerprint[:20]}",
-                "table_fingerprint": table_fingerprint,
-                "source_version_key": source_version_key,
-                "source_doc_id": source_doc_id,
-                "part_doc_id": str(table.get("part_doc_id") or ""),
-                "block_id": block_id,
-                "page_number": page_number,
-                "page_span": page_span,
-                "semantic_role": str(table.get("semantic_role") or "table"),
-                "source_kind": str(table.get("source_kind") or block_source_kind.get(block_id) or "structured_table"),
-                "bbox": table_bbox,
-                "rows": _safe_int(table.get("rows"), default=0),
-                "cols": _safe_int(table.get("cols"), default=0),
-                "header_rows": _safe_int(table.get("header_rows"), default=0),
-                "cells": [dict(cell) for cell in table.get("cells", []) if isinstance(cell, Mapping)],
-                "caption": str(table.get("table_title") or table.get("caption") or ""),
-                "confidence": _optional_float(table.get("confidence"), default=None),
-                "reader_policy": "table",
-                "index_policy": "index_table_summary_and_cells" if table.get("cells") or table.get("text") else "skip_empty_table",
-                "quality_flags": warnings,
-                "continuation": {
-                    "group_id": continuation_group_id,
-                    "is_continuation": bool(
-                        table.get("is_continuation")
-                        or table.get("continued")
-                        or source_metadata.get("is_continuation")
-                        or source_metadata.get("continued")
-                    ),
-                    "continues_from": str(
-                        table.get("continues_from")
-                        or source_metadata.get("continues_from")
-                        or ""
-                    ),
-                    "continues_to": str(
-                        table.get("continues_to")
-                        or source_metadata.get("continues_to")
-                        or ""
-                    ),
-                    "kind": str(
-                        table.get("continuation_kind")
-                        or source_metadata.get("continuation_kind")
-                        or ""
-                    ),
-                },
-                "source_span": _source_span(
-                    page_span=page_span,
-                    source_block_ids=[block_id] if block_id else [],
-                    source_table_ids=[table_id] if table_id else [],
-                    bbox=table_bbox,
-                    bbox_page=page_number,
+        cells = [dict(cell) for cell in table.get("cells", []) if isinstance(cell, Mapping)]
+        grid = resolve_table_grid({"cells": cells})
+        header_rows = _safe_int(table.get("header_rows"), default=0)
+        # Merges live with the cells: the parser records a span, and this is the
+        # only place it is turned into a merge descriptor the Reader can show.
+        # A parser that only produced flat cells yields none.
+        merged_cells = table.get("merged_cells")
+        if not isinstance(merged_cells, list) or not merged_cells:
+            merged_cells = grid.merged_cells()
+        ir_table: dict[str, Any] = {
+            "table_id": table_id,
+            "stable_table_id": f"{source_doc_id}:tblf:{table_fingerprint[:20]}",
+            "table_fingerprint": table_fingerprint,
+            "source_version_key": source_version_key,
+            "source_doc_id": source_doc_id,
+            "part_doc_id": str(table.get("part_doc_id") or ""),
+            "block_id": block_id,
+            "page_number": page_number,
+            "page_span": page_span,
+            "semantic_role": str(table.get("semantic_role") or "table"),
+            "source_kind": str(table.get("source_kind") or block_source_kind.get(block_id) or "structured_table"),
+            "bbox": table_bbox,
+            "rows": _safe_int(table.get("rows"), default=0),
+            "cols": _safe_int(table.get("cols"), default=0),
+            "header_rows": header_rows,
+            "cells": cells,
+            "caption": str(table.get("table_title") or table.get("caption") or ""),
+            "confidence": _optional_float(table.get("confidence"), default=None),
+            "reader_policy": "table",
+            "index_policy": "index_table_summary_and_cells" if cells or table.get("text") else "skip_empty_table",
+            "quality_flags": warnings,
+            "continuation": {
+                "group_id": continuation_group_id,
+                "is_continuation": bool(
+                    table.get("is_continuation")
+                    or table.get("continued")
+                    or source_metadata.get("is_continuation")
+                    or source_metadata.get("continued")
                 ),
-                "provenance": {"provider_id": provider_id},
-            }
-        )
+                "continues_from": str(
+                    table.get("continues_from")
+                    or source_metadata.get("continues_from")
+                    or ""
+                ),
+                "continues_to": str(
+                    table.get("continues_to")
+                    or source_metadata.get("continues_to")
+                    or ""
+                ),
+                "kind": str(
+                    table.get("continuation_kind")
+                    or source_metadata.get("continuation_kind")
+                    or ""
+                ),
+            },
+            "source_span": _source_span(
+                page_span=page_span,
+                source_block_ids=[block_id] if block_id else [],
+                source_table_ids=[table_id] if table_id else [],
+                bbox=table_bbox,
+                bbox_page=page_number,
+            ),
+            "provenance": {"provider_id": provider_id},
+        }
+        if merged_cells:
+            ir_table["merged_cells"] = merged_cells
+            ir_table["header_values"] = grid.header_values(max(1, header_rows))
+        ir_tables.append(ir_table)
     return ir_tables
 
 
@@ -1899,50 +1914,11 @@ def _fallback_block_unit_text(*, block: Mapping[str, Any], table: Mapping[str, A
 
 
 def _render_ir_table_text(table: Mapping[str, Any]) -> str:
-    rows = _table_rows_from_cells(table.get("cells"))
-    body = _markdown_table(rows) if rows else ""
+    rows = resolve_table_grid(table).rows()
+    body = _render_table_markdown(rows) if rows else ""
     caption = str(table.get("caption") or "").strip()
     parts = [part for part in (caption, body) if part]
     return "\n\n".join(parts).strip()
-
-
-def _table_rows_from_cells(cells: Any) -> list[list[str]]:
-    if not isinstance(cells, list):
-        return []
-    rows: dict[int, dict[int, str]] = {}
-    for cell in cells:
-        if not isinstance(cell, Mapping):
-            continue
-        row_index = _safe_int(cell.get("row", cell.get("row_index")), default=0)
-        col_index = _safe_int(cell.get("col", cell.get("col_index")), default=0)
-        rows.setdefault(row_index, {})[col_index] = str(cell.get("text") or "")
-    if not rows:
-        return []
-    width = max((max(row) for row in rows.values() if row), default=-1) + 1
-    if width <= 0:
-        return []
-    return [
-        [rows.get(row_index, {}).get(col_index, "") for col_index in range(width)]
-        for row_index in range(max(rows) + 1)
-    ]
-
-
-def _markdown_table(rows: Sequence[Sequence[str]]) -> str:
-    normalized = [[str(cell).strip() for cell in row] for row in rows]
-    normalized = [row for row in normalized if any(cell for cell in row)]
-    if not normalized:
-        return ""
-    width = max(len(row) for row in normalized)
-    padded = [row + [""] * (width - len(row)) for row in normalized]
-    header = padded[0]
-    separator = ["---"] * width
-    body = padded[1:]
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    lines.extend("| " + " | ".join(row) + " |" for row in body)
-    return "\n".join(lines)
 
 
 def _manifest_source_item_ids(raw_unit: Mapping[str, Any]) -> list[str]:

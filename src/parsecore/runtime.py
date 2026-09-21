@@ -31,6 +31,7 @@ from .provider_failures import PROVIDER_FAILURE_CATEGORIES, classify_provider_fa
 from .private_files import ensure_private_directory
 from .quality import evaluate_parse_quality
 from .run_store import (
+    PublicationPolicyError,
     PublishError,
     RunArtifacts,
     publication_ready,
@@ -966,35 +967,46 @@ class ParseRuntime:
         except PublishError as exc:
             # "Not publishable" is not the same as "the parse failed".
             #
-            # ``needs_review`` means the document parsed and a human must decide:
-            # the run keeps its validation report, the job is not an execution
-            # failure, and the previous published version (if any) stays
-            # authoritative.  ``rejected`` means there is nothing deliverable —
-            # a placeholder result, garbled text, a missing required artifact — so
-            # it follows the normal failure path and the caller sees why.
-            if report.status is ValidationStatus.NEEDS_REVIEW:
-                self.event_logger.log(
-                    "run_not_published_pending_review",
-                    doc_id=request.doc_id,
-                    parse_run_id=run.parse_run_id,
-                    validation_status=report.status.value,
-                    reason=report.reason,
-                )
-                return {
-                    "published": False,
-                    "reason": exc.code,
-                    "message": str(exc),
-                    "parse_run_id": run.parse_run_id,
-                    "doc_id": request.doc_id,
-                    "tenant_id": str(request.tenant_id or "default"),
-                    "execution_status": "succeeded",
-                    "validation_status": report.status.value,
-                    "consumer_signal": state.get("consumer_signal") or "not_ready",
-                    "active_run_id": state.get("active_run_id"),
-                    "publication_generation": state.get("publication_generation", 0),
-                    "validation_report": report.as_payload(),
-                }
-            raise
+            # A conclusion weaker than ``rejected`` (``warning``, ``needs_review``)
+            # means the document parsed and a human has to decide: the run keeps
+            # its validation report, the job is not an execution failure, and the
+            # previous published version (if any) stays authoritative.  Only a
+            # policy refusal is treated this way; a collision, a lost claim or an
+            # unavailable durable index is a real fault and keeps the failure path.
+            #
+            # ``rejected`` means there is nothing deliverable — a placeholder
+            # result, garbled text, a missing required artifact — so it also
+            # follows the normal failure path and the caller sees why.
+            pending_decision = isinstance(exc, PublicationPolicyError) and report.status in {
+                ValidationStatus.WARNING,
+                ValidationStatus.NEEDS_REVIEW,
+            }
+            if not pending_decision:
+                raise
+            self.event_logger.log(
+                "run_not_published_pending_review"
+                if report.status is ValidationStatus.NEEDS_REVIEW
+                else "run_not_published_validation_warning",
+                doc_id=request.doc_id,
+                parse_run_id=run.parse_run_id,
+                validation_status=report.status.value,
+                reason=report.reason,
+                policy_reason=getattr(exc, "policy_reason", ""),
+            )
+            return {
+                "published": False,
+                "reason": exc.code,
+                "message": str(exc),
+                "parse_run_id": run.parse_run_id,
+                "doc_id": request.doc_id,
+                "tenant_id": str(request.tenant_id or "default"),
+                "execution_status": "succeeded",
+                "validation_status": report.status.value,
+                "consumer_signal": state.get("consumer_signal") or "not_ready",
+                "active_run_id": state.get("active_run_id"),
+                "publication_generation": state.get("publication_generation", 0),
+                "validation_report": report.as_payload(),
+            }
         payload = result.as_payload()
         payload["validation_report"] = report.as_payload()
         return payload
