@@ -186,6 +186,25 @@ Ran 1013 tests / OK (skipped=6)
 第 1 片的 `warning` 是内容本身的结论（该片 100 页里触发了校验规则）。为避免"待复核"变成死路，
 本次补齐了复核后的发布入口（第 5.5 节），并在真实样本上跑通了完整链路。
 
+### 5.6 回归门禁状态（本轮未放宽任何阈值）
+
+```text
+.\.venv\Scripts\python.exe tools\self_check.py --profile fast --out var\self-check-fast.json
+unit_tests        1013 tests passed
+runtime_describe  passed
+payload_contracts schemas=8 payloads=8 failed_schemas=0 failed_payloads=0
+corpus_manifest   3/3 entries verified
+regression_suite  failed —— 四项既有漂移，与本轮改动无关（数值与改动前一致）：
+  numeric_heavy_total +44（预算 +2）
+  suspected_header_footer_total +45（预算 +2）
+  total_blocks +9.96%（预算 ±5%）
+  heading_body_binding_rate -0.0784（预算 +0.05）
+```
+
+表格指标未变：`table_ready=1.0000`、`table_cells=44`、`blocks=2285`。四项漂移在本轮之前的
+提交上同样存在（见[待办 1 报告第 5.1 节](r4-todo1-word-merged-table-20260921.md)），属于本轮五项
+待办之外的既有问题；门禁的阈值与基线未做任何放宽，仍然如实退出 1。
+
 ### 5.5 复核后的发布入口（本次补齐）
 
 预览 run 原本只能靠重跑或改配置才有机会进入正式版本；分区父文档加上缺口判定后，这会把
