@@ -23,6 +23,7 @@ from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_proje
 from .tables import (
     TableGrid,
     grid_from_metadata,
+    resolve_table_grid,
     rows_from_table_payload,
 )
 
@@ -4047,6 +4048,14 @@ def _structured_records(
         header_values = table.get("header_values")
         if isinstance(header_values, list) and header_values:
             headers = _stable_record_headers(header_values, _record_col_count(rows))
+        elif header_rows > 1:
+            # A multi-level header: every level a column carries has to reach the
+            # field name, or the second level (a unit, a sub-part) is dropped and
+            # two columns become indistinguishable.
+            headers = _stable_record_headers(
+                resolve_table_grid(table).header_values(header_rows),
+                _record_col_count(rows),
+            )
         elif header_rows > 0:
             headers = _stable_record_headers(rows[0], _record_col_count(rows))
         else:
