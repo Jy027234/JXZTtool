@@ -3931,6 +3931,7 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
             "cells_total",
             "cells_preview_rows",
             "page_span",
+            "source_region",
             "continuation_group_id",
             "table_group_id",
             "continued_table_id",

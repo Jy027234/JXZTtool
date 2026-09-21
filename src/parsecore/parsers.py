@@ -2646,6 +2646,16 @@ class PdfTextParser(ParserAdapter):
                         )
                     )
                     _attach_page_layout_metadata(blocks[-1].metadata, page_layout)
+                    source_region = _pdf_source_region(
+                        kind="pdf_table",
+                        page_number=page_number,
+                        bbox=table.bbox,
+                        page_layout=page_layout,
+                    )
+                    if source_region is not None:
+                        # Lets the reader show the original table image without
+                        # re-deriving where the table was.
+                        blocks[-1].metadata["source_region"] = source_region
                     position += 1
                     continue
                 if kind == "image":
@@ -2671,6 +2681,14 @@ class PdfTextParser(ParserAdapter):
                     if figure.object_name:
                         metadata["object_name"] = figure.object_name
                     _attach_page_layout_metadata(metadata, page_layout)
+                    source_region = _pdf_source_region(
+                        kind="pdf_figure",
+                        page_number=page_number,
+                        bbox=figure.bbox,
+                        page_layout=page_layout,
+                    )
+                    if source_region is not None:
+                        metadata["source_region"] = source_region
                     blocks.append(
                         Block(
                             block_id=f"{request.doc_id}-i-{position}",
@@ -5337,6 +5355,9 @@ class _PageLayout:
     page_number: int
     width: float
     height: float
+    #: Page rotation as the PDF declares it; coordinates are relative to the page
+    #: box after rotation, so a consumer cropping an image needs this to match.
+    rotation: int = 0
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
     figure_regions: list[_FigureRegion] = _dc_field(default_factory=list)
@@ -5390,6 +5411,59 @@ class _OcrStageTimings:
     #: was nothing to enhance).  The caller uses this to keep a merged page's text
     #: out of the page OCR cache.
     regions_enhanced: int = 0
+
+
+def _coerce_page_rotation(value: Any) -> int:
+    try:
+        rotation = int(value or 0) % 360
+    except (TypeError, ValueError):
+        return 0
+    return rotation if rotation in {0, 90, 180, 270} else 0
+
+
+def _pdf_source_region(
+    *,
+    kind: str,
+    page_number: int,
+    bbox: Sequence[float] | None,
+    page_layout: Any,
+) -> dict[str, Any] | None:
+    """Where a region came from, in coordinates a consumer can crop with.
+
+    A page number alone does not let a reader show the original table or figure
+    image: the region has to say which box, in which units, with which origin and
+    page rotation, and how big the page was, so the box can be turned into the
+    fractions an image renderer needs.  Tables and figures share this contract, so
+    one helper serves both.
+    """
+
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x0, top, x1, bottom = (float(value) for value in bbox[:4])
+    except (TypeError, ValueError):
+        return None
+    width = float(getattr(page_layout, "width", 0.0) or 0.0)
+    height = float(getattr(page_layout, "height", 0.0) or 0.0)
+    region: dict[str, Any] = {
+        "kind": kind,
+        "page_number": int(page_number),
+        "bbox": (x0, top, x1, bottom),
+        "unit": "pt",
+        "origin": "top_left",
+        "rotation_degrees": _coerce_page_rotation(getattr(page_layout, "rotation", 0)),
+        "page_width": width,
+        "page_height": height,
+    }
+    if width > 0.0 and height > 0.0:
+        # Fractional box, so a renderer does not have to know the page size twice.
+        region["crop_fraction"] = (
+            round(x0 / width, 6),
+            round(top / height, 6),
+            round(x1 / width, 6),
+            round(bottom / height, 6),
+        )
+    return region
 
 
 @dataclass(slots=True)
@@ -6066,6 +6140,7 @@ def _extract_pdfplumber_layout(
                     page_number=index,
                     width=float(page.width or 0.0),
                     height=float(page.height or 0.0),
+                    rotation=_coerce_page_rotation(getattr(page, "rotation", 0)),
                     text_without_tables=text_without_tables,
                     tables=tables,
                     figure_regions=figure_regions,

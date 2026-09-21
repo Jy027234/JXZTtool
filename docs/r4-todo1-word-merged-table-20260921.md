@@ -179,9 +179,9 @@ Ran 980 tests / OK (skipped=6)
    `provenance["block_type"]` 表达。迁移会牵动知识单元类型判定，放在表格链路稳定后做。
 2. **Excel / Markdown 逐样本扩展**：Excel 现有 `cells` + `merged_cells` 继续复用，未改；
    其原生 `merged_cells` 与 Word/PDF/Docling 的跨度表达尚未统一到同一形状。
-3. **Word 物理页码**：Word block 仍写 `page=1`，真实物理页码未知。该字段是兼容字段，页投影
-   同时给出 `logical_pages[]` 说明其逻辑含义，本次未改（改为缺省会牵动表格 ID、记录页码与
-   coverage 分组，需要单独一批）。
+3. **PDF 来源定位**：表块与图片块现在带 `source_region`（页号、点坐标、原点、页面旋转、页尺寸
+   与 `crop_fraction`），见[待办 3 报告第 7 节](r4-todo3-pdf-catalog-table-20260921.md)；
+   Word 侧仍用块/单元格标识，不填物理页码，Excel 的工作表与单元格范围沿用原有字段。
 4. **Docling 的图片/公式落盘**：图片目前只保留图注与来源，未保存原图；公式只保留转写文本并标
    未核验，没有做区域图保留。
 5. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
