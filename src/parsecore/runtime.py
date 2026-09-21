@@ -21,7 +21,15 @@ from .config import (
 from .publication import ARTIFACT_PROFILES, ValidationStatus
 from .contracts import ChunkBuilder, EmbeddingProvider, IndexAdapter, JobStore, ParserAdapter, ProductAdapter, RerankProvider, TranslationAdapter
 from .events import JobEventLogger, ParseStageTimer
-from .models import Chunk, ChunkSearchHit, ParseJobState, ParseOutcome, ParseRequest, StructureSearchHit
+from .models import (
+    Chunk,
+    ChunkSearchHit,
+    ParseJob,
+    ParseJobState,
+    ParseOutcome,
+    ParseRequest,
+    StructureSearchHit,
+)
 from .ocr_trace import build_ocr_decision_trace
 from .payload_schemas import payload_schema_registry
 from .pdf_parts import child_doc_id, create_pdf_part_file, create_pdf_part_files, detect_pdf_page_count, plan_pdf_parts
@@ -1879,6 +1887,56 @@ class ParseRuntime:
             "message": "cancelled",
         }
 
+    def _served_run_job(
+        self, *, publication: Mapping[str, Any], tenant_id: str
+    ) -> Any | None:
+        """The job behind the run a read is serving, if it can be resolved.
+
+        A document can have several runs: the published one holds the content the
+        live tier serves, and a newer run may exist without being published (a
+        preview).  Reporting the newest job next to the published content labels
+        that content with another run's identity, so a read has to name the job
+        behind the run it actually served.
+
+        The run record is the authority: a run published through the API may have
+        no job row at all, and a legacy import never had one, so a minimal job
+        identity is rebuilt from the run when the store has no such job.
+        """
+
+        if self.run_store is None:
+            return None
+        served_run_id = str(publication.get("served_run_id") or "").strip()
+        if not served_run_id:
+            return None
+        try:
+            record = self.run_store.get_run(parse_run_id=served_run_id)
+        except Exception:
+            return None
+        job_id = str(getattr(record, "job_id", "") or "").strip()
+        if not job_id:
+            return None
+        get_job = getattr(self.job_store, "get_job", None)
+        if callable(get_job):
+            try:
+                job = get_job(job_id=job_id)
+            except Exception:
+                job = None
+            if job is not None:
+                return job
+        try:
+            return ParseJob(
+                job_id=job_id,
+                doc_id=str(getattr(record, "doc_id", "") or ""),
+                file_path="",
+                state=ParseJobState.DONE,
+                options=dict(getattr(record, "options", {}) or {}),
+                tenant_id=str(getattr(record, "tenant_id", "") or tenant_id),
+                created_at=str(getattr(record, "created_at", "") or ""),
+                updated_at=str(getattr(record, "updated_at", "") or ""),
+            )
+        except Exception:
+            return None
+
     def get_document(
         self,
         *,
@@ -1915,6 +1973,9 @@ class ParseRuntime:
             tenant_id=getattr(latest_job, "tenant_id", tenant_id),
             view_types=document_view_types,
         ) if latest_job is not None else {}
+        publication = self.publication_read_context(
+            doc_id=doc_id, tenant_id=normalized_tenant
+        )
         describe_document = getattr(self.index, "describe_document", None)
         index_manifest = None
         if callable(describe_document):
@@ -1927,7 +1988,11 @@ class ParseRuntime:
             )
         return {
             "doc_id": doc_id,
-            "job": latest_job,
+            # The content above comes from the live tier, which the published run
+            # owns.  A newer unpublished run must therefore not be reported here as
+            # the identity of this content (it appears as `publication.preview`).
+            "job": self._served_run_job(publication=publication, tenant_id=normalized_tenant)
+            or latest_job,
             "blocks": blocks,
             "chunks": chunks,
             "document_views": document_views,
@@ -1937,9 +2002,7 @@ class ParseRuntime:
             "quality_gate": self.quality_gate_config(),
             # P0-03 batch 2: every projection of this snapshot reports which run
             # the read served, so a consumer can verify agreement.
-            "publication": self.publication_read_context(
-                doc_id=doc_id, tenant_id=normalized_tenant
-            ),
+            "publication": publication,
         }
 
     def get_document_records_projection(
