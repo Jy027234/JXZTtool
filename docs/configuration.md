@@ -142,7 +142,7 @@ allow_mock_providers = false
 | --- | ---: | --- | --- |
 | `allow_mock_providers` | `false` | 布尔 | 允许 `fake`/`test`/`stub` provider。它们产出非正式结果，只用于联调与冒烟；开启后 `/health` 会把这些能力列进 `mock_capabilities`。生产必须保持 `false`。 |
 | `run_publication_enabled` | `true` | 布尔 | P0-03：允许通过 run store 发布文档版本。仅当存储后端能原子切换 active 指针（当前为 SQLite）时生效；否则 `publish_run()` 返回 `run_store_not_ready`，`/v1/parse/documents/{doc_id}/publication` 报 `not_ready`，绝不降级为非原子发布。设为 `false` 即退回本批次之前的单版本行为。 |
-| `run_artifact_profile` | `default` | `default` / `rag` / `records` / `assets-only` | 封存时按哪个 profile 判定必需产物。`default` 要求 blocks 与 reader 页视图，RAG 为 optional；`rag` 额外要求 RAG 产物且需要持久索引；`records`/`assets-only` 要求 export/assets，当前尚无 staged 通道，会封存失败。 |
+| `run_artifact_profile` | `default` | `default` / `rag` / `records` / `assets-only` | 封存时按哪个 profile 判定必需产物。`default` 要求 blocks 与 reader 页视图，RAG 为 optional；`rag` 额外要求 RAG 产物且需要持久索引；`assets-only` 要求 blocks 与 **assets**（区域素材描述 + 文件摘要校验，需同时开启 `region_assets`，否则封存报 `required artifacts are missing or empty: assets`）；`records` 要求 export，当前尚无 staged 通道，会封存失败。 |
 | `tenant_scope` | `trusted` | `trusted` / `enforced` | P0-07：谁决定请求属于哪个租户。`trusted` 保持既有语义（宿主负责认证，`tenant_id` 参数即租户）。`enforced` 要求宿主通过 `tenant_header` 注入已认证租户，参数只能复述，不一致返回 `403 tenant_mismatch`，缺少身份返回 `403 tenant_identity_required`。对外多租户开放前必须设为 `enforced`。 |
 | `region_assets` | `false` | 布尔 | 待办 1/3：把表区/图片区的**原图**落盘（`<object_store>/regions/<doc_id>/<block_id>.png`），块元数据加 `asset` 描述（含 `sha256`/字节数/尺寸/来源框，`verified: false`）。只写 `local://` 对象存储。默认关闭：297 页目录图册实测 455 张、约 15 MB、多花约 16 秒，不看不用的图不必先渲染。 |
 | `region_asset_resolution` | `144` | 36–600 | 区域素材渲染分辨率（dpi）。越高越清晰也越慢。 |
