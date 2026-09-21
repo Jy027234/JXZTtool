@@ -15,7 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from parsecore.config import load_settings  # noqa: E402
-from parsecore.llm import LlmBoundaryRefiner, build_llm_client  # noqa: E402
+from parsecore.llm import (  # noqa: E402
+    LlmBoundaryRefiner,
+    RefinerRequestState,
+    build_llm_client,
+)
 from parsecore.models import ParseRequest  # noqa: E402
 from parsecore.parsers import build_parser  # noqa: E402
 from parsecore.quality import evaluate_blocks  # noqa: E402
@@ -25,7 +29,22 @@ def main() -> int:
     settings = load_settings(ROOT / "parsecore.toml")
     overridden = dataclasses.replace(settings.providers.llm, enabled=True)
     client = build_llm_client(overridden)
-    refiner = LlmBoundaryRefiner(client, max_calls_per_doc=50) if client else None
+    refiner: LlmBoundaryRefiner | None = (
+        LlmBoundaryRefiner(client, max_calls_per_doc=50) if client else None
+    )
+    # The refiner keeps its counters on the per-request state (two documents parsed
+    # through one shared refiner must not reset each other's budget), so a smoke run
+    # records the state it handed to this parse.
+    states: list[RefinerRequestState] = []
+    if refiner is not None:
+        original_begin_request = refiner.begin_request
+
+        def _begin_request() -> RefinerRequestState:
+            state = original_begin_request()
+            states.append(state)
+            return state
+
+        refiner.begin_request = _begin_request  # type: ignore[method-assign]
 
     pdf_cfg = next(p for p in settings.parsers if p.name == "pdf-text")
     parser = build_parser(
@@ -47,8 +66,12 @@ def main() -> int:
     table_blocks = [b for b in blocks if b.type.value == "table"]
     para_blocks = [b for b in blocks if b.type.value == "paragraph"]
     print(f"elapsed={elapsed:.1f}s blocks={len(blocks)} paragraphs={len(para_blocks)} tables={len(table_blocks)}")
-    if refiner is not None:
-        print(f"llm_calls_used={refiner.calls_used} llm_calls_failed={refiner.calls_failed}")
+    state = states[-1] if states else None
+    if state is not None:
+        print(
+            f"llm_calls_used={state.calls_used} llm_calls_failed={state.calls_failed}"
+            f" llm_rejections={dict(state.rejections)}"
+        )
 
     report = evaluate_blocks(blocks)
     print(

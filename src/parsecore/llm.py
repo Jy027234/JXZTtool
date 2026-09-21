@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -171,6 +172,16 @@ class LlmBoundaryRefiner:
     malformed JSON, hard call cap reached) the original paragraph is kept,
     so this layer can never cause a parse regression.
 
+    **The model never writes the text.**  The program splits the paragraph at
+    legal boundaries of its own (line breaks, numbered/lettered items,
+    NOTE/WARNING/CAUTION blocks), numbers those fragments, and asks the model
+    only for the *relations* between them: which fragments form one paragraph
+    and in what order.  The result is assembled from the original fragments, so
+    a model answer can move boundaries but cannot rewrite a number, a part
+    number or a unit — the previous protocol asked for the rewritten text back
+    and accepted it whenever it was long enough, which let ``AB-123 torque 25``
+    come back as ``AB-124 torque 95``.
+
     Execution state is **per request**, not per instance.  The refiner is built
     once in ``bootstrap`` and injected into a shared parser, so instance-level
     counters meant that one document's ``reset()`` cleared another document's
@@ -180,10 +191,10 @@ class LlmBoundaryRefiner:
     """
 
     _DEFAULT_SYSTEM = (
-        "You split aviation/maintenance manual paragraphs into structurally "
-        "coherent sub-paragraphs. Preserve original wording exactly; only insert "
-        "boundaries between numbered/lettered items, NOTE/WARNING/CAUTION blocks, "
-        "and SB-style procedural sections. Output a strict JSON array of strings."
+        "You decide paragraph boundaries in aviation/maintenance manual text. "
+        "You are given numbered fragments of one paragraph. Reply with the "
+        "relations between them only: which fragments belong together and in "
+        "what order. Never retype, translate, correct or summarise the text."
     )
 
     def __init__(
@@ -248,8 +259,17 @@ class LlmBoundaryRefiner:
 class RefinerRequestState:
     """Per-request refinement state: call budget, cache and counters."""
 
-    _SYSTEM_SUFFIX = (
-        " Respond ONLY with a JSON array of strings, no commentary, no markdown fence."
+    _INSTRUCTION = (
+        "Fragments of one paragraph, already split at legal boundaries:\n\n"
+        "{fragments}\n\n"
+        "Group the fragments into paragraphs and order those groups. Reply with "
+        "exactly this JSON object:\n"
+        '{{"groups": [[1, 2], [3]], "order": [0, 1], "reason": "..."}}\n'
+        "- groups: each group lists the fragment ids to join, in reading order\n"
+        "- order: the order of the groups, as indexes into groups\n"
+        "- every fragment id 1..{count} must appear exactly once\n"
+        "- do not retype or rewrite any text\n"
+        "Reply with that JSON object only, no commentary, no markdown fence."
     )
 
     def __init__(
@@ -265,6 +285,8 @@ class RefinerRequestState:
         self._cache: dict[str, list[str]] = {}
         self._calls_used = 0
         self._calls_failed = 0
+        self._rejections: dict[str, int] = {}
+        self._last_rejection = ""
 
     @property
     def calls_used(self) -> int:
@@ -278,6 +300,20 @@ class RefinerRequestState:
     def calls_remaining(self) -> int:
         return max(0, self._max_calls - self._calls_used)
 
+    @property
+    def rejections(self) -> Mapping[str, int]:
+        """Why refinement was refused, counted by reason code.
+
+        A refusal keeps the original paragraph; the reason is what makes the
+        refusal auditable instead of a silent no-op.
+        """
+
+        return dict(self._rejections)
+
+    @property
+    def last_rejection(self) -> str:
+        return self._last_rejection
+
     def refine_paragraph(self, paragraph: str) -> list[str]:
         """Return refined sub-paragraphs, or ``[paragraph]`` on any failure."""
 
@@ -285,65 +321,241 @@ class RefinerRequestState:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        if self._calls_used >= self._max_calls:
+        fragments = _split_refine_fragments(paragraph)
+        if len(fragments) < 2:
+            # No legal boundary to move: there is nothing for the model to decide,
+            # so this paragraph costs no call at all.
+            self._reject("no_legal_boundary")
+            self._cache[key] = [paragraph]
             return [paragraph]
-        prompt = (
-            "Split the following paragraph into structurally coherent "
-            "sub-paragraphs. Preserve text exactly. Respond ONLY with a JSON "
-            "array of strings, no commentary, no markdown fence.\n\n"
-            "PARAGRAPH:\n" + paragraph
-        )
+        if len(fragments) > _MAX_REFINE_FRAGMENTS:
+            self._reject("too_many_fragments")
+            self._cache[key] = [paragraph]
+            return [paragraph]
+        if self._calls_used >= self._max_calls:
+            self._reject("call_budget_exhausted")
+            self._cache[key] = [paragraph]
+            return [paragraph]
         try:
             self._calls_used += 1
-            response = self._client.complete(prompt, system=self._system)
+            response = self._client.complete(
+                self._build_prompt(fragments), system=self._system
+            )
         except (LlmRequestError, LlmConfigurationError):
             self._calls_failed += 1
+            self._reject("request_failed")
             self._cache[key] = [paragraph]
             return [paragraph]
-        parts = _parse_json_string_array(response)
-        if not parts:
+        parts, reason = _assemble_refined_parts(
+            response=response, fragments=fragments, original=paragraph
+        )
+        if parts is None:
             self._calls_failed += 1
-            self._cache[key] = [paragraph]
-            return [paragraph]
-        # Sanity guard: refined output must collectively contain most of the
-        # original characters; otherwise the model rewrote content. Reject.
-        original_compact = "".join(paragraph.split())
-        refined_compact = "".join("".join(part.split()) for part in parts)
-        if len(refined_compact) < int(len(original_compact) * 0.85):
-            self._calls_failed += 1
+            self._reject(reason)
             self._cache[key] = [paragraph]
             return [paragraph]
         self._cache[key] = parts
         return parts
 
+    def _build_prompt(self, fragments: Sequence["_RefineFragment"]) -> str:
+        lines = "\n".join(
+            f"{fragment.fragment_id}| {fragment.display}" for fragment in fragments
+        )
+        return self._INSTRUCTION.format(fragments=lines, count=len(fragments))
 
-def _parse_json_string_array(response: str) -> list[str] | None:
-    """Best-effort extraction of a JSON string array from an LLM response."""
+    def _reject(self, reason: str) -> None:
+        self._last_rejection = reason
+        self._rejections[reason] = self._rejections.get(reason, 0) + 1
 
-    text = response.strip()
+
+#: Fragments with their own id and the exact source slice they came from.
+@dataclass(slots=True, frozen=True)
+class _RefineFragment:
+    fragment_id: int
+    raw: str
+    display: str
+
+
+#: Boundaries the model may choose between.  Only boundaries the source itself
+#: provides are offered, so a split can never land inside a word, a number or a
+#: part number -- the program decides what is legal, the model only picks.
+_REFINE_MARKER_BOUNDARY = re.compile(
+    r"(?<=[.;:!?])\s+(?=(?:\(\d{1,3}\)|\d{1,3}[.)]\s|[a-z][.)]\s"
+    r"|note\b|warning\b|caution\b|注\s*[:：]|步骤\s*\d))",
+    re.IGNORECASE,
+)
+
+#: A prompt with more fragments than this is not worth sending (and a huge
+#: paragraph is exactly the case where the answer is least reliable).
+_MAX_REFINE_FRAGMENTS = 60
+
+
+def _split_refine_fragments(paragraph: str) -> tuple[_RefineFragment, ...]:
+    """Split at the paragraph's own legal boundaries, keeping every character.
+
+    ``"".join(fragment.raw for fragment in fragments) == paragraph`` holds, so
+    the assembled result can only ever be a re-grouping of the original text.
+    """
+
+    if not paragraph.strip():
+        return ()
+    boundaries = {0, len(paragraph)}
+    for index, char in enumerate(paragraph):
+        if char == "\n" and index + 1 < len(paragraph):
+            boundaries.add(index + 1)
+    for match in _REFINE_MARKER_BOUNDARY.finditer(paragraph):
+        if 0 < match.end() < len(paragraph):
+            boundaries.add(match.end())
+    ordered = sorted(boundaries)
+    fragments: list[_RefineFragment] = []
+    pending = ""
+    for start, end in zip(ordered, ordered[1:]):
+        raw = paragraph[start:end]
+        display = raw.strip()
+        if not display:
+            # Whitespace-only slice: it belongs to a neighbouring fragment and is
+            # not worth an id of its own.
+            pending += raw
+            continue
+        fragments.append(
+            _RefineFragment(
+                fragment_id=len(fragments) + 1, raw=pending + raw, display=display
+            )
+        )
+        pending = ""
+    if pending and fragments:
+        last = fragments[-1]
+        fragments[-1] = _RefineFragment(
+            fragment_id=last.fragment_id, raw=last.raw + pending, display=last.display
+        )
+    if "".join(fragment.raw for fragment in fragments) != paragraph:
+        # The slices must reconstruct the source exactly; if they ever do not,
+        # there is nothing safe to send and the caller keeps the paragraph.
+        return ()
+    return tuple(fragments)
+
+
+def _assemble_refined_parts(
+    *,
+    response: str,
+    fragments: Sequence[_RefineFragment],
+    original: str,
+) -> tuple[list[str] | None, str]:
+    """Turn a model answer into paragraphs, or explain why it was refused.
+
+    The answer is only allowed to say *which* fragments go together and in what
+    order.  Anything else -- an unknown id, a dropped or repeated fragment, a
+    group that is not a list, an order that is not a permutation -- is refused,
+    and the caller keeps the original paragraph.
+    """
+
+    plan = _parse_refine_plan(response)
+    if plan is None:
+        return None, "invalid_response"
+    count = len(fragments)
+    seen: list[int] = []
+    for group in plan.groups:
+        if not group:
+            return None, "empty_group"
+        for fragment_id in group:
+            if fragment_id < 1 or fragment_id > count:
+                return None, "unknown_fragment"
+            seen.append(fragment_id)
+    if len(seen) != len(set(seen)):
+        return None, "duplicate_fragment"
+    if set(seen) != set(range(1, count + 1)):
+        return None, "missing_fragment"
+    if plan.order is not None and sorted(plan.order) != list(range(len(plan.groups))):
+        return None, "invalid_order"
+    groups = plan.groups
+    if plan.order is not None:
+        groups = tuple(groups[index] for index in plan.order)
+    parts: list[str] = []
+    for group in groups:
+        text = "".join(fragments[fragment_id - 1].raw for fragment_id in group).strip()
+        if text:
+            parts.append(text)
+    if not parts:
+        return None, "empty_result"
+    # Defence in depth. The ids already cover every fragment exactly once, so the
+    # result is a permutation of verbatim slices by construction; comparing the
+    # multisets fails closed if the assembly itself is ever broken. The comparison
+    # is order-insensitive because reordering fragments is a legal answer.
+    selected = sorted(_compact(fragments[fragment_id - 1].raw) for group in groups for fragment_id in group)
+    expected = sorted(_compact(fragment.raw) for fragment in fragments)
+    if selected != expected:
+        return None, "assembly_mismatch"
+    if len(parts) == 1 and _compact(parts[0]) == _compact(original):
+        return None, "no_change"
+    return parts, ""
+
+
+@dataclass(slots=True, frozen=True)
+class _RefinePlan:
+    groups: tuple[tuple[int, ...], ...]
+    order: tuple[int, ...] | None
+
+
+def _compact(text: str) -> str:
+    """The text with all whitespace removed, for verbatim comparison."""
+
+    return "".join(str(text or "").split())
+
+
+def _parse_refine_plan(response: str) -> _RefinePlan | None:
+    """Best-effort extraction of the relations object from an LLM response."""
+
+    payload = _extract_json_object(response)
+    if payload is None:
+        return None
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        return None
+    groups: list[tuple[int, ...]] = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, list):
+            return None
+        group: list[int] = []
+        for value in raw_group:
+            # A stringified id is a formatting slip, not a semantic one.
+            if isinstance(value, str) and value.strip().isdigit():
+                value = int(value.strip())
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+            group.append(value)
+        groups.append(tuple(group))
+    raw_order = payload.get("order")
+    order: tuple[int, ...] | None = None
+    if raw_order is not None:
+        if not isinstance(raw_order, list) or not raw_order:
+            return None
+        order_values: list[int] = []
+        for value in raw_order:
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                value = int(value.strip())
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+            order_values.append(value)
+        order = tuple(order_values)
+    return _RefinePlan(groups=tuple(groups), order=order)
+
+
+def _extract_json_object(response: str) -> Mapping[str, Any] | None:
+    """Read the first JSON object in a response, tolerating a markdown fence."""
+
+    text = str(response or "").strip()
     if text.startswith("```"):
-        # Strip markdown fence if the model added one despite the instruction.
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end <= start:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
         return None
-    payload = text[start : end + 1]
     try:
-        data = json.loads(payload)
+        payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
-    if not isinstance(data, list):
-        return None
-    items: list[str] = []
-    for entry in data:
-        if not isinstance(entry, str):
-            return None
-        stripped = entry.strip()
-        if stripped:
-            items.append(stripped)
-    return items or None
+    return payload if isinstance(payload, Mapping) else None
 
