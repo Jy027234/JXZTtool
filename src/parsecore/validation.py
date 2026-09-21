@@ -343,7 +343,29 @@ def validate_run(
                 )
             )
 
-    # 6. Optional artifact misses are informational: a deployment that does not
+    # 6. Table grids must stay inside their declared shape and must not assign two
+    #    values to one position.  This is the check the table work asks for: a grid
+    #    that is out of range or overlapping is not a cosmetic defect, it means the
+    #    column a value belongs to is unknown.
+    table_defects = _table_grid_defects(blocks)
+    if table_defects:
+        metrics["table_grid_defects"] = table_defects
+        rules.append(
+            ValidationRule(
+                code="table_grid_invalid",
+                status=ValidationStatus.WARNING,
+                message=(
+                    "table cells are out of the declared grid or share a position: "
+                    + ", ".join(table_defects[:5])
+                    + (" …" if len(table_defects) > 5 else "")
+                ),
+                metric="table_grid_defects",
+                observed=len(table_defects),
+                threshold=0,
+            )
+        )
+
+    # 7. Optional artifact misses are informational: a deployment that does not
     #    vectorise must not be forced onto the warning policy just because RAG
     #    artifacts are absent.
     if degraded_optional:
@@ -363,6 +385,74 @@ def validate_run(
         extra_metrics=metrics,
         policy_version=str(policy_version or DEFAULT_VALIDATION_POLICY.version),
     )
+
+
+def _table_grid_defects(blocks: Iterable[Any]) -> list[str]:
+    """Table blocks whose cells fall outside the grid or collide in it.
+
+    A cell that sits outside ``rows``/``cols``, or two cells claiming one grid
+    position, means a value's column is unknown: the table cannot be turned into
+    records honestly.  A parser that never published cell positions is not judged
+    here, and neither is a table read as plain rows.
+    """
+
+    defects: list[str] = []
+    for block in blocks:
+        metadata = getattr(block, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            continue
+        cells = metadata.get("table_cells")
+        if not isinstance(cells, Sequence) or isinstance(cells, (str, bytes, bytearray)):
+            continue
+        with_positions = [
+            cell
+            for cell in cells
+            if isinstance(cell, Mapping)
+            and cell.get("row_index") is not None
+            and cell.get("col_index") is not None
+        ]
+        if not with_positions:
+            continue
+        block_id = str(getattr(block, "block_id", "") or "table")
+        row_count = _positive_int(metadata.get("rows"))
+        col_count = _positive_int(metadata.get("cols"))
+        seen: set[tuple[int, int]] = set()
+        out_of_range = 0
+        overlapping = 0
+        for cell in with_positions:
+            row_index = _non_negative_int(cell.get("row_index"))
+            col_index = _non_negative_int(cell.get("col_index"))
+            if row_index is None or col_index is None:
+                out_of_range += 1
+                continue
+            if row_count and row_index >= row_count:
+                out_of_range += 1
+            if col_count and col_index >= col_count:
+                out_of_range += 1
+            if (row_index, col_index) in seen:
+                overlapping += 1
+            seen.add((row_index, col_index))
+        if out_of_range:
+            defects.append(f"{block_id}:{out_of_range}_cells_out_of_range")
+        if overlapping:
+            defects.append(f"{block_id}:{overlapping}_cells_overlap")
+    return defects
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _non_negative_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _reading_order_confidences(blocks: Iterable[Any]) -> tuple[float | None, ...]:

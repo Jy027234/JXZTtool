@@ -8,6 +8,7 @@ import hashlib
 import importlib
 import importlib.util
 import inspect
+import math
 import os
 import re
 import shutil
@@ -2669,11 +2670,133 @@ class PdfTextParser(ParserAdapter):
                 position += 1
         if self._merge_cross_page_enabled:
             blocks = _merge_cross_page_paragraph_blocks(blocks)
+        _link_table_continuations(blocks, doc_id=request.doc_id)
         if len(blocks) == 1:
             raise RuntimeError("No extractable text found in PDF")
         result = tuple(blocks)
         self._store_cached_blocks(request, result)
         return result
+
+
+def _table_row_labels(cells: Sequence[Sequence[str]], *, header_rows: int = 1) -> tuple[str, ...]:
+    """The first column of a table, without its header rows."""
+
+    if header_rows <= 0:
+        return tuple(_normalize_inline_whitespace(row[0]) for row in cells if row)
+    return tuple(
+        _normalize_inline_whitespace(row[0]) for row in list(cells)[header_rows:] if row
+    )
+
+
+def _table_header_signature(cells: Sequence[Sequence[str]]) -> tuple[str, ...]:
+    if not cells:
+        return ()
+    return tuple(_normalize_inline_whitespace(cell) for cell in cells[0])
+
+
+#: How many pages apart two tables may be and still be one table continued.  Two
+#: pages covers the usual catalogue layout, where a figure page sits between the
+#: pages of a wide parts table.
+_TABLE_CONTINUATION_MAX_PAGE_GAP = 2
+
+
+def _table_continuation_kind(
+    previous: Sequence[Sequence[str]], current: Sequence[Sequence[str]]
+) -> str:
+    """How the table on the next page continues the one before it.
+
+    A catalogue table is often wider than the page: the same rows come back with
+    another block of columns, so the row labels repeat and the header row changes
+    (``column_continuation``).  A table longer than the page instead repeats its
+    header and brings new rows (``row_continuation``).  Telling them apart is what
+    lets a consumer know whether a repeated label is the same item or a new one.
+    """
+
+    if not previous or not current:
+        return ""
+    previous_labels = _table_row_labels(previous)
+    current_labels = _table_row_labels(current)
+    if (
+        len(previous_labels) >= 2
+        and previous_labels == current_labels
+        and len(previous) == len(current)
+        and _table_header_signature(previous) != _table_header_signature(current)
+    ):
+        return "column_continuation"
+    previous_header = _table_header_signature(previous)
+    if (
+        len(previous_header) >= 2
+        and any(previous_header)
+        and previous_header == _table_header_signature(current)
+        and previous_labels != current_labels
+    ):
+        return "row_continuation"
+    return ""
+
+
+def _link_table_continuations(blocks: Sequence[Block], *, doc_id: str) -> None:
+    """Record that a table continues on the following page.
+
+    The physical tables stay as they are -- the reader still shows one grid per
+    page -- but each one now says which group it belongs to, which table it
+    continues, and how (columns or rows).  Without this a consumer sees unrelated
+    tables that repeat the same row labels, and cannot tell a continued table from
+    a new one.
+    """
+
+    last_table_by_page: dict[int, Block] = {}
+    group_members: dict[str, list[Block]] = {}
+    group_start_page: dict[str, int] = {}
+    previous: Block | None = None
+    for block in blocks:
+        if block.type != BlockType.TABLE:
+            continue
+        metadata = block.metadata if isinstance(block.metadata, dict) else {}
+        try:
+            page_number = int(metadata.get("page") or 0)
+        except (TypeError, ValueError):
+            page_number = 0
+        cells = metadata.get("cells")
+        rows = cells if isinstance(cells, list) else []
+        if previous is not None and page_number > 0:
+            previous_metadata = previous.metadata if isinstance(previous.metadata, dict) else {}
+            previous_page = int(previous_metadata.get("page") or 0)
+            gap = page_number - previous_page
+            if 0 < gap <= _TABLE_CONTINUATION_MAX_PAGE_GAP:
+                kind = _table_continuation_kind(previous_metadata.get("cells") or [], rows)
+                # A repeated header is only meaningful on the immediately following
+                # page; matching row labels are strong enough to bridge one figure
+                # page, which is how catalogue tables usually continue.
+                if kind and (gap == 1 or kind == "column_continuation"):
+                    group_id = str(
+                        previous_metadata.get("continuation_group_id")
+                        or f"{doc_id}:tblgrp:p{previous_page}"
+                    )
+                    group_start_page.setdefault(group_id, previous_page)
+                    for target in (previous_metadata, metadata):
+                        target["continuation_group_id"] = group_id
+                        target["table_group_id"] = group_id
+                        target["continuation_kind"] = kind
+                    metadata["is_continuation"] = True
+                    metadata["continues_from"] = previous.block_id
+                    previous_metadata["continues_to"] = block.block_id
+                    members = group_members.setdefault(group_id, [previous])
+                    if block not in members:
+                        members.append(block)
+        if page_number > 0:
+            last_table_by_page[page_number] = block
+            previous = block
+    # The whole group carries the span it covers, not just the pair that last met.
+    for group_id, members in group_members.items():
+        pages = [
+            int(member.metadata.get("page") or 0)
+            for member in members
+            if isinstance(member.metadata, dict)
+        ]
+        span = [group_start_page.get(group_id, min(pages)), max(pages)]
+        for member in members:
+            if isinstance(member.metadata, dict):
+                member.metadata["page_span"] = list(span)
 
 
 def _split_pdf_page_text(text: str) -> list[str]:
@@ -5074,6 +5197,208 @@ def _select_pdf_layout_pages(
     return None if work is None else work[0]
 
 
+def _pdf_char_reading_frame(
+    chars: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The reading direction of a run of characters, or ``None`` when upright.
+
+    A wide catalogue table often rotates its column headers 90° so they fit in a
+    narrow column.  The page's own text is upright, so nothing flags the cell as
+    unusual, and a left-to-right line reader returns those characters in the
+    wrong order: ``SCREW OF THE COVER`` comes back as ``REVOC EHT FO WERCS``.
+
+    The direction is read from the character matrices rather than guessed from the
+    page rotation: pdfminer's ``(a, b, c, d, e, f)`` maps text space to user
+    space (y up), so the advance direction is ``(a, -b)`` and the direction of the
+    next line is ``(-c, d)`` once both are expressed in pdfplumber's y-down space.
+    """
+
+    upright = 0
+    frames: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for char in chars:
+        matrix = char.get("matrix")
+        if not matrix or len(matrix) < 4:
+            continue
+        try:
+            a, b, c, d = (float(matrix[0]), float(matrix[1]), float(matrix[2]), float(matrix[3]))
+        except (TypeError, ValueError):
+            continue
+        advance = (a, -b)
+        down = (-c, d)
+        advance_length = math.hypot(*advance)
+        if advance_length <= 0.0:
+            continue
+        advance = (advance[0] / advance_length, advance[1] / advance_length)
+        down_length = math.hypot(*down)
+        down = (
+            (down[0] / down_length, down[1] / down_length) if down_length > 0.0 else (0.0, 1.0)
+        )
+        if (
+            abs(advance[0] - 1.0) <= 0.01
+            and abs(advance[1]) <= 0.01
+            and abs(down[0]) <= 0.01
+            and abs(down[1] - 1.0) <= 0.01
+        ):
+            upright += 1
+            continue
+        frames.append((advance, down))
+    if not frames or upright >= len(frames):
+        return None
+    advance_x = sum(frame[0][0] for frame in frames) / len(frames)
+    advance_y = sum(frame[0][1] for frame in frames) / len(frames)
+    down_x = sum(frame[1][0] for frame in frames) / len(frames)
+    down_y = sum(frame[1][1] for frame in frames) / len(frames)
+    advance_length = math.hypot(advance_x, advance_y)
+    down_length = math.hypot(down_x, down_y)
+    if advance_length <= 0.0 or down_length <= 0.0:
+        return None
+    return (
+        (advance_x / advance_length, advance_y / advance_length),
+        (down_x / down_length, down_y / down_length),
+    )
+
+
+def _text_along_char_direction(chars: Sequence[Mapping[str, Any]]) -> str | None:
+    """Read characters along their own direction, or ``None`` if they are upright."""
+
+    frame = _pdf_char_reading_frame(chars)
+    if frame is None:
+        return None
+    (advance_x, advance_y), (down_x, down_y) = frame
+    placed: list[tuple[float, float, float, Mapping[str, Any]]] = []
+    sizes: list[float] = []
+    for char in chars:
+        text = str(char.get("text") or "")
+        if not text:
+            continue
+        try:
+            x0 = float(char["x0"])
+            x1 = float(char["x1"])
+            top = float(char["top"])
+            bottom = float(char["bottom"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        center_x = (x0 + x1) / 2.0
+        center_top = (top + bottom) / 2.0
+        along = center_x * advance_x + center_top * advance_y
+        down = center_x * down_x + center_top * down_y
+        # The glyph's own extent along the reading direction, so adjacent
+        # characters are not mistaken for separate words.
+        half_extent = (
+            abs(advance_x) * (x1 - x0) + abs(advance_y) * (bottom - top)
+        ) / 2.0
+        placed.append((down, along, half_extent, char))
+        try:
+            sizes.append(float(char["size"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not placed:
+        return None
+    size = sorted(sizes)[len(sizes) // 2] if sizes else 8.0
+    line_tolerance = max(1.5, size * 0.5)
+    space_gap = max(1.0, size * 0.3)
+    placed.sort(key=lambda item: (item[0], item[1]))
+    lines: list[list[tuple[float, float, Mapping[str, Any]]]] = []
+    current: list[tuple[float, float, Mapping[str, Any]]] = []
+    current_down: float | None = None
+    for down, along, half_extent, char in placed:
+        if current_down is None or abs(down - current_down) <= line_tolerance:
+            current.append((along, half_extent, char))
+            current_down = down if current_down is None else (current_down + down) / 2.0
+            continue
+        lines.append(current)
+        current = [(along, half_extent, char)]
+        current_down = down
+    if current:
+        lines.append(current)
+
+    rendered: list[str] = []
+    for line in lines:
+        line.sort(key=lambda item: item[0])
+        parts: list[str] = []
+        previous_end: float | None = None
+        for along, half_extent, char in line:
+            if previous_end is not None and along - half_extent - previous_end > space_gap:
+                parts.append(" ")
+            parts.append(str(char.get("text") or ""))
+            previous_end = along + half_extent
+        rendered.append("".join(parts).strip())
+    text = "\n".join(part for part in rendered if part)
+    return text or None
+
+
+def _chars_in_bbox(
+    chars: Sequence[Mapping[str, Any]], bbox: Sequence[float] | None
+) -> list[Mapping[str, Any]]:
+    """Characters whose centre lies inside a box (pdfplumber's own rule)."""
+
+    if not bbox or len(bbox) < 4:
+        return []
+    x0, top, x1, bottom = (float(value) for value in bbox[:4])
+    kept: list[Mapping[str, Any]] = []
+    for char in chars:
+        try:
+            horizontal = (float(char["x0"]) + float(char["x1"])) / 2.0
+            vertical = (float(char["top"]) + float(char["bottom"])) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if x0 <= horizontal < x1 and top <= vertical < bottom:
+            kept.append(char)
+    return kept
+
+
+def _page_has_rotated_text(chars: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether any character on the page advances in another direction than +x.
+
+    One cheap pass decides if the cell-by-cell direction work is needed at all, so
+    a page of ordinary upright text costs nothing for it.
+    """
+
+    for char in chars:
+        matrix = char.get("matrix")
+        if not matrix or len(matrix) < 4:
+            continue
+        try:
+            a, b = float(matrix[0]), float(matrix[1])
+        except (TypeError, ValueError):
+            continue
+        if abs(b) > abs(a) * 0.5:
+            return True
+    return False
+
+
+def _pdf_table_cells(page: Any, table: Any, *, rotated_text: bool) -> list[list[str]]:
+    """Read a pdfplumber table, honouring cells whose text is rotated.
+
+    ``Table.extract()`` reads every cell left to right.  A wide catalogue table
+    rotates its column headers 90° so they fit, and those cells then come back
+    reversed ("REVOC EHT FO WERCS" for "SCREW OF THE COVER").  The base extraction
+    is kept as it is -- it costs one pass per row -- and each cell is re-read only
+    when its own characters run in another direction.  ``rotated_text`` comes from
+    :func:`_page_has_rotated_text`, so a page without rotated text returns the base
+    extraction untouched.
+    """
+
+    cells = table.extract() or []
+    chars = getattr(page, "chars", None) or []
+    if not rotated_text or not chars:
+        return cells
+    rows = getattr(table, "rows", ()) or ()
+    for row_index, row in enumerate(rows):
+        if row_index >= len(cells):
+            break
+        row_chars = _chars_in_bbox(chars, getattr(row, "bbox", None))
+        if not row_chars:
+            continue
+        for col_index, cell_bbox in enumerate(getattr(row, "cells", ()) or ()):
+            if col_index >= len(cells[row_index]):
+                break
+            text = _text_along_char_direction(_chars_in_bbox(row_chars, cell_bbox))
+            if text is not None:
+                cells[row_index][col_index] = text
+    return cells
+
+
 def _extract_pdfplumber_layout(
     file_path: str,
     *,
@@ -5192,6 +5517,7 @@ def _extract_pdfplumber_layout(
             page_started = time.monotonic()
             tables: list[_PdfTable] = []
             table_bboxes: list[tuple[float, float, float, float]] = []
+            page_has_rotated_text = _page_has_rotated_text(getattr(page, "chars", None) or [])
             if table_page_numbers is None or index in table_page_numbers:
                 try:
                     found = page.find_tables() or []
@@ -5199,7 +5525,9 @@ def _extract_pdfplumber_layout(
                     found = []
                 for table in found:
                     try:
-                        cells = table.extract() or []
+                        cells = _pdf_table_cells(
+                            page, table, rotated_text=page_has_rotated_text
+                        )
                     except Exception:
                         cells = []
                     cells = [

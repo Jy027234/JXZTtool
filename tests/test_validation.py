@@ -323,6 +323,88 @@ class OptionalArtifactTests(unittest.TestCase):
 
 
 class ValidationRuleTests(unittest.TestCase):
+    def test_a_table_grid_out_of_range_is_reported(self) -> None:
+        blocks = _healthy_blocks() + (
+            _block(
+                "t1",
+                "| a | b |",
+                block_type=BlockType.TABLE,
+                metadata={
+                    "rows": 2,
+                    "cols": 2,
+                    "cells": [["a", "b"], ["c", "d"]],
+                    "table_cells": [
+                        {"row_index": 0, "col_index": 0},
+                        {"row_index": 0, "col_index": 1},
+                        {"row_index": 1, "col_index": 0},
+                        {"row_index": 1, "col_index": 5},
+                    ],
+                },
+            ),
+        )
+        report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views())
+
+        self.assertIs(report.status, ValidationStatus.WARNING)
+        self.assertIn("table_grid_invalid", report.warnings)
+        self.assertEqual(report.metrics["table_grid_defects"], ["t1:1_cells_out_of_range"])
+
+    def test_two_cells_in_one_position_are_reported(self) -> None:
+        blocks = _healthy_blocks() + (
+            _block(
+                "t1",
+                "| a | b |",
+                block_type=BlockType.TABLE,
+                metadata={
+                    "rows": 1,
+                    "cols": 2,
+                    "table_cells": [
+                        {"row_index": 0, "col_index": 1},
+                        {"row_index": 0, "col_index": 1},
+                    ],
+                },
+            ),
+        )
+        report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views())
+
+        self.assertIn("table_grid_invalid", report.warnings)
+        self.assertEqual(report.metrics["table_grid_defects"], ["t1:1_cells_overlap"])
+
+    def test_a_well_formed_table_grid_is_not_reported(self) -> None:
+        blocks = _healthy_blocks() + (
+            _block(
+                "t1",
+                "| a | b |",
+                block_type=BlockType.TABLE,
+                metadata={
+                    "rows": 1,
+                    "cols": 2,
+                    "table_cells": [
+                        {"row_index": 0, "col_index": 0},
+                        {"row_index": 0, "col_index": 1},
+                    ],
+                },
+            ),
+        )
+        report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views())
+
+        self.assertNotIn("table_grid_invalid", report.warnings)
+        self.assertIs(report.status, ValidationStatus.PASSED)
+
+    def test_a_table_without_cell_positions_is_not_judged(self) -> None:
+        # A parser that only publishes rows of strings has no grid to be wrong
+        # about, and must not be warned for it.
+        blocks = _healthy_blocks() + (
+            _block(
+                "t1",
+                "| a | b |",
+                block_type=BlockType.TABLE,
+                metadata={"rows": 1, "cols": 2, "cells": [["a", "b"]]},
+            ),
+        )
+        report = validate_run(blocks=blocks, chunks=_healthy_chunks(), views=_views())
+
+        self.assertNotIn("table_grid_invalid", report.warnings)
+
     def test_rule_payload_omits_empty_metric_fields(self) -> None:
         rule = ValidationRule(
             code="empty_document", status=ValidationStatus.REJECTED, message="no blocks"
