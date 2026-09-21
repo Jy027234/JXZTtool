@@ -9,6 +9,7 @@ re-derives the grid from flattened text.
 
 from __future__ import annotations
 
+import time
 import unittest
 
 from starlette.testclient import TestClient
@@ -178,6 +179,7 @@ class WordTableProjectionConsistencyTests(unittest.TestCase):
             self.assertEqual(current.status_code, 200)
             if current.json()["state"] == ParseJobState.DONE.value:
                 return
+            time.sleep(0.05)
         self.fail("parse job did not finish")
 
     def test_structured_projection_exposes_the_merge(self) -> None:

@@ -2175,13 +2175,55 @@ class PdfTextParser(ParserAdapter):
                 # cost for those pages while preserving the explicit
                 # ``native_text_empty`` path for image-only scans.
                 return None, None, None, timings
-        if reason is None:
+        native_lines = _native_page_lines(page, table_bboxes=table_bboxes)
+        # Only the lines that cannot be trusted, and never for an explicit
+        # full-page OCR request: that one asks for the whole page.
+        regions: list[tuple[float, float, float, float]] = []
+        if not force_full_page:
+            try:
+                page_width = float(getattr(page, "width", 0.0) or 0.0)
+                page_height = float(getattr(page, "height", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                page_width = page_height = 0.0
+            regions = _ocr_enhancement_regions(
+                lines=native_lines,
+                table_bboxes=table_bboxes,
+                min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
+                min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
+                page_width=page_width,
+                page_height=page_height,
+            )
+        if reason is None and not regions:
             return None, None, None, timings
+        if reason is None:
+            # The page as a whole reads fine; only some lines do not.  Saying so
+            # keeps the reason auditable instead of looking like a page-level
+            # fallback that was not needed.
+            reason = "mixed_page_regions"
         attempt_started = time.monotonic()
         engine, engine_error_reason, timings.engine_init_elapsed_s = self._ensure_pdf_ocr_engine()
         if engine is None:
             timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
             return None, reason, engine_error_reason or "provider_unavailable", timings
+        if regions:
+            merged_lines, region_failure = _enhance_page_regions(
+                page=page,
+                engine=engine,
+                regions=regions,
+                native_lines=native_lines,
+                resolution=self._ocr_render_resolution,
+                confidence_threshold=self._ocr_confidence_threshold,
+                merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
+                timings=timings,
+            )
+            timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
+            if merged_lines is None:
+                return None, reason, region_failure or "empty_ocr_text", timings
+            timings.ocr_lines = merged_lines
+            text = _text_from_merged_lines(merged_lines)
+            if not text:
+                return None, reason, "empty_ocr_text", timings
+            return text, reason, None, timings
         text, ocr_error_reason, extract_timings = _extract_ocr_text_from_page(
             page,
             engine=engine,
@@ -4999,6 +5041,10 @@ class _OcrStageTimings:
     postprocess_elapsed_s: float = 0.0
     total_elapsed_s: float = 0.0
     ocr_lines: list[dict[str, Any]] = _dc_field(default_factory=list)
+    #: Regions that were actually enhanced on a mixed page (0 = whole-page/there
+    #: was nothing to enhance).  The caller uses this to keep a merged page's text
+    #: out of the page OCR cache.
+    regions_enhanced: int = 0
 
 
 @dataclass(slots=True)
@@ -5639,13 +5685,24 @@ def _extract_pdfplumber_layout(
                     if recovered_text:
                         text_without_tables = recovered_text
                         ocr_fallback_reason = ocr_attempt_reason
-                        ocr_acceptance_reason = "fallback_applied"
+                        regions_enhanced = int(getattr(ocr_timings, "regions_enhanced", 0) or 0)
+                        ocr_acceptance_reason = (
+                            "regions_enhanced" if regions_enhanced else "fallback_applied"
+                        )
                         ocr_lines = _ocr_line_records_for_page(
                             getattr(ocr_timings, "ocr_lines", ()) or (),
                             page_number=index,
                         )
-                        # Persist to cache for future runs.
-                        if ocr_cache is not None and ocr_cache.enabled:
+                        # Persist to cache for future runs.  A region-enhanced page
+                        # is not cached: its text mixes the page's own lines with the
+                        # recovered ones, and an entry keyed only by the OCR identity
+                        # would keep serving that mixture after the native extractor
+                        # changed.
+                        if (
+                            ocr_cache is not None
+                            and ocr_cache.enabled
+                            and not regions_enhanced
+                        ):
                             ocr_cache.put(
                                 file_path=file_path,
                                 page_number=index,
@@ -5984,6 +6041,108 @@ def _normalize_ocr_provider_counts(provider_elapsed: Any) -> tuple[int, int, int
     )
 
 
+def _ocr_stage_lines_from_image(
+    rendered: Any,
+    *,
+    page: Any,
+    engine: Any,
+    confidence_threshold: float,
+    column_count_hint: int,
+    merge_line_gap_ratio: float,
+    timings: _OcrStageTimings,
+    origin: tuple[float, float] = (0.0, 0.0),
+    source_width: float | None = None,
+    source_height: float | None = None,
+) -> tuple[list[str], str | None]:
+    """Run the OCR engine on a rendered image and post-process its lines.
+
+    Shared by the whole-page fallback and by region enhancement, so both read the
+    engine result the same way and report the same stage timings.
+    """
+
+    try:
+        import numpy as np  # type: ignore
+    except ImportError:
+        return [], "ocr_dependencies_missing"
+
+    call_started = time.monotonic()
+    prepare_started = time.monotonic()
+    try:
+        ocr_input = _prepare_ocr_input_image(rendered, engine=engine)
+        ocr_array = np.array(ocr_input)
+        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
+    except Exception:
+        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
+        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+        timings.total_elapsed_s = round(
+            timings.render_elapsed_s + timings.call_elapsed_s, 6
+        )
+        return [], "ocr_input_prepare_failed"
+
+    engine_started = time.monotonic()
+    try:
+        result, provider_elapsed = engine(ocr_array)
+    except Exception as exc:
+        timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
+        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+        timings.total_elapsed_s = round(
+            timings.render_elapsed_s + timings.call_elapsed_s, 6
+        )
+        return [], _classify_ocr_error(exc)
+    timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
+    timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
+    (
+        provider_elapsed_s,
+        provider_det_elapsed_s,
+        provider_cls_elapsed_s,
+        provider_rec_elapsed_s,
+    ) = _normalize_ocr_provider_timings(provider_elapsed)
+    timings.provider_elapsed_s += provider_elapsed_s
+    timings.provider_det_elapsed_s += provider_det_elapsed_s
+    timings.provider_cls_elapsed_s += provider_cls_elapsed_s
+    timings.provider_rec_elapsed_s += provider_rec_elapsed_s
+    (
+        crop_count,
+        rotate_positive_count,
+        rotate_high_count,
+    ) = _normalize_ocr_provider_counts(provider_elapsed)
+    timings.provider_crop_count += crop_count
+    timings.provider_cls_rotate_positive_count += rotate_positive_count
+    timings.provider_cls_rotate_high_count += rotate_high_count
+
+    postprocess_started = time.monotonic()
+    lines = _collect_ocr_lines(
+        result,
+        confidence_threshold=confidence_threshold,
+        column_count_hint=column_count_hint,
+        page_width=float(rendered.width),
+    )
+    line_groups = _group_ocr_line_groups(
+        lines,
+        merge_line_gap_ratio=merge_line_gap_ratio,
+    )
+    paragraphs = _ocr_paragraphs_from_line_groups(line_groups)
+    records = _ocr_line_records(
+        line_groups,
+        rendered_width=float(rendered.width),
+        rendered_height=float(rendered.height),
+        page_width=float(page.width or 0.0),
+        page_height=float(page.height or 0.0),
+        origin=origin,
+        source_width=source_width,
+        source_height=source_height,
+    )
+    timings.ocr_lines.extend(records)
+    timings.postprocess_elapsed_s = round(
+        timings.postprocess_elapsed_s + (time.monotonic() - postprocess_started), 6
+    )
+    timings.total_elapsed_s = round(
+        timings.render_elapsed_s + timings.call_elapsed_s + timings.postprocess_elapsed_s,
+        6,
+    )
+    return paragraphs, None
+
+
 def _extract_ocr_text_from_page(
     page: Any,
     *,
@@ -5996,7 +6155,6 @@ def _extract_ocr_text_from_page(
 ) -> tuple[str | None, str | None, _OcrStageTimings]:
     timings = _OcrStageTimings()
     try:
-        import numpy as np  # type: ignore
         from PIL import ImageDraw  # type: ignore
     except ImportError:
         return None, "ocr_dependencies_missing", timings
@@ -6025,78 +6183,335 @@ def _extract_ocr_text_from_page(
             )
     timings.render_elapsed_s = round(time.monotonic() - render_started, 6)
 
-    call_started = time.monotonic()
-    prepare_started = time.monotonic()
-    try:
-        ocr_input = _prepare_ocr_input_image(rendered, engine=engine)
-        ocr_array = np.array(ocr_input)
-        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
-    except Exception:
-        timings.input_prepare_elapsed_s = round(time.monotonic() - prepare_started, 6)
-        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
-        timings.total_elapsed_s = round(
-            timings.render_elapsed_s + timings.call_elapsed_s,
-            6,
-        )
-        return None, "ocr_input_prepare_failed", timings
-
-    engine_started = time.monotonic()
-    try:
-        result, provider_elapsed = engine(ocr_array)
-    except Exception as exc:
-        timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
-        timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
-        timings.total_elapsed_s = round(
-            timings.render_elapsed_s + timings.call_elapsed_s,
-            6,
-        )
-        return None, _classify_ocr_error(exc), timings
-    timings.engine_exec_elapsed_s = round(time.monotonic() - engine_started, 6)
-    timings.call_elapsed_s = round(time.monotonic() - call_started, 6)
-    (
-        timings.provider_elapsed_s,
-        timings.provider_det_elapsed_s,
-        timings.provider_cls_elapsed_s,
-        timings.provider_rec_elapsed_s,
-    ) = _normalize_ocr_provider_timings(provider_elapsed)
-    (
-        timings.provider_crop_count,
-        timings.provider_cls_rotate_positive_count,
-        timings.provider_cls_rotate_high_count,
-    ) = _normalize_ocr_provider_counts(provider_elapsed)
-
-    postprocess_started = time.monotonic()
-    lines = _collect_ocr_lines(
-        result,
+    paragraphs, error = _ocr_stage_lines_from_image(
+        rendered,
+        page=page,
+        engine=engine,
         confidence_threshold=confidence_threshold,
         column_count_hint=column_count_hint,
-        page_width=float(rendered.width),
-    )
-    line_groups = _group_ocr_line_groups(
-        lines,
         merge_line_gap_ratio=merge_line_gap_ratio,
+        timings=timings,
     )
-    paragraphs = _ocr_paragraphs_from_line_groups(line_groups)
-    timings.ocr_lines = _ocr_line_records(
-        line_groups,
-        rendered_width=float(rendered.width),
-        rendered_height=float(rendered.height),
-        page_width=float(page.width or 0.0),
-        page_height=float(page.height or 0.0),
-    )
-    timings.postprocess_elapsed_s = round(time.monotonic() - postprocess_started, 6)
-    timings.total_elapsed_s = round(
-        timings.render_elapsed_s + timings.call_elapsed_s + timings.postprocess_elapsed_s,
-        6,
-    )
+    if error is not None:
+        return None, error, timings
     if not paragraphs:
         return None, "empty_ocr_text", timings
     return "\n\n".join(paragraphs), None, timings
 
 
+def _extract_ocr_region_lines(
+    page: Any,
+    *,
+    engine: Any,
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+    confidence_threshold: float,
+    merge_line_gap_ratio: float,
+    timings: _OcrStageTimings,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Read one region of a page, returning its lines in page coordinates."""
+
+    render_started = time.monotonic()
+    try:
+        rendered = page.crop(bbox).to_image(resolution=resolution).original.convert("RGB")
+    except Exception:
+        return [], "ocr_render_failed"
+    timings.render_elapsed_s = round(
+        timings.render_elapsed_s + (time.monotonic() - render_started), 6
+    )
+    before = len(timings.ocr_lines)
+    # A region is a band, not a page: its lines are read top to bottom, left to
+    # right, so the page's own column hint must not be applied inside it.
+    _paragraphs, error = _ocr_stage_lines_from_image(
+        rendered,
+        page=page,
+        engine=engine,
+        confidence_threshold=confidence_threshold,
+        column_count_hint=1,
+        merge_line_gap_ratio=merge_line_gap_ratio,
+        timings=timings,
+        origin=(float(bbox[0]), float(bbox[1])),
+        source_width=float(bbox[2]) - float(bbox[0]),
+        source_height=float(bbox[3]) - float(bbox[1]),
+    )
+    records = list(timings.ocr_lines[before:])
+    if error is not None:
+        return [], error
+    return records, None
+
+
+#: Region enhancement is bounded: at most this many regions per page, covering at
+#: most this fraction of the page.  Past that the whole page is read instead, so a
+#: page is never re-read piece by piece without limit.
+_OCR_MAX_REGIONS_PER_PAGE = 4
+_OCR_MAX_REGION_AREA_RATIO = 0.6
+
+
+def _boxes_overlap(left: Sequence[float], right: Sequence[float]) -> bool:
+    if len(left) < 4 or len(right) < 4:
+        return False
+    return not (
+        left[2] <= right[0] or left[0] >= right[2] or left[3] <= right[1] or left[1] >= right[3]
+    )
+
+
+def _lines_intersecting(
+    lines: Sequence[_PageTextLine],
+    bbox: Sequence[float],
+) -> list[_PageTextLine]:
+    if not bbox or len(bbox) < 4:
+        return []
+    x0, top, x1, bottom = (float(value) for value in bbox[:4])
+    matched: list[_PageTextLine] = []
+    for line in lines:
+        line_bottom = line.bottom if line.bottom > line.top else line.top
+        if line.x1 <= x0 or line.x0 >= x1 or line_bottom <= top or line.top >= bottom:
+            continue
+        matched.append(line)
+    return matched
+
+
+def _line_is_unusable(
+    line: _PageTextLine,
+    *,
+    min_cid_tokens: int,
+    min_cid_char_ratio: float,
+) -> bool:
+    """Whether a line's own text is not trustworthy.
+
+    The page-level detector answers "is this page garbled".  A mixed page -- a
+    scanned insert on a text page, or one column whose font has no mapping --
+    needs the same question asked per line, because the rest of the page is fine
+    and must not be re-read.
+    """
+
+    return (
+        detect_page_garble_reason(
+            line.text,
+            min_cid_tokens=min_cid_tokens,
+            min_cid_char_ratio=min_cid_char_ratio,
+        )
+        is not None
+    )
+
+
+def _merge_line_bands(
+    boxes: Sequence[Sequence[float]],
+    *,
+    gap: float,
+) -> list[tuple[float, float, float, float]]:
+    """Merge line boxes into bands, so a region is not a one-line sliver."""
+
+    ordered = sorted(
+        ((float(box[0]), float(box[1]), float(box[2]), float(box[3])) for box in boxes),
+        key=lambda item: (item[1], item[0]),
+    )
+    bands: list[list[float]] = []
+    for x0, top, x1, bottom in ordered:
+        if bands and top - bands[-1][3] <= gap:
+            bands[-1][0] = min(bands[-1][0], x0)
+            bands[-1][1] = min(bands[-1][1], top)
+            bands[-1][2] = max(bands[-1][2], x1)
+            bands[-1][3] = max(bands[-1][3], bottom)
+            continue
+        bands.append([x0, top, x1, bottom])
+    return [(band[0], band[1], band[2], band[3]) for band in bands]
+
+
+def _ocr_enhancement_regions(
+    *,
+    lines: Sequence[_PageTextLine],
+    table_bboxes: Sequence[tuple[float, float, float, float]],
+    min_cid_tokens: int,
+    min_cid_char_ratio: float,
+    page_width: float,
+    page_height: float,
+) -> list[tuple[float, float, float, float]]:
+    """The parts of a mixed page that actually need OCR.
+
+    Only lines whose own text cannot be trusted qualify.  A page whose text is
+    fine therefore yields nothing, which is what keeps OCR off healthy pages, and
+    a table's text is left to the table block instead of being copied into the
+    page flow.
+    """
+
+    unusable = [
+        line
+        for line in lines
+        if _line_is_unusable(
+            line,
+            min_cid_tokens=min_cid_tokens,
+            min_cid_char_ratio=min_cid_char_ratio,
+        )
+    ]
+    if not unusable:
+        return []
+    heights = [max(1.0, (line.bottom or line.top) - line.top) for line in unusable]
+    median_height = sorted(heights)[len(heights) // 2]
+    regions = _merge_line_bands(
+        [(line.x0, line.top, line.x1, line.bottom or line.top) for line in unusable],
+        gap=max(2.0, median_height * 1.5),
+    )
+    page_area = max(1.0, float(page_width) * float(page_height))
+    kept: list[tuple[float, float, float, float]] = []
+    covered_area = 0.0
+    for region in regions:
+        if any(_boxes_overlap(region, table_bbox) for table_bbox in table_bboxes):
+            continue
+        covered_area += max(0.0, region[2] - region[0]) * max(0.0, region[3] - region[1])
+        kept.append(region)
+    if (
+        len(kept) > _OCR_MAX_REGIONS_PER_PAGE
+        or covered_area / page_area > _OCR_MAX_REGION_AREA_RATIO
+    ):
+        # Most of the page needs reading anyway: one whole-page pass is cheaper
+        # than several region renders and keeps the reading order intact.
+        return []
+    return kept
+
+
+def _native_page_lines(
+    page: Any,
+    *,
+    table_bboxes: Sequence[tuple[float, float, float, float]],
+) -> list[_PageTextLine]:
+    """The page's own text lines, excluding anything inside a table."""
+
+    lines = _page_text_lines(page)
+    if not lines or not table_bboxes:
+        return lines
+    return [
+        line
+        for line in lines
+        if not any(
+            _boxes_overlap((line.x0, line.top, line.x1, line.bottom), box)
+            for box in table_bboxes
+        )
+    ]
+
+
+def _merge_native_and_ocr_lines(
+    *,
+    native_lines: Sequence[_PageTextLine],
+    ocr_lines: Sequence[Mapping[str, Any]],
+    replaced: Sequence[_PageTextLine],
+) -> list[dict[str, Any]]:
+    """Combine the page's own lines with what OCR recovered for a region.
+
+    Duplicates are dropped (OCR often re-reads a line the text layer already
+    provides) and conflicts are resolved in favour of the reliable side: OCR wins
+    where the native line was unreadable, the native text wins where it was fine.
+    Nothing here is chosen by length.
+    """
+
+    replaced_ids = {id(line) for line in replaced}
+    merged: list[dict[str, Any]] = []
+    for line in native_lines:
+        if id(line) in replaced_ids:
+            continue
+        merged.append(
+            {
+                "text": line.text,
+                "bbox": (line.x0, line.top, line.x1, line.bottom or line.top),
+                "source_kind": "pdf_native_text",
+            }
+        )
+    native_texts = {_compact_ocr_locator_text(line.text) for line in native_lines}
+    for record in ocr_lines:
+        text = str(record.get("text") or "").strip()
+        if not text or _compact_ocr_locator_text(text) in native_texts:
+            continue
+        merged.append(dict(record))
+    merged.sort(
+        key=lambda item: (
+            float(item["bbox"][1]) if item.get("bbox") else 0.0,
+            float(item["bbox"][0]) if item.get("bbox") else 0.0,
+        )
+    )
+    return merged
+
+
+def _text_from_merged_lines(lines: Sequence[Mapping[str, Any]]) -> str:
+    """Join located lines back into page text, keeping paragraph breaks.
+
+    Blank lines are reintroduced where the source had a visible vertical gap, so
+    the downstream paragraph splitter still sees the page's paragraph structure.
+    """
+
+    boxes: list[tuple[float, float]] = []
+    for line in lines:
+        bbox = line.get("bbox")
+        if not bbox or len(bbox) < 4:
+            boxes.append((0.0, 0.0))
+            continue
+        boxes.append((float(bbox[1]), float(bbox[3])))
+    heights = [max(1.0, bottom - top) for top, bottom in boxes if bottom > top]
+    median_height = sorted(heights)[len(heights) // 2] if heights else 10.0
+    parts: list[str] = []
+    previous_bottom: float | None = None
+    for index, line in enumerate(lines):
+        text = str(line.get("text") or "").strip()
+        if not text:
+            continue
+        top, bottom = boxes[index]
+        if previous_bottom is not None and top - previous_bottom > median_height * 0.8:
+            parts.append("")
+        parts.append(text)
+        if bottom > top:
+            previous_bottom = bottom
+    return "\n".join(parts).strip()
+
+
+def _enhance_page_regions(
+    *,
+    page: Any,
+    engine: Any,
+    regions: Sequence[tuple[float, float, float, float]],
+    native_lines: Sequence[_PageTextLine],
+    resolution: int,
+    confidence_threshold: float,
+    merge_line_gap_ratio: float,
+    timings: _OcrStageTimings,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Read each enhancement region and merge it with the page's own lines."""
+
+    merged_records: list[dict[str, Any]] = []
+    replaced: list[_PageTextLine] = []
+    failure: str | None = None
+    enhanced = 0
+    for region in regions:
+        records, error = _extract_ocr_region_lines(
+            page,
+            engine=engine,
+            bbox=region,
+            resolution=resolution,
+            confidence_threshold=confidence_threshold,
+            merge_line_gap_ratio=merge_line_gap_ratio,
+            timings=timings,
+        )
+        if error is not None:
+            failure = failure or error
+            continue
+        if not records:
+            continue
+        enhanced += 1
+        replaced.extend(_lines_intersecting(native_lines, region))
+        merged_records.extend(records)
+    if not merged_records:
+        return None, failure
+    timings.regions_enhanced = enhanced
+    return (
+        _merge_native_and_ocr_lines(
+            native_lines=native_lines,
+            ocr_lines=merged_records,
+            replaced=replaced,
+        ),
+        None,
+    )
+
+
 def _prepare_ocr_input_image(rendered: Any, *, engine: Any) -> Any:
-    if getattr(engine, "_parsecore_rapidocr", False):
-        return rendered.convert("L")
+    if getattr(engine, "_parsecore_rapidocr", False):        return rendered.convert("L")
     module_name = getattr(type(engine), "__module__", "")
     if "rapidocr" in module_name.lower():
         return rendered.convert("L")
@@ -6209,13 +6624,26 @@ def _ocr_line_records(
     rendered_height: float,
     page_width: float,
     page_height: float,
+    origin: tuple[float, float] = (0.0, 0.0),
+    source_width: float | None = None,
+    source_height: float | None = None,
 ) -> list[dict[str, Any]]:
+    """Map rendered line boxes back to page coordinates.
+
+    ``origin``/``source_width``/``source_height`` describe the region that was
+    rendered: OCR that ran on a crop reports boxes relative to that crop, and they
+    have to come back as page coordinates for the reader to point at the page.
+    """
+
     if rendered_width <= 0.0 or rendered_height <= 0.0:
         return []
     target_width = page_width if page_width > 0.0 else rendered_width
     target_height = page_height if page_height > 0.0 else rendered_height
-    scale_x = target_width / rendered_width
-    scale_y = target_height / rendered_height
+    region_width = target_width if source_width is None else float(source_width)
+    region_height = target_height if source_height is None else float(source_height)
+    scale_x = region_width / rendered_width
+    scale_y = region_height / rendered_height
+    origin_x, origin_top = float(origin[0]), float(origin[1])
     records: list[dict[str, Any]] = []
     line_number = 1
     for paragraph_index, group in enumerate(groups, start=1):
@@ -6229,10 +6657,10 @@ def _ocr_line_records(
                     "paragraph_line_index": paragraph_line_index,
                     "text": line.text,
                     "bbox": (
-                        round(x0 * scale_x, 4),
-                        round(top * scale_y, 4),
-                        round(x1 * scale_x, 4),
-                        round(bottom * scale_y, 4),
+                        round(origin_x + x0 * scale_x, 4),
+                        round(origin_top + top * scale_y, 4),
+                        round(origin_x + x1 * scale_x, 4),
+                        round(origin_top + bottom * scale_y, 4),
                     ),
                     "page_width": float(target_width),
                     "page_height": float(target_height),
@@ -6263,6 +6691,7 @@ class _PageTextLine:
     x0: float
     x1: float
     top: float
+    bottom: float = 0.0
 
 
 def _page_text_lines(page: Any) -> list[_PageTextLine]:
@@ -6296,6 +6725,7 @@ def _page_text_lines(page: Any) -> list[_PageTextLine]:
                     x0=float(entry["x0"]),
                     x1=float(entry["x1"]),
                     top=float(entry["top"]),
+                    bottom=float(entry.get("bottom", entry["top"])),
                 )
             )
         except (KeyError, TypeError, ValueError):

@@ -569,6 +569,7 @@ class ParseApiTests(unittest.TestCase):
                     final_job = current.json()
                     if final_job["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
 
                 self.assertIsNotNone(final_job)
                 assert final_job is not None
@@ -1432,6 +1433,7 @@ gate_status = "pending"
                     self.assertEqual(current.status_code, 200)
                     if current.json()["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
 
                 structured = client.get(
                     "/v1/parse/documents/doc-table-v2",
@@ -1771,6 +1773,7 @@ gate_status = "pending"
                     self.assertEqual(current.status_code, 200)
                     if current.json()["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
 
                 structured = client.get(
                     "/v1/parse/documents/doc-pdf-catalog-records",
@@ -2739,6 +2742,7 @@ gate_status = "pending"
                         current = client.get(f"/v1/parse/jobs/{base_job_id}")
                         if current.json()["state"] == ParseJobState.DONE.value:
                             break
+                        time.sleep(0.05)
 
                     rechunked = client.post("/v1/parse/documents/doc-api-002/rechunk")
                     self.assertEqual(rechunked.status_code, 202)
@@ -2759,6 +2763,7 @@ gate_status = "pending"
                         current = client.get(f"/v1/parse/jobs/{reembed_job_id}")
                         if current.json()["state"] == ParseJobState.DONE.value:
                             break
+                        time.sleep(0.05)
 
                     document = client.get("/v1/parse/documents/doc-api-002")
                     self.assertEqual(document.status_code, 200)
@@ -2984,6 +2989,7 @@ class ParseQueueApiTests(unittest.TestCase):
                         final_job = current.json()
                         if final_job["state"] == ParseJobState.DONE.value:
                             break
+                        time.sleep(0.05)
 
                     self.assertIsNotNone(final_job)
                     assert final_job is not None
@@ -3100,6 +3106,7 @@ class ParseQueueApiTests(unittest.TestCase):
                     current = client.get(f"/v1/parse/jobs/{job_id}")
                     if current.json()["state"] == ParseJobState.DONE.value:
                         break
+                    time.sleep(0.05)
                 self.assertEqual(current.json()["state"], ParseJobState.DONE.value)
 
                 quality_events = None
