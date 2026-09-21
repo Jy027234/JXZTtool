@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import contextmanager
 import io
 import json
 from pathlib import Path
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ from parsecore.api_payloads import _document_projection, _document_view_rows, _r
 from parsecore.bootstrap import build_runtime
 from parsecore.cli import main as cli_main
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest, RerankScore, SemanticRole
+from parsecore.run_store import RunArtifacts, SealError
 from parsecore.runtime import QuotaExceededError
 from parsecore.stubs import FakeEmbeddingProvider, ParagraphChunkBuilder
 from tests.support import TemporaryWorkspace
@@ -2664,6 +2667,262 @@ candidate_limit = 2
             self.assertEqual(rerun_unit["previous_part_observation"]["job_id"], planned["part_jobs"][1].job_id)
             self.assertEqual(rerun_unit["rerun_comparison"]["previous_job_id"], planned["part_jobs"][1].job_id)
             self.assertEqual(rerun_unit["rerun_comparison"]["current_job_id"], rerun["job"].job_id)
+
+    def test_parent_artifact_writes_do_not_interleave_between_refreshes(self) -> None:
+        # A part finishing on a worker refreshes the parent while the rerun request
+        # that started it refreshes the same document.  Each refresh writes blocks
+        # and then chunks, so two writers at once can pair one writer's blocks with
+        # the other's chunks -- a pair seal_run() then refuses, left behind in the
+        # live tier.
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("refresh-writes.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-refresh-writes",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-refresh-writes", target_pages_per_part=1)
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+            parent_job_id = planned["parent_job"].job_id
+
+            store = runtime.job_store
+            original_save_blocks = store.save_blocks
+            original_replace_blocks = store.replace_blocks_by_prefix
+            active = {"count": 0}
+            overlapped = threading.Event()
+            in_write = threading.Event()
+            release = threading.Event()
+
+            @contextmanager
+            def write_section(*, pause: bool):
+                active["count"] += 1
+                if active["count"] > 1:
+                    overlapped.set()
+                try:
+                    if pause:
+                        in_write.set()
+                        release.wait(timeout=10.0)
+                    yield
+                finally:
+                    active["count"] -= 1
+
+            def save_blocks(*, doc_id, blocks, tenant_id=None):
+                with write_section(pause=True):
+                    original_save_blocks(doc_id=doc_id, blocks=blocks, tenant_id=tenant_id)
+
+            def replace_blocks(*, doc_id, block_id_prefix, blocks, tenant_id=None):
+                with write_section(pause=False):
+                    original_replace_blocks(
+                        doc_id=doc_id,
+                        block_id_prefix=block_id_prefix,
+                        blocks=blocks,
+                        tenant_id=tenant_id,
+                    )
+
+            store.save_blocks = save_blocks
+            store.replace_blocks_by_prefix = replace_blocks
+            try:
+                # The worker's full refresh, held inside its write section.
+                refresher = threading.Thread(
+                    target=lambda: runtime.refresh_partitioned_parent(
+                        doc_id="doc-refresh-writes", parent_job_id=parent_job_id
+                    ),
+                    daemon=True,
+                )
+                refresher.start()
+                self.assertTrue(in_write.wait(timeout=10.0), "the full refresh never reached its write")
+                # The rerun request's incremental refresh for one part.
+                release_timer = threading.Timer(0.3, release.set)
+                release_timer.start()
+                try:
+                    runtime.refresh_partitioned_parent(
+                        doc_id="doc-refresh-writes",
+                        parent_job_id=parent_job_id,
+                        changed_part_ids=["doc-refresh-writes-part-1"],
+                    )
+                finally:
+                    release.set()
+                    release_timer.cancel()
+                    refresher.join(timeout=10.0)
+            finally:
+                store.save_blocks = original_save_blocks
+                store.replace_blocks_by_prefix = original_replace_blocks
+
+            block_ids = {block.block_id for block in store.get_blocks(doc_id="doc-refresh-writes")}
+            chunk_block_ids = {
+                block_id
+                for chunk in store.get_chunks(doc_id="doc-refresh-writes")
+                for block_id in chunk.block_ids
+            }
+
+        self.assertFalse(overlapped.is_set(), "two refreshes wrote the parent document at the same time")
+        self.assertTrue(block_ids)
+        self.assertTrue(
+            chunk_block_ids <= block_ids,
+            f"chunks reference blocks the parent does not hold: {sorted(chunk_block_ids - block_ids)}",
+        )
+
+    def test_a_merged_parent_that_cannot_be_sealed_is_not_published(self) -> None:
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("seal-failure.pdf", [["one"]])
+            runtime = build_runtime(workspace.config_path)
+            self.assertTrue(runtime.run_publication_ready)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-seal-failure",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-seal-failure", target_pages_per_part=1)
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+            before = runtime.publication_state(doc_id="doc-seal-failure")
+
+            def exploding_seal(**kwargs):
+                raise SealError("chunks reference blocks that are not part of this run")
+
+            original_seal = runtime.run_store.seal_run
+            runtime.run_store.seal_run = exploding_seal
+            try:
+                # A rerun reports its part result; a refused seal must not turn the
+                # request into a failure, and nothing is published.
+                result = runtime.publish_merged_parent_run(
+                    job=runtime.get_job(job_id=planned["parent_job"].job_id),
+                    doc_id="doc-seal-failure",
+                    tenant_id=None,
+                )
+            finally:
+                runtime.run_store.seal_run = original_seal
+            after = runtime.publication_state(doc_id="doc-seal-failure")
+
+        self.assertIsNone(result)
+        self.assertEqual(after["active_run_id"], before["active_run_id"])
+        self.assertEqual(after["publication_generation"], before["publication_generation"])
+
+    def test_a_part_awaiting_review_keeps_the_parent_a_preview(self) -> None:
+        # A part whose run needs a human decision keeps its artifacts staged, so the
+        # live tier holds nothing for it and the merge cannot represent those pages.
+        # The parent must not publish a formal version with a whole part missing: it
+        # stays a preview and the run says which part is pending.
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("parts-review.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-parts-review",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-parts-review", target_pages_per_part=1)
+            first, second = planned["part_jobs"]
+            runtime._update_job_state(
+                job_id=first.job_id, state=ParseJobState.DONE, clear_claim=True
+            )
+            runtime._remember_pdf_part_job(runtime.get_job(job_id=first.job_id))
+            rejected = runtime.publish_run(
+                doc_id=first.doc_id,
+                job_id=first.job_id,
+                artifacts=RunArtifacts(
+                    blocks=(
+                        Block(
+                            block_id="p1",
+                            doc_id=first.doc_id,
+                            type=BlockType.PARAGRAPH,
+                            content="one",
+                            metadata={"page": 1},
+                        ),
+                    ),
+                    chunks=(
+                        Chunk(
+                            chunk_id="c1",
+                            doc_id=first.doc_id,
+                            block_ids=("p1",),
+                            text="one",
+                        ),
+                    ),
+                    views={
+                        "pages": [{"page_number": 1, "text": "one"}],
+                        "lines": [],
+                        "records": [],
+                    },
+                ),
+                quality_signals=(
+                    {"code": "test_review_required", "severity": "warning", "message": "review"},
+                ),
+            )
+            self.assertFalse(rejected["published"])
+            self.assertEqual(
+                runtime.publication_state(doc_id=first.doc_id)["consumer_signal"], "preview_only"
+            )
+            self.assertEqual(len(runtime.job_store.get_blocks(doc_id=first.doc_id)), 0)
+
+            runtime.execute(job_id=second.job_id)
+            parent = runtime.publication_state(doc_id="doc-parts-review")
+            preview = runtime.run_store.get_run(parse_run_id=parent["preview_run_id"])
+            # The parts that are available are still merged: the gap is named, not
+            # hidden by dropping the whole document.
+            merged_blocks_present = bool(runtime.job_store.get_blocks(doc_id="doc-parts-review"))
+
+        self.assertIsNone(parent["active_run_id"])
+        self.assertFalse(parent["formal_version_available"])
+        self.assertEqual(parent["consumer_signal"], "preview_only")
+        self.assertEqual(preview.validation_status, "warning")
+        report = dict(preview.validation_report or {})
+        self.assertEqual(report.get("reason"), "quality_signal:partition_parts_awaiting_review")
+        self.assertIn("quality_signal:partition_parts_awaiting_review", report.get("warning_codes") or [])
+        self.assertTrue(merged_blocks_present)
+
+    def test_a_rerun_in_flight_keeps_the_parts_completed_content(self) -> None:
+        # Starting a rerun leaves that part's newest job pending.  The parent must
+        # keep the part's last completed content instead of assembling only the
+        # other parts and publishing the truncated document.
+        with TemporaryWorkspace(PDF_SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_pdf("rerun-inflight.pdf", [["one"], ["two"]])
+            runtime = build_runtime(workspace.config_path)
+            runtime.start(
+                ParseRequest(
+                    doc_id="doc-rerun-inflight",
+                    file_path=str(document_path),
+                    media_type="application/pdf",
+                    options={"profile": "large-pdf"},
+                )
+            )
+            planned = runtime.start_pdf_part_jobs(doc_id="doc-rerun-inflight", target_pages_per_part=1)
+            for job in planned["part_jobs"]:
+                runtime.execute(job_id=job.job_id)
+
+            def parent_snapshot() -> tuple[list[str], list[int]]:
+                blocks = sorted(
+                    block.block_id
+                    for block in runtime.job_store.get_blocks(doc_id="doc-rerun-inflight")
+                )
+                pages = sorted(
+                    int(page.get("page_number") or 0)
+                    for page in runtime.job_store.get_document_views(
+                        doc_id="doc-rerun-inflight"
+                    )["pages"]
+                )
+                return blocks, pages
+
+            before = parent_snapshot()
+            rerun = runtime.rerun_pdf_part(
+                doc_id="doc-rerun-inflight", part_id="doc-rerun-inflight-part-2"
+            )
+            during = parent_snapshot()
+            rerun_state = runtime.get_job(job_id=rerun["job"].job_id).state.value
+
+        self.assertEqual(rerun_state, "pending")
+        self.assertEqual(before, during)
+        self.assertEqual(during[1], [1, 2])
 
     def test_rerun_pdf_part_uses_provider_route_plan_capabilities(self) -> None:
         with TemporaryWorkspace(PDF_LOCAL_PROVIDER_RERUN_CONFIG) as workspace:

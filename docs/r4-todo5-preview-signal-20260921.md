@@ -1,8 +1,8 @@
 # 待办 5 交付报告：未发布内容明确为预览
 
-日期：2026-09-21
+日期：2026-09-21（同日续写：分区父文档的合并一致性、完整性与在飞重跑）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 5
-状态：完成标准逐条复核完毕，本次补齐"预览"信号；第 4 节列出仍然留待后续的条目
+状态：完成标准逐条复核完毕；预览信号、读取身份、分区合并一致性均已补齐；第 6 节列出仍然留待后续的条目
 
 ## 1. 完成标准逐条复核
 
@@ -14,7 +14,7 @@
 | 正文与版本标识一致 | 已满足（本次补上读取/导出的身份） | `publication` 块随每个投影返回 `served_run_id` / `pinned` / `consumer_signal`；快照 `job` 现为服务版本的 job，见第 4 节；[tests/test_publication_read_identity.py](../tests/test_publication_read_identity.py) |
 | 冲突不损伤其他文档 | 已满足 | 发布时发现跨文档 block/chunk ID 冲突即拒绝发布（`_colliding_artifact_ids`），不再删除他人活层行；[tests/test_run_store.py](../tests/test_run_store.py) |
 | 重复提交不产生错版 | 已满足 | `publication_generation` + `expected_generation` CAS、claim fencing、派生 run 关系；同上 |
-| **未发布内容明确为预览，不能标注 published/pinned** | **本次补齐** | 见第 2 节 |
+| **未发布内容明确为预览，不能标注 published/pinned** | **已补齐** | 见第 2 节（预览信号）与第 5 节（分区父文档：待复核分片不再被当成正式版本的一部分） |
 
 ## 2. 本次补齐：预览信号
 
@@ -90,13 +90,108 @@ preview run id: run-8f0edca127b94ef6           # NEW 作为预览，身份独立
   `job_id` 就是 NEW 的 job；
 - 结构化投影载荷的 `parse_run_id` 同为服务版本，`latest_job_used_as_formal_version` 仍为 false。
 
-## 5. 仍然留待后续
+## 5. 分区父文档：合并的读一致性、完整性与在飞重跑（本次补齐）
+
+复核分区（超大 PDF 分片解析）时，用真实 297 页样本 `36d65cd6b61346e28e97dbaf829646de.pdf`
+（计划 3 片：1–100 / 101–200 / 201–297）查出三个具体缺陷，全部落在待办 5 的完成标准上。
+
+### 5.1 两个写入者交错，活层留下"块与分块不匹配"的一对
+
+复现：`tests.test_asgi` 的分片重跑用例单独跑 30 次失败 3 次（未修改的 `dcecacc` 上 30 次失败 1 次，
+同量级，说明是既有竞态）：
+
+```text
+SealError: chunks reference blocks that are not part of this run:
+  doc-pdf-api-parts:merged:doc-pdf-api-parts-part-2:doc-pdf-api-parts-part-2-p-1, …-title
+```
+
+机制（用探针在 `_merged_partition_artifacts` 与 `refresh_partitioned_parent` 上取样确认）：
+分片完成时**工作线程**会用 `changed_part_ids` 做增量刷新，而重跑请求（或超时清扫、失败刷新）
+会做整体合并；每次刷新都是"先写 blocks、再写 chunks"两条语句，两个写入者交错时就会把 A 的
+blocks 与 B 的 chunks 配成一对。`seal_run()` 会拒绝这种 run，但这一对已经留在活层，而且异常
+逃出了 `except PublishError`，把一次重跑请求变成 500。
+
+修正：
+
+- **按父文档加写锁**（`_partition_artifact_lock()`，可重入，不同文档仍并行）：合并且包含
+  "发布合并 run" 的整个过程都在锁内，`seal_run()` 因此只会看到静止状态；
+- `publish_merged_parent_run()` 把 `SealError` 与 `PublishError` 一样处理：记录事件
+  `merged_parent_run_not_sealed`、**不发布**，重跑请求仍能返回分片结果。
+
+验证：分片重跑用例连续 **40 次全通过**（修正前 30 次 3 次失败）。
+
+### 5.2 一片待复核，父文档却发布了缺页的正式版本
+
+真实样本上，3 片全部解析成功、状态 `done`，但第 1 片（1–100 页，795 个块）的校验结论是
+`warning`（`publish_on_warning=False`），于是它只有 `preview_only` 的暂存 run；父文档合并时
+只能读到活层，于是：
+
+| | 修正前 | 修正后 |
+| --- | --- | --- |
+| 父文档 `consumer_signal` | `published` | `preview_only` |
+| 父文档 `active_run_id` / 代数 | `run-4b70bfb00e23416a` / 2 | `null` / 0 |
+| 父文档 `formal_version_available` | true | false |
+| 父文档活层页数 | 197 / 297（第 1 片整片消失） | 197 / 297（内容不变，但明确是预览） |
+
+即：**父文档曾把"少了 100 页"的合并结果当成正式版本发布**。修正后父文档仍然合并可用内容
+（不隐藏、不丢内容），但把缺口交给 run 校验：`partition_parts_awaiting_review`（warning）让
+默认策略拒绝发布正式版本，父文档保持 `preview_only` 并给出 `preview_run_id`；`warning_codes`
+现在也会随 run 记录保存，预览因此可定位到具体规则（本次一并补上 `policy_version` /
+`rule_version` / `warning_codes` 的落库）。
+
+### 5.3 重跑在飞时，父文档会丢掉那一片
+
+`_merged_partition_artifacts()` 只认"每片最新的 job"（`_latest_pdf_part_jobs()`），而重跑一开始
+这一片的最新 job 就是 `pending`，于是整体合并只拿得到其余分片：
+
+| 场景（真实样本） | 修正前 | 修正后 |
+| --- | --- | --- |
+| 重跑 `part-2` 后（尚未执行）父文档 | 只剩其余分片，且发布新的正式版本 | 块/页数不变（1987 块 / 197 页，`part-2` 仍是上一次完成的内容） |
+| 重跑执行完 | `published`，代数 2 | 仍按缺口判定（`part-1` 待复核 → `preview_only`，代数 0） |
+
+修正：`_latest_done_part_jobs()` 按分片取**最近一次完成**的 job 参与合并；整体合并与"待复核分片"
+判定都用它，另外把计划里的分片（`part_specs`）纳入判定——从未完成过的分片同样算缺口
+（`part_not_finished`），不会因为"还没有 job"而悄悄少页。
+
+### 5.4 交付物与验证
+
+| 文件 | 变更 |
+| --- | --- |
+| [src/parsecore/runtime.py](../src/parsecore/runtime.py) | 父文档写锁；`_latest_done_part_jobs()`；`_parts_awaiting_review()`（待复核 / 未完成两类缺口）；`publish_merged_parent_run(parts_awaiting_review=…)` 把缺口作为 warning 质检信号送入校验；`SealError` 按"未发布"处理；run 记录补 `policy_version` / `rule_version` / `warning_codes` |
+| [tests/test_runtime.py](../tests/test_runtime.py) | 新增 3 项：两个刷新不交错的确定性用例（去掉锁即失败）、`SealError` 时父文档不发布、分片待复核时父文档保持预览并给出规则码；新增 1 项：重跑在飞时父文档保留该片上次完成的内容 |
+
+验证：
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1010 tests / OK (skipped=6)
+
+分片重跑用例连续 40 次：0 失败（修正前 30 次 3 次失败；未修改基线 30 次 1 次失败）
+```
+
+真实样本前后对比（`36d65cd6b61346e28e97dbaf829646de.pdf`，3 片，本机 inline）：
+
+```text
+解析 + 合并 6.8 s（三片：1-100 / 101-200 / 201-297）
+分片发布状态：part-1 preview_only(warning) | part-2 published(passed) | part-3 published(passed)
+父文档：preview_only，formal_version_available=false，1987 块 / 1964 分块，197 页（= 101-297）
+分块引用悬空块：0（合并前后、重跑前后均为 0）
+重跑 part-1 并执行 5.9 s：父文档仍 preview_only、代数 0、内容不变
+```
+
+第 1 片的 `warning` 是内容本身的结论（该片 100 页里触发了校验规则），因此父文档暂时没有正式
+版本是正确结果：要么复核后让该片可发布（当前没有"把预览 run 提升为正式版本"的入口，属待办 5
+的后续项），要么重跑该片得到可发布结论。
+
+## 6. 仍然留待后续
 
 1. **索引层的 run 隔离**：`PgVectorIndex` 仍不能按 run 过滤，因此索引能力未计入 `SQLiteRunStore` 的能力声明；正式部署的 Postgres/pgvector 一致性与超大目录演练仍按方案留在部署事项里。
 2. **已发布证据清理保护**：staged 产物的清理作业尚未实现（方案把它列为部署相关事项）。
 3. **导出数据集全覆盖**：本次覆盖 records 导出与结构化投影；pages/lines/coverage/reader 四个数据集走同一 `get_document` 快照，未各自单测。
+4. **预览 run 的人工提升入口**：分片（或整篇）的预览 run 目前只能通过重跑或改配置达到可发布结论，没有"复核通过后发布这个 run"的显式入口；父文档的正式版本会一直等它。
 
-## 6. 回滚
+## 7. 回滚
 
 - 代码回滚：`git revert` 本次提交；`consumer_signal` 回到"未发布一律 `not_ready`"的旧行为，`preview` 字段随之消失（schema 需一并回滚），读取身份回到"最新 job"。
 - 行为回滚：不需要开关。预览只增加信息，不改变读取服务哪个 run、也不改变发布判定；读取身份修正只影响快照报告的身份字段，不改变服务的内容。
+- 分区修正的回滚代价：回滚写锁会恢复"块/分块交错 + 500"的竞态（30 次约 3 次），回滚缺口判定会恢复"缺页的正式版本"与"在飞重跑丢片"。

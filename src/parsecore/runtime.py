@@ -5,6 +5,7 @@ from dataclasses import replace
 import hashlib
 import json
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from math import isfinite, sqrt
@@ -42,6 +43,7 @@ from .run_store import (
     PublicationPolicyError,
     PublishError,
     RunArtifacts,
+    SealError,
     publication_ready,
     run_store_for,
 )
@@ -579,6 +581,30 @@ class ParseRuntime:
         # workers keep this disabled because another worker may update a child
         # job between refreshes; those workers must read the job store instead.
         self._pdf_part_jobs_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        # Serializes parent-artifact rewrites per document; see
+        # _partition_artifact_lock().
+        self._partition_artifact_locks: dict[tuple[str, str], threading.RLock] = {}
+        self._partition_artifact_locks_guard = threading.Lock()
+
+    def _partition_artifact_lock(self, *, doc_id: str, tenant_id: str | None) -> threading.RLock:
+        """One writer at a time per parent document.
+
+        A part's completion refresh (worker thread) and a rerun request (request
+        thread) both rewrite the parent's blocks and chunks, and each rewrite is
+        two statements -- blocks, then chunks.  Interleaved writers paired one
+        writer's blocks with the other's chunks, which ``seal_run()`` rejected, and
+        the mixed pair stayed in the live tier.  The lock is keyed by the parent
+        document, so unrelated documents still merge in parallel.  It is reentrant
+        because a refresh can be reached from another refresh in the same thread.
+        """
+
+        key = (str(tenant_id or "default"), str(doc_id or ""))
+        with self._partition_artifact_locks_guard:
+            lock = self._partition_artifact_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._partition_artifact_locks[key] = lock
+            return lock
 
     def _pdf_part_cache_enabled(self) -> bool:
         return str(self.settings.runtime.execution_mode or "inline").strip().lower() == "inline"
@@ -923,6 +949,7 @@ class ParseRuntime:
         views: Mapping[str, Sequence[Mapping[str, Any]]],
         claim_token: str | None,
         placeholder_parsers: Sequence[str] = (),
+        quality_signals: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Stage, seal, validate and publish one execution.
 
@@ -947,6 +974,7 @@ class ParseRuntime:
             blocks=blocks,
             chunks=chunks,
             views=views,
+            quality_signals=quality_signals,
             artifact_profile=str(self.settings.runtime.run_artifact_profile or "default"),
             required_artifacts=seal.required_artifacts,
             options=self._validation_options(),
@@ -956,6 +984,11 @@ class ParseRuntime:
             parse_run_id=run.parse_run_id,
             status=report.status,
             reason=report.reason,
+            # The codes are what makes a preview actionable: a reader can see which
+            # rules asked for a decision instead of only that one did.
+            policy_version=report.policy_version,
+            rule_version=report.rule_version,
+            warning_codes=report.warnings,
             metrics=report.metrics,
         )
         state = self.publication_state(doc_id=request.doc_id, tenant_id=request.tenant_id)
@@ -2489,6 +2522,100 @@ class ParseRuntime:
             parts.append(part_payload)
         return parts
 
+    def _latest_done_part_jobs(
+        self, *, doc_id: str, tenant_id: str | None, parent_job_id: str | None
+    ) -> dict[str, Any]:
+        """The newest *completed* job for each part.
+
+        A part being re-parsed has a newer job that is not done yet.  The parent's
+        merge has to keep that part's last completed content until the new run is
+        ready, otherwise starting a rerun would drop the part from the assembled
+        document and publish the truncated result as a formal version.
+        """
+
+        by_part: dict[str, Any] = {}
+        for job in self.list_jobs(tenant_id=tenant_id):
+            options = getattr(job, "options", {}) or {}
+            if str(options.get("job_kind") or "") != _PDF_PART_JOB_KIND:
+                continue
+            if str(options.get("source_doc_id") or options.get("parent_doc_id") or "") != doc_id:
+                continue
+            if parent_job_id and str(options.get("parent_job_id") or "") != parent_job_id:
+                continue
+            part_id = str(options.get("part_id") or getattr(job, "doc_id", "") or "")
+            if not part_id or part_id in by_part:
+                continue
+            if getattr(job, "state", None) != ParseJobState.DONE:
+                continue
+            by_part[part_id] = job
+        return by_part
+
+    def _parts_awaiting_review(
+        self, *, child_jobs: Sequence[Any], planned_part_ids: Sequence[str] = ()
+    ) -> list[dict[str, Any]]:
+        """Parts the parent cannot represent in a formal version yet.
+
+        Two ways a plan part is missing from the assembled document:
+
+        * its content needs a human decision (``preview_only``), so the run's
+          artifacts stay staged and the live tier holds nothing for it;
+        * no job of it ever completed, so there is nothing to merge at all.
+
+        Publishing the parent as a formal version in either case would deliver a
+        document with whole pages missing while reporting success, so the parts are
+        named and the parent's run carries the gap.
+        """
+
+        seen: set[str] = set()
+        pending: list[dict[str, Any]] = []
+        for job in child_jobs:
+            part_id = str((getattr(job, "options", {}) or {}).get("part_id") or job.doc_id)
+            seen.add(part_id)
+            state = str(getattr(getattr(job, "state", None), "value", getattr(job, "state", "")))
+            if state != ParseJobState.DONE.value:
+                pending.append(
+                    {
+                        "part_id": part_id,
+                        "part_doc_id": str(getattr(job, "doc_id", "") or ""),
+                        "job_id": str(getattr(job, "job_id", "") or ""),
+                        "preview_run_id": None,
+                        "reason": "part_not_finished",
+                    }
+                )
+                continue
+            doc_id = str(getattr(job, "doc_id", "") or "")
+            if not doc_id:
+                continue
+            tenant_id = getattr(job, "tenant_id", None)
+            if self.job_store.get_blocks(doc_id=doc_id, tenant_id=tenant_id):
+                continue
+            publication = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
+            if str(publication.get("consumer_signal") or "") != "preview_only":
+                continue
+            pending.append(
+                {
+                    "part_id": part_id,
+                    "part_doc_id": doc_id,
+                    "job_id": str(getattr(job, "job_id", "") or ""),
+                    "preview_run_id": publication.get("preview_run_id"),
+                    "reason": "run_awaiting_review",
+                }
+            )
+        for part_id in planned_part_ids:
+            normalized = str(part_id or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            pending.append(
+                {
+                    "part_id": normalized,
+                    "part_doc_id": "",
+                    "job_id": "",
+                    "preview_run_id": None,
+                    "reason": "part_not_finished",
+                }
+            )
+        return pending
+
     def publish_merged_parent_run(
         self,
         *,
@@ -2496,12 +2623,17 @@ class ParseRuntime:
         doc_id: str,
         tenant_id: str | None,
         claim_token: str | None = None,
+        parts_awaiting_review: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any] | None:
         """Publish the parent document's current merged artifacts as a new run.
 
         Called after a part rerun merged its artifacts, so the parent's published
         run always describes what the live tier holds. Returns ``None`` when run
         publication is not in use for this backend.
+
+        A part that is still awaiting review is passed as a warning signal, so the
+        merged run is validated with the gap included: the policy then keeps it as
+        a preview instead of publishing a formal version that is missing a part.
         """
 
         if not self.run_publication_ready or self.run_store is None:
@@ -2510,6 +2642,23 @@ class ParseRuntime:
         chunks = tuple(self.job_store.get_chunks(doc_id=doc_id, tenant_id=tenant_id))
         if not blocks:
             return None
+        quality_signals: tuple[Mapping[str, Any], ...] = ()
+        if parts_awaiting_review:
+            quality_signals = (
+                {
+                    "code": "partition_parts_awaiting_review",
+                    "severity": "warning",
+                    "message": "part content is awaiting review and is not in a formal version",
+                    "detail": {
+                        "parts": [str(part.get("part_id") or "") for part in parts_awaiting_review],
+                        "preview_run_ids": [
+                            str(part.get("preview_run_id") or "")
+                            for part in parts_awaiting_review
+                            if part.get("preview_run_id")
+                        ],
+                    },
+                },
+            )
         request = ParseRequest(
             doc_id=doc_id,
             file_path=str(getattr(job, "file_path", "") or ""),
@@ -2534,6 +2683,7 @@ class ParseRuntime:
                 chunks=chunks,
                 views=self._document_views_for_snapshot(job=job, blocks=blocks),
                 claim_token=claim_token,
+                quality_signals=quality_signals,
             )
         except PublishError as exc:
             self.event_logger.log(
@@ -2544,8 +2694,47 @@ class ParseRuntime:
                 error=str(exc),
             )
             return None
+        except SealError as exc:
+            # The merged artifacts could not be sealed into a run (for example a
+            # chunk that references a block the parent does not hold).  A rerun
+            # must still report its part result instead of turning into a failed
+            # request, and nothing is published: the previous run stays the one a
+            # reader is served.
+            self.event_logger.log(
+                "merged_parent_run_not_sealed",
+                doc_id=doc_id,
+                parse_run_id=run.parse_run_id,
+                error_code=exc.code,
+                error=str(exc),
+            )
+            return None
 
     def refresh_partitioned_parent(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        parent_job_id: str | None = None,
+        changed_part_ids: Sequence[str] | None = None,
+    ):
+        """Merge part artifacts into the parent and publish the merged run.
+
+        The whole merge -- including the publication of the merged run -- runs
+        under the parent document's write lock, because more than one caller
+        reaches it at once (a part finishing on a worker, the rerun request that
+        started it, a timeout sweep) and a half-applied merge is exactly what the
+        run seal refuses and the live tier must never be left holding.
+        """
+
+        with self._partition_artifact_lock(doc_id=doc_id, tenant_id=tenant_id):
+            return self._refresh_partitioned_parent_locked(
+                doc_id=doc_id,
+                tenant_id=tenant_id,
+                parent_job_id=parent_job_id,
+                changed_part_ids=changed_part_ids,
+            )
+
+    def _refresh_partitioned_parent_locked(
         self,
         *,
         doc_id: str,
@@ -2568,6 +2757,29 @@ class ParseRuntime:
             parent_job_id=parent_job.job_id,
         )
         new_state = self._partition_parent_state(child_jobs)
+        # A plan part the assembled document cannot represent yet: its run is still a
+        # preview awaiting a decision, or no job of it ever completed.  The merge
+        # still assembles what is available, but the parent's run must not be
+        # published as a formal version while whole pages of it are missing; the gap
+        # travels with the run instead.
+        planned_part_ids = [
+            str(spec.get("part_id") or "").strip()
+            for spec in _part_specs_from_job(parent_job)
+            if str(spec.get("part_id") or "").strip()
+        ]
+        parts_awaiting_review = self._parts_awaiting_review(
+            child_jobs=child_jobs, planned_part_ids=planned_part_ids
+        )
+        if parts_awaiting_review:
+            self.event_logger.log(
+                "merged_parent_parts_awaiting_review",
+                doc_id=doc_id,
+                parent_job_id=str(getattr(parent_job, "job_id", "") or ""),
+                parts=[str(part.get("part_id") or "") for part in parts_awaiting_review],
+                reasons=sorted(
+                    {str(part.get("reason") or "") for part in parts_awaiting_review}
+                ),
+            )
         changed_ids = tuple(
             str(part_id).strip()
             for part_id in tuple(changed_part_ids or ())
@@ -2618,13 +2830,17 @@ class ParseRuntime:
             if not blocks_for_views:
                 blocks_for_views = tuple(self.job_store.get_blocks(doc_id=doc_id, tenant_id=parent_job.tenant_id))
             self._persist_document_views(job=parent_job, blocks=blocks_for_views)
-        # The merge is complete: publish it so the parent's published run
-        # describes the merged artifacts a reader will actually get.
+        # The merge is complete for the content that is available: publish it so the
+        # parent's published run describes the merged artifacts a reader will
+        # actually get.  Parts still awaiting review are reported to the run's
+        # validation, which keeps the parent a preview rather than a formal version
+        # with whole parts missing.
         self.publish_merged_parent_run(
             job=parent_job,
             doc_id=doc_id,
             tenant_id=parent_job.tenant_id,
             claim_token=getattr(parent_job, "claim_token", None),
+            parts_awaiting_review=parts_awaiting_review,
         )
         return parent_job
 
@@ -3092,12 +3308,23 @@ class ParseRuntime:
             tenant_id=tenant_id,
             parent_job_id=parent_job_id,
         )
+        # A part with a rerun in flight contributes its last completed content: the
+        # part is not gone just because a newer job is still running.
+        done_by_part = self._latest_done_part_jobs(
+            doc_id=parent_doc_id,
+            tenant_id=tenant_id,
+            parent_job_id=parent_job_id,
+        )
+        done_jobs = sorted(
+            done_by_part.values(),
+            key=lambda job: _safe_int_runtime(
+                (getattr(job, "options", {}) or {}).get("part_index"), default=0
+            ),
+        )
         merged_blocks: list[Any] = []
         merged_chunks: list[Chunk] = []
         block_id_map: dict[str, str] = {}
-        for job in child_jobs:
-            if job.state != ParseJobState.DONE:
-                continue
+        for job in done_jobs:
             part_id = str((job.options or {}).get("part_id") or job.doc_id)
             if part_filter and part_id not in part_filter:
                 continue
