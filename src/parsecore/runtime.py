@@ -813,6 +813,7 @@ class ParseRuntime:
                     blocks=artifacts.blocks,
                     chunks=artifacts.chunks,
                     views=artifacts.views,
+                    assets=tuple(artifacts.assets or ()),
                     quality_signals=quality_signals,
                     artifact_profile=profile_name,
                     required_artifacts=seal.required_artifacts,
@@ -1050,9 +1051,18 @@ class ParseRuntime:
         self.run_store.set_execution_status(
             parse_run_id=run.parse_run_id, status="running", claim_token=claim_token
         )
+        # Region assets belong to the run that produced them: the descriptor is
+        # what the run claims as its evidence, and sealing verifies the file still
+        # matches it.  A document without assets stages an empty tuple, which the
+        # profile system reads as "this family was not produced".
         self.run_store.save_run_artifacts(
             parse_run_id=run.parse_run_id,
-            artifacts=RunArtifacts(blocks=tuple(blocks), chunks=tuple(chunks), views=dict(views)),
+            artifacts=RunArtifacts(
+                blocks=tuple(blocks),
+                chunks=tuple(chunks),
+                views=dict(views),
+                assets=_block_region_assets(blocks),
+            ),
             claim_token=claim_token,
         )
         self.run_store.set_execution_status(
@@ -1063,6 +1073,7 @@ class ParseRuntime:
             blocks=blocks,
             chunks=chunks,
             views=views,
+            assets=_block_region_assets(blocks),
             quality_signals=quality_signals,
             artifact_profile=str(self.settings.runtime.run_artifact_profile or "default"),
             required_artifacts=seal.required_artifacts,
@@ -6353,6 +6364,23 @@ def _normalize_chunk_index_layer(value: str | None) -> str:
     if normalized in {"primary", "high_precision"}:
         return normalized
     return "primary"
+
+
+def _block_region_assets(blocks: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+    """The region asset descriptors the given blocks carry, in block order."""
+
+    assets: list[dict[str, Any]] = []
+    for block in blocks:
+        metadata = getattr(block, "metadata", None) or {}
+        descriptor = metadata.get("asset")
+        if not isinstance(descriptor, Mapping):
+            continue
+        entry = dict(descriptor)
+        entry.setdefault("block_id", str(getattr(block, "block_id", "") or ""))
+        if not entry.get("path") or not entry.get("sha256"):
+            continue
+        assets.append(entry)
+    return tuple(assets)
 
 
 def _merged_part_prefix(*, parent_doc_id: str, part_id: str) -> str:

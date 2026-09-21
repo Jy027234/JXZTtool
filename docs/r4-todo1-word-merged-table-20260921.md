@@ -2,7 +2,7 @@
 
 日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一、条目 `kind` 语义迁移）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义、区域素材落盘均已实施；剩余见第 10 节
+状态：Word 链路、Docling 直映、Excel 合并表达、条目 `kind` 语义、区域素材落盘与入产物族均已实施；剩余见第 11 节
 
 ## 1. 这一项解决什么
 
@@ -344,23 +344,61 @@ SealError: chunks reference blocks that are not part of this run:
 Ran 1036 tests / OK (skipped=6)
 ```
 
-## 10. 未完成（同一待办）
+## 10. 素材进入产物族（本次补齐：`assets` 从"无 staging 面"到可封存）
+
+第 9 节留下的缺口是：素材与摘要已写盘，但 run store 的 `assets` 产物族没有 staging 面，
+`assets-only` 这类要求 assets 的 profile 永远封存不了（代码注释里原本就写着"no staging surface yet"）。
+本次补上：
+
+| 层 | 变更 |
+| --- | --- |
+| 存储 | 新增 `run_assets` 表（`parse_run_id` 隔离，记录 block_id/kind/page/path/sha256/bytes + 完整描述 JSON）；`save_run_artifacts` 幂等替换；`RunArtifacts` 增加 `assets` |
+| 封存 | `assets` 计入 `counts`，`assets-only` 因此**可以封存**；封存时逐条校验文件仍在且 `sha256` 未变，并写入 `asset_hash` / `asset_bytes` 到 manifest |
+| 发布 | `_verify_staged_manifest` 同时校验 assets 的条数、内容哈希与**文件本身**：素材被改或被删，发布被拒绝，指针不动（"已发布证据"保护） |
+| 校验 | `validate_run(assets=…)`：数量进入 `artifact_counts`，否则会出现"封存通过、校验却因 `required_artifact_missing:assets` 拒绝"的自相矛盾 |
+| 运行时 | `_publish_execution_run` 从块元数据收集 `asset` 描述一并 staging；`publish_run` 的调用方直接传 `RunArtifacts(assets=…)` |
+
+真实样本（`36d65cd6b61346e28e97dbaf829646de.pdf`，`dual_channel` + `run_artifact_profile = "assets-only"`）：
+
+```text
+region_assets = false → job raised：SealError: required artifacts are missing or empty: assets
+                        （族被真正要求，不再"声明了却没人管"）
+region_assets = true  → job done，run 已封存
+                        counts = {assets: 455, blocks: 1866, chunks: 1823, lines: 10829, pages: 297, records: 168}
+                        asset_bytes = 15,025,614   asset_hash = 5b48a7a48195eb55   磁盘 455 个 PNG
+                        validation = warning（该样本既有的签名页告警）→ preview_only
+复核发布（`publish_reviewed_run`）→ published，generation 1，
+                        manifest.required_artifacts = ["assets", "blocks"]
+```
+
+用例新增 12 项：[tests/test_run_store.py](../tests/test_run_store.py) 4 项（要求 assets 的 profile
+在已 staging 时可封存、缺 assets 时拒绝封存、文件被改/被删时封存与发布被拒且指针不动）、
+[tests/test_region_assets.py](../tests/test_region_assets.py) 2 项（已发布的 run 记录它拥有的素材、
+素材消失的 run 不会成为正式版本）。
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1042 tests / OK (skipped=6)
+```
+
+## 11. 未完成（同一待办）
 
 1. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
    （`_markdown_table_cells()`，TextParser / PyMuPDF4LLM / Docling 的降级路径）本身没有合并
    信息，只能给出扁平行，不会有 `table_cells`——这是格式能力差异，不是待补的分支。
-2. **素材进入产物族（assets）**：文件与摘要已就绪，但 run store 的 `assets` 产物族（staging 面 +
-   manifest 校验）仍未实现，因此 `assets-only` 这类要求 assets 的 profile 还不能封存；当前素材只
-   通过块元数据 `asset` 引用，不参与发布判定。
-3. **Word/Excel 的区域素材**：`source_region` 目前只有 PDF 侧产生；Word 用段落/表格标识、Excel 用
-   工作表与单元格范围，都没有像素框，因此本功能对它们不适用（也没有伪造框）。
-4. **Docling 的图片/公式落盘**：Docling 直映路径的图片仍只保留图注与来源，公式只保留转写文本并
+2. **`export` 产物族**：`assets` 已有 staging 面，`export` 仍然没有，`records` 这类要求 export 的
+   profile 依旧封存失败（与 assets 不同，export 是打包结果而非解析产物，是否值得进 run store 需要
+   单独判断）。
+3. **素材的清理与保留**：`run_assets` 只记录描述，指向对象存储里的文件；这些文件的保留/回收策略
+   （按 `part_artifact_retention_seconds` 之类过期清理）尚未实现，删除 run 也不会删除文件。
+4. **Word/Excel 的区域素材**：`source_region` 目前只有 PDF 侧产生，本功能对 Word/Excel 不适用。
+5. **Docling 的图片/公式落盘**：Docling 直映路径的图片仍只保留图注与来源，公式只保留转写文本并
    标未核验。
-5. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
+6. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
    真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
    验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 11. 回滚
+## 12. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；

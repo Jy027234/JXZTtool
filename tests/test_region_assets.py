@@ -20,6 +20,7 @@ from parsecore.assets import (
 )
 from parsecore.bootstrap import build_runtime
 from parsecore.models import Block, BlockType, ParseRequest
+from parsecore.run_store import RunArtifacts, SealError
 from tests.support import TemporaryWorkspace
 
 PDF_CONFIG = """
@@ -240,6 +241,76 @@ class RegionAssetRuntimeTests(unittest.TestCase):
 
         self.assertEqual(outcome.job.state.value, "done")
         self.assertEqual(png_files, [])
+
+
+class RegionAssetPublicationTests(unittest.TestCase):
+    def test_a_published_run_records_the_assets_it_owns(self) -> None:
+        config = PDF_CONFIG.replace(
+            "region_assets = true",
+            'region_assets = true\nrun_artifact_profile = "assets-only"',
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            blocks, assets, failure = write_region_assets(
+                source_path=str(document_path),
+                blocks=(_region_block("doc-assets-t-1", kind="pdf_table", bbox=[50.0, 100.0, 300.0, 200.0]),),
+                root=workspace.root / "object-store",
+                doc_id="doc-assets",
+            )
+            self.assertIsNone(failure)
+            published = runtime.publish_run(
+                doc_id="doc-assets",
+                artifacts=RunArtifacts(
+                    blocks=blocks,
+                    views={"pages": [{"page_number": 1, "text": "Parts list"}]},
+                    assets=tuple(asset.as_payload() for asset in assets),
+                ),
+                job_id="job-assets",
+                source_version="sha256:assets",
+                validation_status="passed",
+                expected_generation=0,
+            )
+            record = runtime.run_store.get_run(parse_run_id=published["parse_run_id"])
+
+        self.assertTrue(published["published"])
+        self.assertEqual(published["publication_generation"], 1)
+        self.assertEqual(record.manifest["counts"]["assets"], 1)
+        self.assertIn("assets", record.manifest["required_artifacts"])
+        self.assertEqual(record.manifest["artifact_profile"], "assets-only")
+
+    def test_a_run_whose_asset_file_vanished_does_not_become_the_formal_version(self) -> None:
+        config = PDF_CONFIG.replace(
+            "region_assets = true",
+            'region_assets = true\nrun_artifact_profile = "assets-only"',
+        )
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            blocks, assets, _failure = write_region_assets(
+                source_path=str(document_path),
+                blocks=(_region_block("doc-assets-t-2", kind="pdf_table", bbox=[50.0, 100.0, 300.0, 200.0]),),
+                root=workspace.root / "object-store",
+                doc_id="doc-assets",
+            )
+            Path(assets[0].path).unlink()
+            with self.assertRaises(SealError):
+                runtime.publish_run(
+                    doc_id="doc-assets",
+                    artifacts=RunArtifacts(
+                        blocks=blocks,
+                        views={"pages": [{"page_number": 1, "text": "Parts list"}]},
+                        assets=tuple(asset.as_payload() for asset in assets),
+                    ),
+                    job_id="job-assets-gone",
+                    source_version="sha256:assets",
+                    validation_status="passed",
+                    expected_generation=0,
+                )
+            state = runtime.publication_state(doc_id="doc-assets")
+
+        self.assertIsNone(state["active_run_id"])
+        self.assertFalse(state["formal_version_available"])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ publish request cannot skip it.
 
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 import sqlite3
 import unittest
@@ -146,6 +147,111 @@ class RunStoreTestCase(unittest.TestCase):
 
     def _live_chunks(self, doc_id: str | None = None) -> tuple[Chunk, ...]:
         return tuple(self.jobs.get_chunks(doc_id=doc_id or self.doc_id, tenant_id=self.tenant_id))
+
+
+class RegionAssetFamilyTests(RunStoreTestCase):
+    """The ``assets`` family: staged descriptors whose files are verified."""
+
+    def _asset_file(self, *, content: bytes = b"\x89PNG\r\n\x1a\nfake") -> dict[str, object]:
+        root = Path(self._tmp.name) / "object-store" / "regions"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "doc-1-t-1.png"
+        path.write_bytes(content)
+        return {
+            "block_id": "doc-1-t-1",
+            "kind": "pdf_table",
+            "page_number": 1,
+            "path": str(path),
+            "sha256": sha256(content).hexdigest(),
+            "bytes": len(content),
+        }
+
+    def _stage_and_seal(self, *, assets: tuple[dict[str, object], ...], profile: str) -> str:
+        job = self.jobs.create(
+            ParseRequest(
+                doc_id=self.doc_id,
+                file_path="x.pdf",
+                tenant_id=self.tenant_id,
+                options={"profile": profile},
+            )
+        )
+        run = self.store.begin_run(
+            job_id=job.job_id,
+            doc_id=self.doc_id,
+            tenant_id=self.tenant_id,
+            source_version="sha256:assets",
+            source_bytes=8,
+            claim_token="claim-assets",
+            profile=profile,
+            artifact_profile=profile,
+        )
+        self.store.set_execution_status(
+            parse_run_id=run.parse_run_id, status="running", claim_token="claim-assets"
+        )
+        self.store.save_run_artifacts(
+            parse_run_id=run.parse_run_id,
+            artifacts=RunArtifacts(
+                blocks=(_block("blk-1", "text"),),
+                views=_views("text"),
+                assets=assets,
+            ),
+            claim_token="claim-assets",
+        )
+        self.store.set_execution_status(
+            parse_run_id=run.parse_run_id, status="succeeded", claim_token="claim-assets"
+        )
+        return run.parse_run_id
+
+    def test_a_profile_requiring_assets_seals_when_the_run_staged_them(self) -> None:
+        parse_run_id = self._stage_and_seal(assets=(self._asset_file(),), profile="assets-only")
+
+        seal = self.store.seal_run(parse_run_id=parse_run_id, claim_token="claim-assets")
+
+        self.assertEqual(seal.manifest["counts"]["assets"], 1)
+        self.assertGreater(int(seal.manifest["asset_bytes"]), 0)
+        self.assertTrue(str(seal.manifest["asset_hash"]))
+        self.assertIn("assets", seal.manifest["required_artifacts"])
+
+    def test_a_profile_requiring_assets_cannot_seal_without_them(self) -> None:
+        parse_run_id = self._stage_and_seal(assets=(), profile="assets-only")
+
+        with self.assertRaises(SealError) as captured:
+            self.store.seal_run(parse_run_id=parse_run_id, claim_token="claim-assets")
+
+        self.assertIn("assets", str(captured.exception))
+
+    def test_a_changed_or_missing_asset_file_blocks_sealing(self) -> None:
+        asset = self._asset_file()
+        parse_run_id = self._stage_and_seal(assets=(asset,), profile="assets-only")
+        Path(str(asset["path"])).write_bytes(b"\x89PNG\r\n\x1a\nother content")
+
+        with self.assertRaises(SealError) as captured:
+            self.store.seal_run(parse_run_id=parse_run_id, claim_token="claim-assets")
+
+        self.assertIn("digest_mismatch", str(captured.exception))
+
+    def test_a_deleted_asset_file_blocks_publication(self) -> None:
+        asset = self._asset_file()
+        parse_run_id = self._stage_and_seal(assets=(asset,), profile="assets-only")
+        self.store.seal_run(parse_run_id=parse_run_id, claim_token="claim-assets")
+        self.store.record_validation(
+            parse_run_id=parse_run_id, status="passed", reason="unit-test"
+        )
+        Path(str(asset["path"])).unlink()
+
+        with self.assertRaises(SealError) as captured:
+            self.store.publish_run(
+                parse_run_id=parse_run_id,
+                expected_generation=0,
+                claim_token="claim-assets",
+                durable_index=False,
+            )
+
+        # The evidence a run claims must still exist when it becomes the formal
+        # version; the pointer therefore stays where it was.
+        self.assertIn("missing", str(captured.exception))
+        state = self.store.publication_state(doc_id=self.doc_id, tenant_id=self.tenant_id)
+        self.assertIsNone(state["active_run_id"])
 
 
 class HappyPathTests(RunStoreTestCase):

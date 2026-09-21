@@ -139,6 +139,7 @@ def validate_run(
     blocks: Sequence[Any] = (),
     chunks: Sequence[Any] = (),
     views: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    assets: Sequence[Mapping[str, Any]] = (),
     quality_signals: Sequence[Mapping[str, Any]] = (),
     artifact_profile: str = "default",
     required_artifacts: Sequence[str] | None = None,
@@ -151,12 +152,18 @@ def validate_run(
     ``quality_signals`` are the same signal dicts the document projections
     expose (``{"code", "severity", "message", ...}``), so an API consumer and
     the gate cannot disagree about which signals fired.
+
+    ``assets`` are the region asset descriptors the run owns.  A profile that
+    requires the ``assets`` family has to see them here as well as in the sealed
+    staging area, or the run would seal and then be rejected for a family it
+    actually produced.
     """
 
     view_map = {str(key): tuple(value or ()) for key, value in (views or {}).items()}
     counts: dict[str, int] = {
         "blocks": len(blocks),
         "chunks": len(chunks),
+        "assets": len(tuple(assets or ())),
         **{name: len(items) for name, items in view_map.items()},
     }
     profile_name = str(artifact_profile or "default")

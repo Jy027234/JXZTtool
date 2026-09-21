@@ -86,6 +86,26 @@ def _canonical(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _asset_evidence_defects(asset_rows: Sequence[Any]) -> list[str]:
+    """Assets whose file is missing or no longer matches its digest."""
+
+    defects: list[str] = []
+    for row in asset_rows:
+        path = Path(str(row["path"]))
+        digest = str(row["sha256"])
+        if not path.exists():
+            defects.append(f"{row['block_id']}:missing")
+            continue
+        try:
+            actual = sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            defects.append(f"{row['block_id']}:unreadable")
+            continue
+        if actual != digest:
+            defects.append(f"{row['block_id']}:digest_mismatch")
+    return defects
+
+
 def _hash_items(items: Sequence[Any]) -> str:
     digest = sha256()
     for item in items:
@@ -209,6 +229,10 @@ class RunArtifacts:
     blocks: Sequence[Any] = ()
     chunks: Sequence[Any] = ()
     views: Mapping[str, Sequence[Mapping[str, Any]]] = field(default_factory=dict)
+    #: Region assets the run owns (descriptors with ``path``/``sha256``/``bytes``).
+    #: The bytes stay in the object store; the run records what it is evidence of,
+    #: and sealing verifies the files are still the ones that were staged.
+    assets: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -221,9 +245,10 @@ class SealResult:
 
 
 #: Artifact family -> the staged views that can satisfy it.  ``blocks`` is
-#: satisfied by the staged block rows, ``chunks`` by the staged chunk rows.
-#: ``export`` and ``assets`` have no staging surface yet, so a profile that
-#: requires them stays unsealable until P0-03 stages those artifacts.
+#: satisfied by the staged block rows, ``chunks`` by the staged chunk rows, and
+#: ``assets`` by the staged asset descriptors (whose files are verified by digest
+#: when the run is sealed and published).  ``export`` has no staging surface, so a
+#: profile that requires it stays unsealable.
 _ARTIFACT_STAGE_KEYS: Mapping[str, tuple[str, ...]] = {
     "blocks": (),
     "chunks": (),
@@ -445,6 +470,21 @@ class SQLiteRunStore:
                     payload_json TEXT NOT NULL,
                     PRIMARY KEY (parse_run_id, view_type, position)
                 );
+
+                CREATE TABLE IF NOT EXISTS run_assets (
+                    parse_run_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    doc_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    block_id TEXT NOT NULL,
+                    kind TEXT,
+                    page_number INTEGER,
+                    path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    bytes INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (parse_run_id, position)
+                );
                 """
             )
 
@@ -563,6 +603,7 @@ class SQLiteRunStore:
                 )
             conn.execute("DELETE FROM run_blocks WHERE parse_run_id = ?", (parse_run_id,))
             conn.execute("DELETE FROM run_chunks WHERE parse_run_id = ?", (parse_run_id,))
+            conn.execute("DELETE FROM run_assets WHERE parse_run_id = ?", (parse_run_id,))
             conn.execute(
                 "DELETE FROM run_document_views WHERE parse_run_id = ?", (parse_run_id,)
             )
@@ -618,6 +659,38 @@ class SQLiteRunStore:
                             _canonical(payload),
                         ),
                     )
+            asset_rows: list[tuple[Any, ...]] = []
+            for position, asset in enumerate(artifacts.assets or ()):
+                payload = dict(asset)
+                path = str(payload.get("path") or "")
+                digest = str(payload.get("sha256") or "")
+                if not path or not digest:
+                    raise SealError(
+                        "an asset must state its path and sha256 before it can be staged"
+                    )
+                asset_rows.append(
+                    (
+                        parse_run_id,
+                        row["tenant_id"],
+                        row["doc_id"],
+                        position,
+                        str(payload.get("block_id") or f"asset:{position}"),
+                        str(payload.get("kind") or ""),
+                        int(payload.get("page_number") or 0),
+                        path,
+                        digest,
+                        int(payload.get("bytes") or 0),
+                        _canonical(payload),
+                    )
+                )
+            if asset_rows:
+                conn.executemany(
+                    "INSERT INTO run_assets ("
+                    " parse_run_id, tenant_id, doc_id, position, block_id, kind,"
+                    " page_number, path, sha256, bytes, payload_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    asset_rows,
+                )
             self._record_event(
                 conn,
                 tenant_id=row["tenant_id"],
@@ -628,6 +701,7 @@ class SQLiteRunStore:
                     "blocks": len(artifacts.blocks),
                     "chunks": len(artifacts.chunks),
                     "views": view_counts,
+                    "assets": len(asset_rows),
                 },
             )
         return {
@@ -680,6 +754,11 @@ class SQLiteRunStore:
             view_counts: dict[str, int] = {}
             for view_row in view_rows:
                 view_counts[view_row["view_type"]] = view_counts.get(view_row["view_type"], 0) + 1
+            asset_rows = conn.execute(
+                "SELECT block_id, kind, page_number, path, sha256, bytes, payload_json"
+                " FROM run_assets WHERE parse_run_id = ? ORDER BY position",
+                (parse_run_id,),
+            ).fetchall()
 
             profile_name = str(row["artifact_profile"] or "default")
             profile = ARTIFACT_PROFILES.get(profile_name)
@@ -690,6 +769,7 @@ class SQLiteRunStore:
             counts = {
                 "blocks": len(blocks),
                 "chunks": len(chunks),
+                "assets": len(asset_rows),
                 **{name: count for name, count in view_counts.items()},
             }
             missing_required: list[str] = []
@@ -713,6 +793,16 @@ class SQLiteRunStore:
                 raise SealError(
                     "required artifacts are missing or empty: "
                     + ", ".join(sorted(missing_required))
+                )
+
+            # An asset is evidence: the file it names must still be the file that
+            # was staged.  A digest mismatch means the material changed after the
+            # parse, so the run cannot claim it as its own evidence.
+            asset_defects = _asset_evidence_defects(asset_rows)
+            if asset_defects:
+                raise SealError(
+                    "region assets do not match what was staged: "
+                    + ", ".join(asset_defects[:5])
                 )
 
             # Referential integrity: every chunk must point at a staged block.
@@ -739,6 +829,8 @@ class SQLiteRunStore:
                 "block_hash": _hash_items([row_item["payload_json"] for row_item in blocks]),
                 "chunk_hash": _hash_items([row_item["payload_json"] for row_item in chunks]),
                 "view_hash": _hash_items([row_item["payload_json"] for row_item in view_rows]),
+                "asset_hash": _hash_items([row_item["payload_json"] for row_item in asset_rows]),
+                "asset_bytes": sum(int(row_item["bytes"]) for row_item in asset_rows),
                 "source_version": row["source_version"],
             }
             sealed_at = _utc_now()
@@ -1528,6 +1620,32 @@ class SQLiteRunStore:
         expected_view_hash = str(manifest.get("view_hash") or "")
         if expected_view_hash and expected_view_hash != _hash_items(views):
             raise SealError("staged views content hash does not match the sealed manifest")
+        assets = [
+            row["payload_json"]
+            for row in conn.execute(
+                "SELECT payload_json FROM run_assets WHERE parse_run_id = ? ORDER BY position",
+                (parse_run_id,),
+            ).fetchall()
+        ]
+        if int(counts.get("assets", 0)) != len(assets):
+            raise SealError(
+                "staged assets changed after sealing: manifest has"
+                f" {counts.get('assets', 0)}, staging has {len(assets)}"
+            )
+        expected_asset_hash = str(manifest.get("asset_hash") or "")
+        if expected_asset_hash and expected_asset_hash != _hash_items(assets):
+            raise SealError("staged assets content hash does not match the sealed manifest")
+        asset_defects = _asset_evidence_defects(
+            conn.execute(
+                "SELECT block_id, path, sha256 FROM run_assets WHERE parse_run_id = ?",
+                (parse_run_id,),
+            ).fetchall()
+        )
+        if asset_defects:
+            raise SealError(
+                "region assets no longer match the sealed manifest: "
+                + ", ".join(asset_defects[:5])
+            )
 
     @staticmethod
     def _copy_staged_to_live(

@@ -132,8 +132,10 @@ class RequiredArtifact(str, Enum):
     * ``reader`` — the ``pages`` document view the reader projection reads;
     * ``records`` — the ``records`` document view;
     * ``rag`` — chunks that reached the index tier;
-    * ``assets`` / ``export`` — asset and export packages (no staging surface
-      yet, so a profile requiring them cannot seal until P0-03 stages them).
+    * ``assets`` — region asset descriptors staged with the run; each one's file
+      is verified by digest when the run is sealed and when it is published;
+    * ``export`` — export packages (no staging surface yet, so a profile
+      requiring them cannot seal until they are staged).
     """
 
     READER = "reader"
