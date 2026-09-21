@@ -24,7 +24,9 @@ from .tables import (
     TableGrid,
     apply_merge_records,
     cell_records,
+    grid_from_cells,
     grid_from_metadata,
+    grid_from_rows,
     merge_descriptors,
     resolve_table_grid,
     rows_from_table_payload,
@@ -473,6 +475,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
         "compat_pages": pages,
         "pages": structured_pages,
         "tables": tables,
+        "logical_tables": _logical_tables(tables),
         "records_summary": _records_summary(records),
         "quality": quality_payload,
         "raw_quality": raw_quality_payload,
@@ -4237,6 +4240,201 @@ def _column_continuation_groups(
         for group_id, parts in groups.items()
         if len(parts) > 1
     }
+
+
+def _logical_tables(tables: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One table per continuation group: the parts joined into a single grid.
+
+    A catalogue table that runs over several pages is physically one table per
+    page.  Read that way, a consumer has to reconstruct the whole from the parts
+    and know which rows are a repeated header; the logical table is that
+    reconstruction, and it is only built when the parts line up -- joined rows
+    for a row continuation, side-by-side columns for a column continuation.  A
+    group whose parts do not line up is reported as unaligned instead of being
+    stitched into something that looks whole.
+    """
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for table in tables:
+        if not isinstance(table, Mapping):
+            continue
+        group_id = str(table.get("continuation_group_id") or "").strip()
+        if group_id:
+            groups.setdefault(group_id, []).append(table)
+    logical: list[dict[str, Any]] = []
+    for group_id, parts in groups.items():
+        if len(parts) < 2:
+            continue
+        ordered = sorted(parts, key=lambda part: _safe_int(part.get("page_number"), default=1))
+        kind = str(ordered[0].get("continuation_kind") or "")
+        builder = _logical_rows_side_by_side if kind == "column_continuation" else _logical_rows_stacked
+        merged_rows, part_reports, warnings = builder(ordered)
+        if merged_rows is None:
+            logical.append(
+                {
+                    "logical_table_id": group_id,
+                    "group_id": group_id,
+                    "continuation_kind": kind,
+                    "table_ids": [str(part.get("table_id") or "") for part in ordered],
+                    "page_start": _safe_int(ordered[0].get("page_number"), default=1),
+                    "page_end": _safe_int(ordered[-1].get("page_number"), default=1),
+                    "parts": part_reports,
+                    "warnings": warnings,
+                    "rows": 0,
+                    "cols": 0,
+                    "cells": [],
+                }
+            )
+            continue
+        grid = grid_from_rows(merged_rows)
+        header_rows = max(0, _safe_int(ordered[0].get("header_rows"), default=1 if merged_rows else 0))
+        cells = _structured_cells(
+            grid=grid,
+            page_number=_safe_int(ordered[0].get("page_number"), default=1),
+            table_index=_safe_int(ordered[0].get("table_index"), default=1),
+        )
+        entry: dict[str, Any] = {
+            "logical_table_id": group_id,
+            "group_id": group_id,
+            "continuation_kind": kind,
+            "table_ids": [str(part.get("table_id") or "") for part in ordered],
+            "page_start": _safe_int(ordered[0].get("page_number"), default=1),
+            "page_end": _safe_int(ordered[-1].get("page_number"), default=1),
+            "rows": grid.row_count,
+            "cols": grid.column_count,
+            "header_rows": header_rows,
+            "header_values": grid.header_values(header_rows),
+            "cells": cells,
+            "parts": part_reports,
+            "warnings": warnings,
+        }
+        for key in ("table_title", "table_type", "unit", "footnotes", "source_parser"):
+            if ordered[0].get(key) is not None:
+                entry[key] = ordered[0].get(key)
+        logical.append(entry)
+    return logical
+
+
+def _logical_rows_stacked(
+    parts: Sequence[Mapping[str, Any]],
+) -> tuple[list[list[str]] | None, list[dict[str, Any]], list[str]]:
+    """Rows of a table that continues downwards: concatenate, minus repeat headers."""
+
+    merged: list[list[str]] = []
+    reports: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    header_values: list[str] = []
+    for index, part in enumerate(parts):
+        rows = _table_rows(part)
+        if not rows:
+            return None, reports, ["a part has no rows"]
+        dropped = 0
+        if index == 0:
+            header_rows = max(1, _safe_int(part.get("header_rows"), default=1))
+            header_values = [str(value or "").strip() for value in (_table_header(part) or [])]
+            if not header_values:
+                header_values = [str(value or "").strip() for value in rows[0][: len(rows[0])]]
+            merged.extend(rows)
+        else:
+            body = rows
+            if header_values and _rows_look_like_header(body[0], header_values):
+                body = rows[1:]
+                dropped = 1
+            elif header_values and len(body) > 1 and _rows_look_like_header(body[1], header_values):
+                # The part repeats its own title line above the header.
+                body = rows[2:]
+                dropped = 2
+            if not body:
+                warnings.append(f"part {part.get('table_id')} is only a repeated header")
+            merged.extend(body)
+        reports.append(
+            {
+                "table_id": str(part.get("table_id") or ""),
+                "page_number": _safe_int(part.get("page_number"), default=1),
+                "row_offset": len(merged) - len(rows) + dropped,
+                "row_count": len(merged) - (len(merged) - len(rows) + dropped),
+                "repeated_header_rows": dropped,
+            }
+        )
+    return merged, reports, warnings
+
+
+def _logical_rows_side_by_side(
+    parts: Sequence[Mapping[str, Any]],
+) -> tuple[list[list[str]] | None, list[dict[str, Any]], list[str]]:
+    """Rows of a table that continues sideways: each part adds its own columns."""
+
+    row_sets = [_table_rows(part) for part in parts]
+    if any(not rows for rows in row_sets):
+        return None, [], ["a part has no rows"]
+    row_count = len(row_sets[0])
+    if any(len(rows) != row_count for rows in row_sets):
+        return None, [], ["parts do not have the same row count"]
+    if not _side_by_side_rows_line_up(row_sets):
+        return None, [], ["row labels do not line up between parts"]
+    merged: list[list[str]] = []
+    for row_index in range(row_count):
+        row: list[str] = []
+        for rows in row_sets:
+            row.extend(str(cell or "") for cell in rows[row_index])
+        merged.append(row)
+    reports = [
+        {
+            "table_id": str(part.get("table_id") or ""),
+            "page_number": _safe_int(part.get("page_number"), default=1),
+            "row_offset": 0,
+            "row_count": row_count,
+            "repeated_header_rows": 0,
+        }
+        for part in parts
+    ]
+    return merged, reports, []
+
+
+def _side_by_side_rows_line_up(row_sets: Sequence[Sequence[Sequence[str]]]) -> bool:
+    """Whether every part names the same rows, in the same order.
+
+    Joining columns of rows that do not match would attach the wrong part numbers
+    to an item, which is worse than reporting the group as unaligned.
+    """
+
+    labels: list[tuple[str, ...]] = []
+    for rows in row_sets:
+        labels.append(tuple(_normalize_record_text(row[0] if row else "") for row in rows))
+    return len(set(labels)) == 1
+
+
+def _table_rows(table: Mapping[str, Any]) -> list[list[str]]:
+    """The rows of a projected table record."""
+
+    cells = table.get("cells")
+    if isinstance(cells, Sequence) and not isinstance(cells, (str, bytes, bytearray)):
+        grid = grid_from_cells(cells)
+        if not grid.empty:
+            return grid.rows()
+    rows = table.get("rows_data")
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)):
+        return [list(row) for row in rows if isinstance(row, Sequence)]
+    return []
+
+
+def _table_header(table: Mapping[str, Any]) -> list[str]:
+    header = table.get("header_values")
+    if isinstance(header, Sequence) and not isinstance(header, (str, bytes, bytearray)):
+        return [str(value or "") for value in header]
+    return []
+
+
+def _rows_look_like_header(row: Sequence[str], header_values: Sequence[str]) -> bool:
+    """Whether a row repeats the table's header instead of carrying data."""
+
+    cells = [_normalize_record_text(cell) for cell in row]
+    expected = [_normalize_record_text(value) for value in header_values]
+    non_empty = [cell for cell in cells if cell]
+    if not non_empty:
+        return False
+    matched = sum(1 for cell in non_empty if cell in expected)
+    return matched >= max(1, len(non_empty) - 1) and matched >= len(expected) // 2
 
 
 def _record_row_labels(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:

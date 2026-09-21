@@ -207,9 +207,44 @@ Ran 5 tests / OK
 
 用例（[tests/test_api_payloads.py](../tests/test_api_payloads.py) 新增 3 项）：表保留单位与后续注记（跨页注记不误收）、记录带 `unit` 与 `footnote_block_ids`、括号判定只接受单位形状。
 
+## 9. 拼成一张逻辑表（本次补齐）
+
+第 8 节留下的最后一条是"拼成一张物理大表"：合并此前只发生在**记录投影**，结构化投影仍是"每页一张
+物理表 + 组关系"，消费方要自己把各页拼回去、还要自己判断哪些行是重复表头。现在结构化载荷多出
+`logical_tables`：每个续接组一张**逻辑表**，物理表照旧保留（阅读与定位仍以物理表为准）。
+
+| 续接类型 | 合并方式 |
+| --- | --- |
+| `row_continuation`（向下续表） | 按页顺序拼接行；后续分片开头重复的表头行被识别并**不计入数据**（`parts[].repeated_header_rows` 报出丢了几行） |
+| `column_continuation`（向侧续表） | 各分片按行并排拼接成更宽的网格（行标签必须逐行一致，否则不拼） |
+| 对不齐的分片 | **不拼**：`cells` 为空、`rows=0`、`warnings` 说明原因（`row labels do not line up between parts` 等），而不是拼出一个看起来完整的错表 |
+
+每个逻辑表带：`logical_table_id`（即 `continuation_group_id`）、`table_ids`（按页序）、`page_start/end`、
+`rows/cols`、`header_rows`、`header_values`、`cells`（与物理表同一份跨度契约）、`parts`（每片的
+`table_id`/页码/`row_offset`/`row_count`/`repeated_header_rows`）、`unit`/`footnotes`（取自首片）、`warnings`。
+
+真实样本（`36d65cd6b61346e28e97dbaf829646de.pdf`，`dual_channel` + `table-heavy`）：
+
+```text
+44 张物理表 → 12 个续接组 → 12 张逻辑表，0 条 warnings
+列续接：p85–87（20×58）、p89–93（20×82）、p95–99、p101–103、p145–149、p151–155、p157–161、p163–167
+行续接：p269–273（5 片 → 6 行，丢掉 4 行重复表头）、p279–282（4 片 → 5 行，丢 3 行）
+        p286–290（6 片 → 7 行，丢 5 行）、p294–297（4 片 → 5 行，丢 3 行）
+物理表行数合计 466 → 逻辑表行数合计 175（重复表头与并排列都只计一次）
+```
+
+用例（[tests/test_pdf_table_continuation_records.py](../tests/test_pdf_table_continuation_records.py) 新增
+5 项）：行续接拼成一张网格且重复表头不计入数据、列续接并排且两片表头都在、行标签对不齐时如实报
+`warnings` 而不拼、不续接的表没有逻辑表、结构化投影同时给出物理表与逻辑表。
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1051 tests / OK (skipped=6)
+```
+
 ## 10. 本批未完成
 
-1. **拼成一张物理大表**：合并发生在记录投影；结构化投影仍是每页一张物理表 + 组关系。把 4 页拼成一张 19×112 的网格需要决定阅读与导出以哪一页为准，本轮先保证"记录不重不漏"这一条。
+1. **逻辑表只进结构化载荷**：IR 与 Reader 仍按物理表 + 续接元数据呈现，未使用 `logical_tables`；是否把逻辑表也推进 IR 需要先定"阅读以哪一页为准"。
 2. **错列的自动推断**：只修了"列名读不出来"这一类。列边界本身错位（文字被分到相邻列）需要按线条/对齐重算网格，样本中未复现出该类错误，故未动。
 3. **单位来自表头之外的来源**：表头之外的"单位行"（表上方单独一行 `单位：mm`）、图注中的单位、以及跨页续表只在首页声明单位的情况仍未归属；本样本没有这类行，按方案留待真实样本扩展。
 4. **困难区域的模型判断**：方案允许"只有困难区域才让模型判断列边界或片段归属"，本轮未启用，也没有新增视觉输入。

@@ -11,9 +11,17 @@ from __future__ import annotations
 
 import unittest
 
-from parsecore.api_payloads import _merge_continuation_records
+from parsecore.api_payloads import (
+    _document_projection,
+    _logical_tables,
+    _merge_continuation_records,
+    _structured_records,
+    _structured_tables,
+)
 from parsecore.models import Block, BlockType
-from parsecore.api_payloads import _structured_records, _structured_tables
+
+#: A short catalogue table used by the logical-table cases.
+CATALOG_ROWS = [["Index", "Name", "Material"], ["1", "Bolt (1-10)", "STEEL"]]
 
 
 def _table_block(
@@ -66,6 +74,116 @@ PART_TWO = [
 def _records_for(blocks: tuple[Block, ...]) -> list[dict]:
     tables = _structured_tables(blocks, doc_id="doc-1")
     return _structured_records(blocks=blocks, tables=tables, quality_signals=[], doc_id="doc-1")
+
+
+class LogicalTableTests(unittest.TestCase):
+    """待办 3: the parts of one table are published as one table as well."""
+
+    def test_a_row_continuation_becomes_one_grid_without_the_repeated_header(self) -> None:
+        blocks = (
+            _table_block("t-10", 10, CATALOG_ROWS, group="doc-1:tblgrp:p10", kind="row_continuation"),
+            _table_block(
+                "t-11",
+                11,
+                [CATALOG_ROWS[0], ["2", "Nut (2-20)", "STEEL"]],
+                group="doc-1:tblgrp:p10",
+                kind="row_continuation",
+                continues_from="t-10",
+            ),
+        )
+        tables = _structured_tables(blocks, doc_id="doc-1")
+
+        logical = _logical_tables(tables)
+
+        self.assertEqual(len(logical), 1)
+        entry = logical[0]
+        self.assertEqual(entry["table_ids"], ["doc-1:p10:t1", "doc-1:p11:t2"])
+        self.assertEqual((entry["page_start"], entry["page_end"]), (10, 11))
+        self.assertEqual(entry["header_values"], CATALOG_ROWS[0])
+        self.assertEqual(entry["rows"], len(CATALOG_ROWS) + 1)
+        texts = [cell["text"] for cell in entry["cells"]]
+        self.assertIn("Nut (2-20)", texts)
+        # The second part's repeated header is not counted as a data row.
+        self.assertEqual([part["repeated_header_rows"] for part in entry["parts"]], [0, 1])
+        self.assertEqual(entry["warnings"], [])
+        # Every physical part still reports itself.
+        self.assertEqual(
+            [table["table_id"] for table in tables], ["doc-1:p10:t1", "doc-1:p11:t2"]
+        )
+        self.assertTrue(all(table["continuation_group_id"] == "doc-1:tblgrp:p10" for table in tables))
+
+    def test_a_column_continuation_puts_the_parts_side_by_side(self) -> None:
+        blocks = (
+            _table_block("t-85", 85, PART_ONE, group="doc-1:tblgrp:p85", page_span=[85, 87]),
+            _table_block(
+                "t-87",
+                87,
+                PART_TWO,
+                group="doc-1:tblgrp:p85",
+                continues_from="t-85",
+                page_span=[85, 87],
+            ),
+        )
+
+        logical = _logical_tables(_structured_tables(blocks, doc_id="doc-1"))
+
+        self.assertEqual(len(logical), 1)
+        entry = logical[0]
+        self.assertEqual(entry["continuation_kind"], "column_continuation")
+        self.assertEqual((entry["rows"], entry["cols"]), (3, 6))
+        header = [cell["text"] for cell in entry["cells"] if cell["row_index"] == 0]
+        # Both parts' headers are present, each over the columns it introduced.
+        self.assertEqual(header[0], "REMOVAL")
+        self.assertIn("PLUG CONNECTOR 6.A.(25)", header)
+        row = [cell["text"] for cell in entry["cells"] if cell["row_index"] == 1]
+        self.assertEqual(row.count("IDENT,PLATE (1-10)"), 2)
+        self.assertEqual(entry["warnings"], [])
+
+    def test_parts_whose_rows_do_not_line_up_are_reported_instead_of_joined(self) -> None:
+        blocks = (
+            _table_block("t-85", 85, PART_ONE, group="doc-1:tblgrp:p85"),
+            _table_block(
+                "t-87",
+                87,
+                [PART_TWO[0], ["SOMETHING ELSE (9-99)", "", ""], PART_TWO[2]],
+                group="doc-1:tblgrp:p85",
+                continues_from="t-85",
+            ),
+        )
+
+        logical = _logical_tables(_structured_tables(blocks, doc_id="doc-1"))
+
+        self.assertEqual(len(logical), 1)
+        self.assertEqual(logical[0]["cells"], [])
+        self.assertEqual(logical[0]["rows"], 0)
+        self.assertIn("row labels do not line up between parts", logical[0]["warnings"])
+
+    def test_a_table_that_does_not_continue_has_no_logical_table(self) -> None:
+        blocks = (_table_block("t-1", 1, PART_ONE),)
+
+        self.assertEqual(_logical_tables(_structured_tables(blocks, doc_id="doc-1")), [])
+
+    def test_the_structured_projection_publishes_both_views(self) -> None:
+        blocks = (
+            _table_block("t-85", 85, PART_ONE, group="doc-1:tblgrp:p85", page_span=[85, 87]),
+            _table_block(
+                "t-87",
+                87,
+                PART_TWO,
+                group="doc-1:tblgrp:p85",
+                continues_from="t-85",
+                page_span=[85, 87],
+            ),
+        )
+
+        payload = _document_projection(
+            {"job": None, "doc_id": "doc-1", "blocks": blocks, "chunks": ()},
+            projection="structured",
+        )
+
+        self.assertEqual(len(payload["tables"]), 2)
+        self.assertEqual(len(payload["logical_tables"]), 1)
+        self.assertEqual(payload["logical_tables"][0]["table_ids"], [table["table_id"] for table in payload["tables"]])
 
 
 class ContinuationRecordTests(unittest.TestCase):
