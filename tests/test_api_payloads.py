@@ -13,8 +13,123 @@ from parsecore.api_payloads import (
     _quality_required_provider_capabilities,
     _project_pages,
     _structured_lines_from_blocks,
+    _table_unit_hint,
 )
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, SemanticRole
+
+
+class TableUnitAndFootnoteTests(unittest.TestCase):
+    """What a table states about itself, and the notes that belong to it."""
+
+    def _blocks(self) -> tuple[Block, ...]:
+        return (
+            Block(
+                block_id="blk-table-1",
+                doc_id="doc-notes",
+                type=BlockType.TABLE,
+                content="| Length | Qty |",
+                metadata={
+                    "page": 82,
+                    "parser": "pdf-text",
+                    "semantic_role": "table",
+                    "header_values": ["Length (mm)", "Qty"],
+                    "header_rows": 1,
+                    "cells": [["Length (mm)", "Qty"], ["120", "2"]],
+                    "rows": 2,
+                    "cols": 2,
+                },
+            ),
+            Block(
+                block_id="blk-note-a",
+                doc_id="doc-notes",
+                type=BlockType.PARAGRAPH,
+                content="(a) All the components are listed in the Y-axis.",
+                metadata={"page": 82, "semantic_role": "paragraph"},
+            ),
+            Block(
+                block_id="blk-note-b",
+                doc_id="doc-notes",
+                type=BlockType.PARAGRAPH,
+                content="注：数值为参考值。",
+                metadata={"page": 82, "semantic_role": "paragraph"},
+            ),
+            Block(
+                block_id="blk-body",
+                doc_id="doc-notes",
+                type=BlockType.PARAGRAPH,
+                content="Then the procedure continues on the next page.",
+                metadata={"page": 82, "semantic_role": "paragraph"},
+            ),
+            Block(
+                block_id="blk-table-2",
+                doc_id="doc-notes",
+                type=BlockType.TABLE,
+                content="| Part | Qty |",
+                metadata={
+                    "page": 83,
+                    "parser": "pdf-text",
+                    "semantic_role": "table",
+                    "header_values": ["Part", "Qty"],
+                    "header_rows": 1,
+                    "cells": [["Part", "Qty"], ["A", "1"]],
+                    "rows": 2,
+                    "cols": 2,
+                },
+            ),
+            Block(
+                block_id="blk-note-other-page",
+                doc_id="doc-notes",
+                type=BlockType.PARAGRAPH,
+                content="注：这是另一页的脚注。",
+                metadata={"page": 84, "semantic_role": "paragraph"},
+            ),
+        )
+
+    def test_a_table_keeps_its_unit_and_the_notes_that_follow_it(self) -> None:
+        blocks = self._blocks()
+        payload = _document_projection(
+            {"job": None, "doc_id": "doc-notes", "blocks": blocks, "chunks": ()},
+            projection="structured",
+        )
+
+        first, second = payload["tables"]
+        self.assertEqual(first["unit"], "mm")
+        self.assertEqual(
+            [note["block_id"] for note in first["footnotes"]],
+            ["blk-note-a", "blk-note-b"],
+        )
+        self.assertEqual(first["footnotes"][0]["text"], "(a) All the components are listed in the Y-axis.")
+        # A table that states no unit gets none, and a note on another page is not
+        # pulled in: a note belongs to the table it follows on its own page.
+        self.assertNotIn("unit", second)
+        self.assertNotIn("footnotes", second)
+
+    def test_a_bracket_is_only_a_unit_when_it_holds_one(self) -> None:
+        # "(a)" is a note marker and "(25)" is a row label; reading either as the
+        # table's unit would put a wrong unit on every record of the table.  The
+        # real sample's tables are full of both.
+        for headers in (["(a)", "Qty"], ["(25)", "Qty"], ["Torque (continued)"], ["Notes 1)"]):
+            self.assertEqual(_table_unit_hint(header_values=headers, rows=[]), "", headers)
+        for headers, expected in (
+            (["Temperatur (°C)"], "°C"),
+            (["压力 (MPa)"], "MPa"),
+            (["Speed (rpm)"], "rpm"),
+            (["单位：N·m"], "N·m"),
+        ):
+            self.assertEqual(_table_unit_hint(header_values=headers, rows=[]), expected, headers)
+
+    def test_records_carry_the_unit_and_point_at_their_notes(self) -> None:
+        blocks = self._blocks()
+        records = _document_records_projection(
+            {"job": None, "doc_id": "doc-notes", "blocks": blocks, "chunks": ()},
+            limit=10,
+            offset=0,
+        )
+
+        record = records["items"][0]
+        self.assertEqual(record["unit"], "mm")
+        self.assertEqual(record["footnote_block_ids"], ["blk-note-a", "blk-note-b"])
+        self.assertNotIn("footnotes", record)
 
 
 class DocumentProjectionQualitySignalTests(unittest.TestCase):

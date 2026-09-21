@@ -3968,9 +3968,106 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
             declared_row_widths=metadata.get("source_row_col_counts"),
             raw_rows=raw_rows,
         )
+        unit = _table_unit_hint(header_values=table.get("header_values"), rows=raw_rows)
+        if unit:
+            table["unit"] = unit
+        notes = _notes_belonging_to_table(blocks=blocks, block_index=fallback_index - 1, page_number=page_number)
+        if notes:
+            table["footnotes"] = notes
         table["ordinal"] = fallback_index
         tables.append(table)
     return tables
+
+
+#: A leading note marker: "(a)", "1)", "注：", "Note:", "*", "†".  A paragraph
+#: that starts with one and sits right after a table is that table's note, not
+#: loose body text.
+_TABLE_NOTE_PATTERN = re.compile(
+    r"^\s*(?:[（(]?[a-z0-9]{1,3}[)）.、]|[*†‡§]|注\s*[:：]|注\s*\d|Note\s*[:：]|Notes?\s*\d|Source\s*[:：]|来源\s*[:：])",
+    re.IGNORECASE,
+)
+#: A unit stated in a header cell: "Length (mm)", "单位：mm", "Unit: mm".
+_TABLE_UNIT_PATTERNS = (
+    re.compile(r"[（(]\s*(?P<unit>[^\s（()）]{1,12})\s*[)）]\s*$"),
+    re.compile(r"(?:单位|Unit|UNIT)\s*[:：]\s*(?P<unit>[^\s，,；;]{1,12})"),
+)
+#: What a unit token looks like: letters (with the symbols units use) and digits,
+#: joined by unit separators.  "(a)" (a note marker) and "(25)" (a row label) are
+#: not units, which is exactly the mistake a bare bracket pattern makes.
+_UNIT_TOKEN_PATTERN = re.compile(
+    r"^(?=.*[^\W\d_])(?:[^\W\d_]|[·.^/%°µμΩ‰′″])+$", re.UNICODE
+)
+
+
+def _table_unit_hint(*, header_values: Any, rows: Sequence[Sequence[str]]) -> str:
+    """The measurement unit a table states about itself, if it states one.
+
+    A unit is a fact about the values, so it travels with the table (and with the
+    records read from it) instead of being guessed per cell.  Only an explicit
+    statement counts: a bracketed token in a header cell or a ``单位``/``Unit``
+    label.  A coordinate unit such as the region's ``pt`` is not one of these.
+    """
+
+    candidates: list[str] = []
+    if isinstance(header_values, Sequence) and not isinstance(header_values, (str, bytes, bytearray)):
+        candidates.extend(str(value or "") for value in header_values)
+    for row in list(rows)[:2]:
+        if isinstance(row, Sequence) and not isinstance(row, (str, bytes, bytearray)):
+            candidates.extend(str(value or "") for value in row)
+    for text in candidates:
+        normalized = " ".join(text.split())
+        if not normalized:
+            continue
+        for pattern in _TABLE_UNIT_PATTERNS:
+            match = pattern.search(normalized)
+            if not match:
+                continue
+            unit = str(match.group("unit") or "").strip()
+            # "Table 1)" / "(continued)" style tokens are not units, a token made
+            # only of punctuation carries nothing, and a single letter is a marker
+            # ("(a)") rather than a unit.
+            if not unit or not _UNIT_TOKEN_PATTERN.match(unit):
+                continue
+            if len(unit) < 2 or unit.lower() in {"continued", "cont", "contd", "续", "续表"}:
+                continue
+            return unit
+    return ""
+
+
+def _notes_belonging_to_table(
+    *, blocks: tuple[Block, ...], block_index: int, page_number: int
+) -> list[dict[str, Any]]:
+    """Notes that follow a table on the same page, in order, attributed to it.
+
+    A note ("(a) All the components are listed…", "注：…") is part of what the table
+    means.  Left as a loose paragraph it is exported as body text and its
+    attachment to the values is lost.  Geometry is not needed for this: the note
+    immediately follows its table, shares its page, and starts with a marker.
+    """
+
+    notes: list[dict[str, Any]] = []
+    for follower in blocks[block_index + 1 :]:
+        if follower.type == BlockType.TABLE:
+            break
+        metadata = follower.metadata or {}
+        follower_page = _safe_int(metadata.get("page"), default=page_number)
+        if follower_page != page_number:
+            break
+        text = str(follower.content or "").strip()
+        if not text:
+            continue
+        if not _TABLE_NOTE_PATTERN.match(text):
+            break
+        notes.append(
+            {
+                "block_id": follower.block_id,
+                "page_number": follower_page,
+                "text": text,
+            }
+        )
+        if len(notes) >= 3:
+            break
+    return notes
 
 
 def _source_row_col_counts(
@@ -4094,9 +4191,18 @@ def _structured_records(
                 "normalized_text": _normalize_record_text(raw_text),
                 "quality_signal_codes": signal_codes_by_row.get((table_id, row_index), []),
             }
-            for key in ("section", "sheet_name", "table_title", "table_type"):
+            for key in ("section", "sheet_name", "table_title", "table_type", "unit"):
                 if table.get(key) is not None:
                     record[key] = table.get(key)
+            # The notes that belong to the table belong to its records too; the
+            # text stays on the table payload so a record does not repeat it.
+            notes = table.get("footnotes")
+            if isinstance(notes, list) and notes:
+                record["footnote_block_ids"] = [
+                    str(note.get("block_id") or "")
+                    for note in notes
+                    if isinstance(note, Mapping) and note.get("block_id")
+                ]
             record["quality_signal_codes"] = list(
                 dict.fromkeys(list(record.get("quality_signal_codes") or []) + _table_record_signal_codes(record))
             )
