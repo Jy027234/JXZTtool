@@ -4086,7 +4086,125 @@ def _structured_records(
                 existing_count=len(records),
             )
         )
-    return records
+    return _merge_continuation_records(records, tables)
+
+
+def _column_continuation_groups(
+    tables: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Table groups whose parts add columns for the same rows, in page order."""
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for table in tables:
+        if not isinstance(table, Mapping):
+            continue
+        if str(table.get("continuation_kind") or "") != "column_continuation":
+            continue
+        group_id = str(table.get("continuation_group_id") or "")
+        if group_id:
+            groups.setdefault(group_id, []).append(table)
+    return {
+        group_id: sorted(parts, key=lambda part: _safe_int(part.get("page_number"), default=1))
+        for group_id, parts in groups.items()
+        if len(parts) > 1
+    }
+
+
+def _record_row_labels(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    labels: list[str] = []
+    for record in records:
+        cells = record.get("raw_cells")
+        first = str(cells[0]) if isinstance(cells, list) and cells else ""
+        labels.append(_normalize_record_text(first))
+    return tuple(labels)
+
+
+def _merge_continuation_records(
+    records: list[dict[str, Any]],
+    tables: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """One record per logical row when a table continues its columns on later pages.
+
+    A catalogue table wider than the page repeats its item rows on every page part
+    and adds another block of part-number columns.  Read per page, the same item
+    appears once per part, so a consumer cannot tell a repeated label from a new
+    item and has to guess which columns belong together.  The parts are joined here
+    instead: rows are matched by their label, the first part keeps the plain field
+    names, later parts are suffixed with their page, and the record says which
+    parts it came from.  Parts whose rows do not line up are left as they are --
+    merging them would silently attach the wrong columns to a row.
+    """
+
+    groups = _column_continuation_groups(tables)
+    if not groups:
+        return records
+    records_by_table: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        records_by_table.setdefault(str(record.get("table_id") or ""), []).append(record)
+
+    replacements: dict[str, dict[str, Any]] = {}
+    replaced_ids: set[str] = set()
+    for group_id, parts in groups.items():
+        part_records = [records_by_table.get(str(part.get("table_id") or "")) or [] for part in parts]
+        if any(not items for items in part_records):
+            continue
+        labels = {_record_row_labels(items) for items in part_records}
+        if len(labels) != 1:
+            continue
+        row_count = len(part_records[0])
+        if any(len(items) != row_count for items in part_records):
+            continue
+        pages = [_safe_int(part.get("page_number"), default=1) for part in parts]
+        for row_index in range(row_count):
+            base = part_records[0][row_index]
+            fields = dict(base.get("fields") or {})
+            raw_cells = list(base.get("raw_cells") or [])
+            signal_codes = list(base.get("quality_signal_codes") or [])
+            for part_index in range(1, len(part_records)):
+                part = parts[part_index]
+                page = pages[part_index]
+                for key, value in (part_records[part_index][row_index].get("fields") or {}).items():
+                    name = key if key not in fields else f"{key}__p{page}"
+                    fields[name] = value
+                raw_cells.extend(part_records[part_index][row_index].get("raw_cells") or [])
+                signal_codes.extend(part_records[part_index][row_index].get("quality_signal_codes") or [])
+            merged = dict(base)
+            merged["record_id"] = f"{group_id}:r{base.get('row_index')}"
+            merged["fields"] = fields
+            merged["raw_cells"] = raw_cells
+            merged["raw_text"] = "\t".join(str(cell) for cell in raw_cells).strip()
+            merged["normalized_text"] = _normalize_record_text(merged["raw_text"])
+            merged["page_start"] = min(pages)
+            merged["page_end"] = max(pages)
+            merged["quality_signal_codes"] = list(dict.fromkeys(signal_codes))
+            merged["continuation"] = {
+                "group_id": group_id,
+                "kind": "column_continuation",
+                "part_count": len(part_records),
+                "parts": [
+                    {
+                        "table_id": str(part.get("table_id") or ""),
+                        "page_number": pages[part_index],
+                    }
+                    for part_index, part in enumerate(parts)
+                ],
+            }
+            replacements[str(base.get("record_id") or "")] = merged
+            for items in part_records:
+                replaced_ids.add(str(items[row_index].get("record_id") or ""))
+
+    if not replacements:
+        return records
+    merged_records: list[dict[str, Any]] = []
+    for record in records:
+        record_id = str(record.get("record_id") or "")
+        if record_id in replaced_ids:
+            replacement = replacements.get(record_id)
+            if replacement is not None:
+                merged_records.append(replacement)
+            continue
+        merged_records.append(record)
+    return merged_records
 
 
 def _records_from_snapshot(
