@@ -353,10 +353,10 @@ class RegionAssetRetentionTests(unittest.TestCase):
             first_files = by_run[first["parse_run_id"]]
             second_files = by_run[second["parse_run_id"]]
 
-            preview = runtime.cleanup_region_assets(doc_id="doc-retention", retention_seconds=0)
+            preview = runtime.cleanup_run_artifacts(doc_id="doc-retention", retention_seconds=0)
             after_dry_run_exists = [path.exists() for path in first_files]
             after_dry_run_second = [path.exists() for path in second_files]
-            executed = runtime.cleanup_region_assets(
+            executed = runtime.cleanup_run_artifacts(
                 doc_id="doc-retention", retention_seconds=0, dry_run=False
             )
             remaining_runs = runtime.run_store.list_run_assets(doc_id="doc-retention")
@@ -392,7 +392,7 @@ class RegionAssetRetentionTests(unittest.TestCase):
                 for run in runtime.run_store.list_run_assets(doc_id="doc-single")
                 for asset in run["assets"]
             ]
-            result = runtime.cleanup_region_assets(
+            result = runtime.cleanup_run_artifacts(
                 doc_id="doc-single", retention_seconds=0, dry_run=False
             )
             still_there = [path.exists() for path in files]
@@ -404,6 +404,54 @@ class RegionAssetRetentionTests(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["parse_run_id"], published["parse_run_id"])
         self.assertIn(published["parse_run_id"], result["protected_runs"])
+
+    def test_the_sweep_also_collects_the_staged_rows_of_an_old_run(self) -> None:
+        # Files go first and descriptors second, so a failure leaves a run whose
+        # descriptors point at nothing.  The live tier belongs to the published run
+        # and is untouched, which keeps rollback possible.
+        with TemporaryWorkspace(PDF_CONFIG) as workspace:
+            document_path = workspace.create_positioned_pdf("parts.pdf", [PAGE])
+            runtime = build_runtime(workspace.config_path)
+            first = self._publish_with_assets(
+                runtime, doc_id="doc-staged", block_id="doc-staged-t-1", source=document_path, text="v1"
+            )
+            second = self._publish_with_assets(
+                runtime, doc_id="doc-staged", block_id="doc-staged-t-2", source=document_path, text="v2"
+            )
+            preview = runtime.cleanup_run_artifacts(doc_id="doc-staged", retention_seconds=0)
+            live_before = [
+                block.block_id for block in runtime.job_store.get_blocks(doc_id="doc-staged")
+            ]
+            result = runtime.cleanup_run_artifacts(
+                doc_id="doc-staged", retention_seconds=0, dry_run=False
+            )
+            staged = {
+                run["parse_run_id"]: run["staged"]
+                for run in runtime.run_store.list_staged_runs(doc_id="doc-staged")
+            }
+            live_after = [
+                block.block_id for block in runtime.job_store.get_blocks(doc_id="doc-staged")
+            ]
+            restored = runtime.run_store.restore_live_from_run(doc_id="doc-staged")
+
+        self.assertEqual(
+            preview["deleted_staged_rows"], {"blocks": 0, "chunks": 0, "views": 0, "assets": 0}
+        )
+        self.assertEqual(result["eligible_runs"], 1)
+        self.assertEqual(result["deleted_staged_rows"]["blocks"], 1)
+        self.assertEqual(result["deleted_staged_rows"]["views"], 1)
+        self.assertEqual(result["deleted_staged_rows"]["assets"], 1)
+        self.assertEqual(result["deleted_files"], 1)
+        # The collected run holds nothing; the published run keeps everything.
+        self.assertEqual(
+            staged[first["parse_run_id"]], {"blocks": 0, "chunks": 0, "views": 0, "assets": 0}
+        )
+        self.assertEqual(staged[second["parse_run_id"]]["blocks"], 1)
+        self.assertEqual(staged[second["parse_run_id"]]["assets"], 1)
+        # The live tier of the published run is unchanged and still restorable.
+        self.assertEqual(live_before, live_after)
+        self.assertTrue(live_after)
+        self.assertTrue(restored["restored"])
 
     def test_a_protected_preview_is_never_collected(self) -> None:
         config = PDF_CONFIG.replace(
@@ -442,7 +490,7 @@ class RegionAssetRetentionTests(unittest.TestCase):
                 ),
             )
             state = runtime.publication_state(doc_id="doc-preview")
-            result = runtime.cleanup_region_assets(
+            result = runtime.cleanup_run_artifacts(
                 doc_id="doc-preview", retention_seconds=0, dry_run=False
             )
             remaining = runtime.run_store.list_run_assets(doc_id="doc-preview")
@@ -468,7 +516,7 @@ class RegionAssetRetentionTests(unittest.TestCase):
                 if asset["parse_run_id"] == first["parse_run_id"]:
                     Path(asset["assets"][0]["path"]).unlink()
 
-            result = runtime.cleanup_region_assets(
+            result = runtime.cleanup_run_artifacts(
                 doc_id="doc-missing", retention_seconds=0, dry_run=False
             )
             remaining = runtime.run_store.list_run_assets(doc_id="doc-missing")

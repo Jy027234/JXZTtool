@@ -1877,7 +1877,7 @@ class ParseRuntime:
             )
         return updated
 
-    def cleanup_region_assets(
+    def cleanup_run_artifacts(
         self,
         *,
         tenant_id: str | None = None,
@@ -1885,14 +1885,16 @@ class ParseRuntime:
         retention_seconds: int | None = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
-        """Collect region asset files whose run is neither formal nor pending.
+        """Collect the staged artifacts of runs nothing refers to any more.
 
-        The material a run claims as its evidence must not disappear while it is
-        still the version a reader is served, or the run an operator may still
-        publish: those two are protected.  Everything else past the retention
-        window is removed, files first and descriptors second, so a failure leaves
-        a run that can still be verified rather than a descriptor pointing at
-        nothing.
+        Every run keeps its staged blocks, chunks, views and region assets so it
+        can be promoted or restored later.  Two runs must keep them no matter how
+        old they are: the active published run, which ``restore_live_from_run()``
+        would rebuild the live tier from, and the preview run an operator may
+        still publish.  Everything else past the retention window is collected --
+        asset files first, then the staged rows, so a failure leaves a run whose
+        descriptors point at nothing rather than files nobody knows about.  The
+        live tier is never touched by this: it belongs to the published run.
         """
 
         if self.run_store is None:
@@ -1904,10 +1906,10 @@ class ParseRuntime:
         window = (
             int(retention_seconds)
             if retention_seconds is not None
-            else int(self.settings.runtime.region_asset_retention_seconds)
+            else int(self.settings.runtime.run_artifact_retention_seconds)
         )
         cutoff = time.time() - max(0, window)
-        runs = self.run_store.list_run_assets(tenant_id=tenant_id, doc_id=doc_id)
+        runs = self.run_store.list_staged_runs(tenant_id=tenant_id, doc_id=doc_id)
         docs = {str(run["doc_id"]) for run in runs}
         protected_runs: set[str] = set()
         for document in docs:
@@ -1920,6 +1922,7 @@ class ParseRuntime:
         deleted_files = 0
         freed_bytes = 0
         missing_files = 0
+        deleted_rows = {"blocks": 0, "chunks": 0, "views": 0, "assets": 0}
         errors: list[str] = []
         for run in runs:
             parse_run_id = str(run["parse_run_id"])
@@ -1927,17 +1930,20 @@ class ParseRuntime:
                 continue
             if _rfc3339_timestamp(run.get("created_at")) > cutoff:
                 continue
-            files = [asset for asset in run.get("assets") or ()]
+            staged = dict(run.get("staged") or {})
+            assets = self._run_asset_files(
+                parse_run_id=parse_run_id, tenant_id=tenant_id, doc_id=doc_id
+            )
             collected.append(
                 {
                     "parse_run_id": parse_run_id,
                     "doc_id": str(run.get("doc_id") or ""),
                     "publication_status": str(run.get("publication_status") or ""),
-                    "count": len(files),
-                    "bytes": int(run.get("bytes") or 0),
+                    "staged": staged,
+                    "asset_files": len(assets),
                 }
             )
-            for asset in files:
+            for asset in assets:
                 path = Path(str(asset.get("path") or ""))
                 if not path.exists():
                     missing_files += 1
@@ -1954,18 +1960,23 @@ class ParseRuntime:
                     continue
                 deleted_files += 1
                 freed_bytes += size
-            if not dry_run:
-                try:
-                    self.run_store.delete_run_assets(parse_run_id=parse_run_id)
-                except Exception as exc:  # pragma: no cover - store failure path
-                    errors.append(f"{parse_run_id}:descriptors:{type(exc).__name__}")
+            if dry_run:
+                continue
+            try:
+                removed = self.run_store.delete_staged_artifacts(parse_run_id=parse_run_id)
+            except Exception as exc:  # pragma: no cover - store failure path
+                errors.append(f"{parse_run_id}:staged:{type(exc).__name__}")
+                continue
+            for key in deleted_rows:
+                deleted_rows[key] += int(removed.get(key, 0) or 0)
         if not dry_run and collected:
             self.event_logger.log(
-                "region_assets_collected",
+                "run_artifacts_collected",
                 runs=len(collected),
                 files=deleted_files,
                 bytes=freed_bytes,
                 missing_files=missing_files,
+                staged=dict(deleted_rows),
             )
         return {
             "status": "ok" if not errors else "degraded",
@@ -1977,9 +1988,23 @@ class ParseRuntime:
             "deleted_files": deleted_files,
             "freed_bytes": freed_bytes,
             "missing_files": missing_files,
+            "deleted_staged_rows": deleted_rows,
             "runs": collected,
             "errors": errors,
         }
+
+    def _run_asset_files(
+        self, *, parse_run_id: str, tenant_id: str | None, doc_id: str | None
+    ) -> list[dict[str, Any]]:
+        """The asset files one run claims."""
+
+        list_assets = getattr(self.run_store, "list_run_assets", None)
+        if not callable(list_assets):
+            return []
+        for run in list_assets(tenant_id=tenant_id, doc_id=doc_id):
+            if str(run.get("parse_run_id") or "") == str(parse_run_id):
+                return [dict(asset) for asset in run.get("assets") or ()]
+        return []
 
     def _persist_document_views(
         self,

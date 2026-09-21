@@ -79,10 +79,11 @@ class RuntimeSettings:
     region_assets: bool = False
     # Render resolution for those region assets.
     region_asset_resolution: int = 144
-    # How long a region asset file is kept after its run was created.  The active
-    # published run and a document's preview run are never collected: they are the
-    # evidence a formal version or a pending decision refers to.
-    region_asset_retention_seconds: int = 2592000
+    # How long a run's staged artifacts (blocks/chunks/views/region assets) are kept
+    # after the run was created.  The active published run and a document's preview
+    # run are never collected: they are the evidence a formal version or a pending
+    # decision refers to.
+    run_artifact_retention_seconds: int = 2592000
     # P0-07: who is trusted to decide which tenant a request belongs to.
     # ``trusted`` keeps the historical behaviour (the caller's tenant_id
     # parameter is the tenant).  ``enforced`` requires a host-authenticated
@@ -794,8 +795,8 @@ def load_settings(path: str | Path) -> ParseCoreSettings:
             region_asset_resolution=max(
                 36, int(runtime.get("region_asset_resolution", 144) or 144)
             ),
-            region_asset_retention_seconds=max(
-                0, int(runtime.get("region_asset_retention_seconds", 2592000) or 0)
+            run_artifact_retention_seconds=max(
+                0, int(runtime.get("run_artifact_retention_seconds", 2592000) or 0)
             ),
             tenant_scope=str(runtime.get("tenant_scope", "trusted") or "trusted").strip().lower(),
             tenant_header=str(runtime.get("tenant_header", "x-parsecore-tenant") or "x-parsecore-tenant").strip().lower(),

@@ -146,6 +146,7 @@ allow_mock_providers = false
 | `tenant_scope` | `trusted` | `trusted` / `enforced` | P0-07：谁决定请求属于哪个租户。`trusted` 保持既有语义（宿主负责认证，`tenant_id` 参数即租户）。`enforced` 要求宿主通过 `tenant_header` 注入已认证租户，参数只能复述，不一致返回 `403 tenant_mismatch`，缺少身份返回 `403 tenant_identity_required`。对外多租户开放前必须设为 `enforced`。 |
 | `region_assets` | `false` | 布尔 | 待办 1/3：把表区/图片区的**原图**落盘（`<object_store>/regions/<doc_id>/<block_id>.png`），块元数据加 `asset` 描述（含 `sha256`/字节数/尺寸/来源框，`verified: false`）。只写 `local://` 对象存储。默认关闭：297 页目录图册实测 455 张、约 15 MB、多花约 16 秒，不看不用的图不必先渲染。 |
 | `region_asset_resolution` | `144` | 36–600 | 区域素材渲染分辨率（dpi）。越高越清晰也越慢。 |
+| `run_artifact_retention_seconds` | `2592000` | 秒 | run staging 产物（blocks/chunks/views + 区域素材）的保留期，供 `cleanup_run_artifacts()` 回收；当前正式 run 与待复核预览 run 永不回收，活层永不动。 |
 | `tenant_header` | `x-parsecore-tenant` | HTTP 头名 | 宿主注入已认证租户的头名（仅 `enforced` 模式必需）。响应同样带 `x-parsecore-tenant` 与 `x-parsecore-tenant-source` 供审计。 |
 | `capability_optional` | `[]` | 能力名列表 | 声明哪些能力允许降级而不阻塞交付。默认 `rerank`、`ocr`、`index` 为 optional；`embedding`/`llm` 未启用时为 `disabled`（合法关闭，不算故障），显式启用后若初始化失败或缺少凭据则视为 required 并阻止受理。也可写 `parser:<name>`。 |
 | `execution_mode` | `inline` | `inline` / `queue-worker` | `inline` 由 API 进程执行后台 job；`queue-worker` 由 API 提交 job、Worker 独立消费。 |

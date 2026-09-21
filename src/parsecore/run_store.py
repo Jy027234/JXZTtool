@@ -1198,6 +1198,115 @@ class SQLiteRunStore:
             )
         return tuple(grouped.values())
 
+    def list_staged_runs(
+        self, *, tenant_id: str | None = None, doc_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        """Every run with staged artifacts, and how much it is holding.
+
+        A retention job decides from this: identity, when it was created and
+        sealed, how it was published, and the staged row counts per table.
+        """
+
+        normalized_tenant = _normalize_tenant(tenant_id) if tenant_id is not None else None
+        conditions: list[str] = []
+        params: list[Any] = []
+        if normalized_tenant is not None:
+            conditions.append("tenant_id = ?")
+            params.append(normalized_tenant)
+        if doc_id:
+            conditions.append("doc_id = ?")
+            params.append(str(doc_id))
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT parse_run_id, tenant_id, doc_id, created_at, sealed_at,"
+                " publication_status, validation_status FROM parse_runs" + where,
+                tuple(params),
+            ).fetchall()
+            blocks = {
+                str(row["parse_run_id"]): int(row["count"])
+                for row in conn.execute(
+                    "SELECT parse_run_id, COUNT(*) AS count FROM run_blocks GROUP BY parse_run_id"
+                ).fetchall()
+            }
+            chunks = {
+                str(row["parse_run_id"]): int(row["count"])
+                for row in conn.execute(
+                    "SELECT parse_run_id, COUNT(*) AS count FROM run_chunks GROUP BY parse_run_id"
+                ).fetchall()
+            }
+            views = {
+                str(row["parse_run_id"]): int(row["count"])
+                for row in conn.execute(
+                    "SELECT parse_run_id, COUNT(*) AS count FROM run_document_views"
+                    " GROUP BY parse_run_id"
+                ).fetchall()
+            }
+            assets = {
+                str(row["parse_run_id"]): int(row["count"])
+                for row in conn.execute(
+                    "SELECT parse_run_id, COUNT(*) AS count FROM run_assets GROUP BY parse_run_id"
+                ).fetchall()
+            }
+        return tuple(
+            {
+                "parse_run_id": str(row["parse_run_id"]),
+                "tenant_id": str(row["tenant_id"]),
+                "doc_id": str(row["doc_id"]),
+                "created_at": str(row["created_at"] or ""),
+                "sealed_at": str(row["sealed_at"] or ""),
+                "publication_status": str(row["publication_status"] or ""),
+                "validation_status": str(row["validation_status"] or ""),
+                "staged": {
+                    "blocks": blocks.get(str(row["parse_run_id"]), 0),
+                    "chunks": chunks.get(str(row["parse_run_id"]), 0),
+                    "views": views.get(str(row["parse_run_id"]), 0),
+                    "assets": assets.get(str(row["parse_run_id"]), 0),
+                },
+            }
+            for row in rows
+        )
+
+    def delete_staged_artifacts(self, *, parse_run_id: str) -> dict[str, int]:
+        """Drop everything a run staged, and report what was removed.
+
+        The live tier is untouched: it belongs to the published run, not to the
+        run being collected.  Callers delete the asset files this returns first,
+        so a failure leaves descriptors pointing at nothing rather than files
+        nobody knows about.
+        """
+
+        with self._write_transaction() as conn:
+            self._require_run(conn, parse_run_id)
+            counts = {
+                "blocks": int(
+                    conn.execute(
+                        "DELETE FROM run_blocks WHERE parse_run_id = ?", (str(parse_run_id),)
+                    ).rowcount
+                    or 0
+                ),
+                "chunks": int(
+                    conn.execute(
+                        "DELETE FROM run_chunks WHERE parse_run_id = ?", (str(parse_run_id),)
+                    ).rowcount
+                    or 0
+                ),
+                "views": int(
+                    conn.execute(
+                        "DELETE FROM run_document_views WHERE parse_run_id = ?",
+                        (str(parse_run_id),),
+                    ).rowcount
+                    or 0
+                ),
+                "assets": int(
+                    conn.execute(
+                        "DELETE FROM run_assets WHERE parse_run_id = ?", (str(parse_run_id),)
+                    ).rowcount
+                    or 0
+                ),
+            }
+        return counts
+
     def delete_run_assets(self, *, parse_run_id: str) -> int:
         """Drop a run's asset descriptors after their files have been removed."""
 

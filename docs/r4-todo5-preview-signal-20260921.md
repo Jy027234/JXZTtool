@@ -246,13 +246,45 @@ regression_suite  failed —— 四项既有漂移，与本轮改动无关（数
 `tests/test_read_consistency.py::test_every_export_dataset_states_the_version_it_served` 在
 "OLD 已发布 + NEW 预览"场景下逐个数据集导出，断言每行报的都是 `job-old`。
 
-## 6. 仍然留待后续
+## 6. staged 产物清理作业（本次补齐）
+
+第 5 节留下的"已发布证据清理保护"在此补齐。此前每个 run 的 staging 行（blocks/chunks/views）与区域
+素材都永久保留，没有任何回收路径。
+
+| 对象 | 处理 |
+| --- | --- |
+| 文档当前 `active_run_id` | 永不回收：`restore_live_from_run()` 回滚要读它的 staging 行 |
+| 文档当前 `preview_run_id` | 永不回收：复核后仍可能发布 |
+| 其它 run 超过保留期 | 回收：**先删素材文件、再删 staging 行**（失败时留下"描述指向已删文件"，而不是无人知晓的文件） |
+| 活层（live tier） | **永不动**：它属于已发布 run；清理后 `restore_live_from_run()` 仍可回滚 |
+| 默认保留期 | `[runtime] run_artifact_retention_seconds`（默认 2592000 = 30 天） |
+
+入口 `cleanup_run_artifacts(tenant_id=…, doc_id=…, retention_seconds=…, dry_run=True)`（默认 dry-run），
+返回 `{scanned_runs, protected_runs, eligible_runs, deleted_files, freed_bytes, missing_files,
+deleted_staged_rows{blocks,chunks,views,assets}, runs, errors}`；真实删除才写 `run_artifacts_collected`。
+它取代了上一轮只清素材的 `cleanup_region_assets()`（同名能力是其子集，保留一个入口）。
+
+真实存储实测（297 页目录图册 run + 一个新区块，455 素材/份）：
+
+```text
+只有 1 个已发布 run 时：scanned 2，eligible 1（旧的未发布 run），protected = 当前正式 run
+发布第二个版本后 dry-run：eligible 2、would delete 910 个文件
+execute：deleted_files 455、missing_files 455（上一轮已删过的文件如实计缺）、freed 15,025,614 字节
+         deleted_staged_rows = {blocks: 3732, chunks: 3646, views: 22588, assets: 910}
+正式 run 的活层：restore_live_from_run() 仍返回 restored=true，磁盘剩 1 个 PNG（新版本的素材）
+```
+
+用例（[tests/test_region_assets.py](../tests/test_region_assets.py) 新增 1 项）：清理后旧 run 的
+`{blocks,chunks,views,assets}` 全为 0、正式 run 的计数不变、活层块列表不变、`restore_live_from_run()`
+仍可回滚；dry-run 的 `deleted_staged_rows` 全为 0。全量 **1052 项 OK (skipped=6)**。
+
+## 7. 仍然留待后续
 
 1. **索引层的 run 隔离**：`PgVectorIndex` 仍不能按 run 过滤，因此索引能力未计入 `SQLiteRunStore` 的能力声明；正式部署的 Postgres/pgvector 一致性与超大目录演练仍按方案留在部署事项里。
 2. **已发布证据清理保护**：staged 产物的清理作业尚未实现（方案把它列为部署相关事项）。
 3. **复核入口的权限与批量操作**：`publish 复核` 目前只做"必须给出决定"的校验，未接入宿主鉴权勾子，也没有"一次复核整篇（含所有待复核分片）"的批量入口；宿主可循环调用分片入口再发布父文档。
 
-## 7. 回滚
+## 8. 回滚
 
 - 代码回滚：`git revert` 本次提交；`consumer_signal` 回到"未发布一律 `not_ready`"的旧行为，`preview` 字段随之消失（schema 需一并回滚），读取身份回到"最新 job"。
 - 行为回滚：不需要开关。预览只增加信息，不改变读取服务哪个 run、也不改变发布判定；读取身份修正只影响快照报告的身份字段，不改变服务的内容。
