@@ -234,12 +234,23 @@ regression_suite  failed —— 四项既有漂移，与本轮改动无关（数
 即"复核分片 → 复核整篇"两次决定就能得到完整的 297 页正式版本；在此之前父文档不会用缺页的
 合并结果冒充正式版本。
 
+### 5.7 导出数据集带上所服务的版本标识（本次补齐）
+
+补 pages / lines / coverage / reader 四个数据集的导出回归时，发现一个具体缺陷：**这些数据集导出的
+文件里没有任何版本标识**。records 的行自带 `parse_run_id`，而 pages / lines 的行来自
+`document_views` 持久化视图（本身不含标识），coverage / reader 的行也不重复信封字段；导出的文件
+只有行、没有信封，于是"这份导出属于哪个 run"无法回答——正是完成标准里"正文和版本标识一致"。
+
+修正：导出页在写出前，用该次读取所服务的版本（`payload["doc_id"]` / `payload["parse_run_id"]`）
+给每个行补上 `doc_id` / `parse_run_id`（行已有标识时不覆盖）。回归用例
+`tests/test_read_consistency.py::test_every_export_dataset_states_the_version_it_served` 在
+"OLD 已发布 + NEW 预览"场景下逐个数据集导出，断言每行报的都是 `job-old`。
+
 ## 6. 仍然留待后续
 
 1. **索引层的 run 隔离**：`PgVectorIndex` 仍不能按 run 过滤，因此索引能力未计入 `SQLiteRunStore` 的能力声明；正式部署的 Postgres/pgvector 一致性与超大目录演练仍按方案留在部署事项里。
 2. **已发布证据清理保护**：staged 产物的清理作业尚未实现（方案把它列为部署相关事项）。
-3. **导出数据集全覆盖**：本次覆盖 records 导出与结构化投影；pages/lines/coverage/reader 四个数据集走同一 `get_document` 快照，未各自单测。
-4. **复核入口的权限与批量操作**：`publish 复核` 目前只做"必须给出决定"的校验，未接入宿主鉴权勾子，也没有"一次复核整篇（含所有待复核分片）"的批量入口；宿主可循环调用分片入口再发布父文档。
+3. **复核入口的权限与批量操作**：`publish 复核` 目前只做"必须给出决定"的校验，未接入宿主鉴权勾子，也没有"一次复核整篇（含所有待复核分片）"的批量入口；宿主可循环调用分片入口再发布父文档。
 
 ## 7. 回滚
 

@@ -10,6 +10,7 @@ a failed NEW rerun the formal read must serve OLD content with OLD identity.
 
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -209,6 +210,81 @@ class PublishedResultSurvivesFailedRerunTests(unittest.TestCase):
         self.assertEqual(payload["parse_run_id"], "job-old")
         self.assertEqual(payload["publication"]["served_run_id"], published["parse_run_id"])
         self.assertFalse(payload["publication"]["latest_job_used_as_formal_version"])
+
+    def test_every_export_dataset_states_the_version_it_served(self) -> None:
+        # pages / lines / coverage / reader each build their payload from the same
+        # `get_document` snapshot, so all four must carry the served version's
+        # identity -- not the identity of the newer preview run that exists beside
+        # it.  records and the structured projection are covered above.
+        from starlette.testclient import TestClient
+
+        from parsecore.asgi import create_app
+        from parsecore.publication import ValidationStatus
+        from parsecore.validation import ValidationReport
+
+        warning_report = ValidationReport(
+            status=ValidationStatus.WARNING,
+            reason="suspect_signature_pages",
+            warnings=("suspect_signature_pages",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                runtime = client.app.state.runtime
+                published = runtime.publish_run(
+                    doc_id="doc-1",
+                    artifacts=RunArtifacts(
+                        blocks=(
+                            Block(
+                                block_id="old-b1",
+                                doc_id="doc-1",
+                                type=BlockType.PARAGRAPH,
+                                content="OLD content",
+                                metadata={"page": 1},
+                            ),
+                        ),
+                        views={
+                            "pages": [{"page_number": 1, "text": "OLD content"}],
+                            "lines": [{"line_id": "old-b1:line:1", "page_number": 1, "text": "OLD content"}],
+                            "records": [
+                                {
+                                    "record_id": "old-b1:text:r1:l1",
+                                    "block_id": "old-b1",
+                                    "page_start": 1,
+                                    "page_end": 1,
+                                    "fields": {"text": "OLD content"},
+                                }
+                            ],
+                        },
+                    ),
+                    job_id="job-old",
+                    source_version="sha256:old",
+                    validation_status="passed",
+                )
+                document_path = workspace.create_docx("new.docx", ["NEW content"])
+                with patch("parsecore.runtime.validate_run", return_value=warning_report):
+                    runtime.submit(
+                        ParseRequest(
+                            doc_id="doc-1",
+                            file_path=str(document_path),
+                            media_type=DOCX_MEDIA_TYPE,
+                        )
+                    )
+                exported = {
+                    dataset: client.get(
+                        "/v1/parse/documents/doc-1/exports",
+                        params={"dataset": dataset, "format": "jsonl"},
+                    )
+                    for dataset in ("pages", "lines", "coverage", "reader")
+                }
+
+        self.assertEqual(published["publication_generation"], 1)
+        for dataset, response in exported.items():
+            self.assertEqual(response.status_code, 200, dataset)
+            first_line = response.text.strip().splitlines()[0]
+            row = json.loads(first_line)
+            self.assertEqual(row.get("parse_run_id"), "job-old", dataset)
+            self.assertEqual(row.get("doc_id"), "doc-1", dataset)
 
     def test_failed_first_run_is_never_reported_as_formal(self) -> None:
         with TemporaryWorkspace(CONFIG) as workspace:

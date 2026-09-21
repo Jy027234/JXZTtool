@@ -1253,6 +1253,16 @@ class ApiRoutes:
             if snapshot["job"] is None:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
             payload = _document_projection(snapshot, projection="structured")
+        if normalized_dataset in {"pages", "lines", "coverage", "reader", "records"}:
+            # The exported file holds the rows, not the envelope, so the version a
+            # reader would be served has to travel on every row: a persisted view
+            # row carries no identity of its own, and an export that cannot say
+            # which run it came from breaks "正文和版本标识一致".
+            _stamp_export_identity(
+                payload.get(normalized_dataset),
+                doc_id=str(payload.get("doc_id") or request.path_params["doc_id"]),
+                parse_run_id=str(payload.get("parse_run_id") or ""),
+            )
         try:
             exported = export_structured_projection(
                 payload,
@@ -2117,6 +2127,25 @@ def _request_claims_tenant(request: Request) -> bool:
     if source is None:
         return False
     return source != SOURCE_DEFAULT
+
+
+def _stamp_export_identity(
+    rows: Any, *, doc_id: str, parse_run_id: str
+) -> None:
+    """Put the served version's identity on every exported row.
+
+    A row that already states an identity keeps it; the stamp only fills the gap
+    for datasets whose rows are persisted views (pages, lines) or projections that
+    do not repeat the envelope (coverage, reader).
+    """
+
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row.setdefault("doc_id", doc_id)
+        row.setdefault("parse_run_id", parse_run_id)
 
 
 def _export_belongs_to_tenant(manifest: Mapping[str, Any], tenant_id: str) -> bool:
