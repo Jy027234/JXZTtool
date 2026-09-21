@@ -882,6 +882,74 @@ def _excel_range_intersects(
     )
 
 
+def _excel_table_grid(
+    rows: Sequence[Sequence[str]],
+    *,
+    merged_ranges: Sequence[tuple[str, tuple[int, int, int, int]]],
+    start_row: int,
+    start_col: int,
+) -> tuple[TableGrid, list[str]]:
+    """Excel rows as the shared grid, with merged ranges turned into spans.
+
+    Excel already knows which cells are merged, but the parser published those as
+    range labels while Word/PDF/Docling publish span records.  Two shapes for one
+    contract meant a consumer had to branch per format -- and the IR schema expects
+    span objects, so a label list could not even be carried through.  Merges inside
+    the table become spans here; merges outside it (a title row above the table)
+    are returned as labels, because they are a fact about the source range rather
+    than a span of this table.
+    """
+
+    cells = [
+        GridCell(
+            row_index=row_index,
+            col_index=col_index,
+            text=str(value if value is not None else ""),
+            origin_row=row_index,
+            origin_col=col_index,
+        )
+        for row_index, row in enumerate(rows)
+        for col_index, value in enumerate(row)
+    ]
+    row_count = len(rows)
+    column_count = max((len(row) for row in rows), default=0)
+    outside: list[str] = []
+    by_position = {(cell.row_index, cell.col_index): index for index, cell in enumerate(cells)}
+    for label, (row_low, col_low, row_high, col_high) in merged_ranges:
+        origin_row = int(row_low) - int(start_row)
+        origin_col = int(col_low) - int(start_col)
+        row_span = int(row_high) - int(row_low) + 1
+        col_span = int(col_high) - int(col_low) + 1
+        origin_index = by_position.get((origin_row, origin_col))
+        if row_span <= 1 and col_span <= 1:
+            continue
+        if origin_index is None or origin_row < 0 or origin_col < 0:
+            outside.append(str(label))
+            continue
+        origin = cells[origin_index]
+        cells[origin_index] = replace(origin, row_span=row_span, col_span=col_span)
+        for extra_row in range(origin_row, origin_row + row_span):
+            for extra_col in range(origin_col, origin_col + col_span):
+                if (extra_row, extra_col) == (origin_row, origin_col):
+                    continue
+                if by_position.get((extra_row, extra_col)) is None:
+                    continue
+                cells.append(
+                    GridCell(
+                        row_index=extra_row,
+                        col_index=extra_col,
+                        continuation=True,
+                        origin_row=origin_row,
+                        origin_col=origin_col,
+                    )
+                )
+    cells.sort(key=lambda cell: (cell.row_index, cell.col_index))
+    return (
+        TableGrid(cells=tuple(cells), row_count=row_count, column_count=column_count),
+        outside,
+    )
+
+
 def _excel_cells_metadata(rows: Sequence[Sequence[str]], *, max_cells: int) -> dict[str, Any]:
     row_count = len(rows)
     col_count = max((len(row) for row in rows), default=0)
@@ -1355,7 +1423,25 @@ class ExcelParser(ParserAdapter):
             if not rows:
                 continue
             start_row = candidate_start_row + relative_start_row - 1
-            content = _render_excel_table_markdown(rows)
+            grid, outside_merges = _excel_table_grid(
+                rows,
+                merged_ranges=[
+                    (label, merged_range)
+                    for label, merged_range in merged_ranges
+                    if _excel_range_intersects(merged_range, (
+                        title_row or start_row,
+                        start_col,
+                        start_row + len(rows) - 1,
+                        start_col + max((len(row) for row in rows), default=1) - 1,
+                    ))
+                ],
+                start_row=start_row,
+                start_col=start_col,
+            )
+            # The merged values fill their spanned positions, so the flat rows, the
+            # rendered text and the structured cells all describe one grid.
+            merged_rows = grid.rows()
+            content = _render_excel_table_markdown(merged_rows)
             if not content:
                 continue
             end_row = start_row + len(rows) - 1
@@ -1366,11 +1452,7 @@ class ExcelParser(ParserAdapter):
             table_formula_cells = {
                 cell for cell in formula_cells if _excel_range_intersects((cell[0], cell[1], cell[0], cell[1]), table_range)
             }
-            merged_cells = [
-                label
-                for label, merged_range in merged_ranges
-                if _excel_range_intersects(merged_range, source_range)
-            ]
+            merges = grid.merged_cells()
             metadata: dict[str, Any] = _provider_metadata({
                 "page": sheet_index,
                 "logical_page": sheet_index,
@@ -1388,11 +1470,11 @@ class ExcelParser(ParserAdapter):
                 "column_range": f"{_excel_column_letter(start_col)}:{_excel_column_letter(end_col)}",
                 "cell_range": _excel_range_ref(start_row, start_col, end_row, end_col),
                 "source_cell_range": _excel_range_ref(source_start_row, start_col, end_row, end_col),
-                "rows": len(rows),
-                "cols": max((len(row) for row in rows), default=0),
-                "header_rows": 1 if rows else 0,
+                "rows": len(merged_rows),
+                "cols": max((len(row) for row in merged_rows), default=0),
+                "header_rows": 1 if merged_rows else 0,
                 "header_row": header_row,
-                "header_values": list(rows[0]) if rows else [],
+                "header_values": grid.header_values(1),
                 "has_formula": bool(table_formula_cells),
                 "formula_count": len(table_formula_cells),
                 "truncated": (
@@ -1403,9 +1485,21 @@ class ExcelParser(ParserAdapter):
             if table_title:
                 metadata["table_title"] = table_title
                 metadata["title_row"] = title_row
-            if merged_cells:
-                metadata["merged_cells"] = merged_cells
-            metadata.update(_excel_cells_metadata(rows, max_cells=self._max_metadata_cells))
+            cells_metadata = _excel_cells_metadata(
+                merged_rows, max_cells=self._max_metadata_cells
+            )
+            if merges:
+                metadata["merged_cells"] = merges
+                if not cells_metadata["cells_truncated"]:
+                    # Spans ship with the cells they describe.  An oversized table
+                    # publishes a preview instead of the whole grid, so it keeps the
+                    # merge records without duplicating every cell as structured data.
+                    metadata["table_cells"] = [cell.as_payload() for cell in grid.cells]
+            if outside_merges:
+                # A merge above the table (its title row) is not a cell of this
+                # table; it stays reported as a source-range fact.
+                metadata["source_merged_ranges"] = outside_merges
+            metadata.update(cells_metadata)
             blocks.append(
                 Block(
                     block_id=f"{request.doc_id}-sheet-{sheet_index}-table-{table_index}",

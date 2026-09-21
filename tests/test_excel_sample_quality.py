@@ -55,6 +55,9 @@ class ExcelSampleQualityTests(unittest.TestCase):
         sheet.merge_cells("A1:B1")
         sheet.append(["Task", "Owner"])
         sheet.append(["Design", "Engineering"])
+        sheet.append(["Build", "Engineering"])
+        # A merge inside the table itself, next to the title merge above it.
+        sheet.merge_cells("B3:B4")
         workbook.save(workspace.root / name)
 
     def test_build_report_summarizes_spreadsheet_samples(self) -> None:
@@ -69,7 +72,10 @@ class ExcelSampleQualityTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["documents"], 1)
         self.assertEqual(payload["summary"]["total_tables"], 1)
         self.assertEqual(payload["summary"]["titled_tables"], 1)
+        # The table holds one merged cell of its own; the title merge above it is
+        # a source-range fact and is counted apart.
         self.assertEqual(payload["summary"]["merged_cell_tables"], 1)
+        self.assertEqual(payload["summary"]["source_merged_range_tables"], 1)
         self.assertEqual(payload["summary"]["documents_with_issues"], 0)
         result = payload["results"][0]
         self.assertEqual(result["file_name"], "plan.xlsx")

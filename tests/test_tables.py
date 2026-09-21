@@ -10,9 +10,12 @@ from __future__ import annotations
 import unittest
 
 from parsecore.tables import (
+    apply_merge_records,
+    cell_records,
     grid_from_cells,
     grid_from_metadata,
     grid_from_rows,
+    merge_descriptors,
     render_markdown,
     render_tsv,
     resolve_table_grid,
@@ -169,6 +172,104 @@ class TableGridTests(unittest.TestCase):
             [["Part", "Part", "Qty"], ["Bolt", "M2", "spec"], ["Bolt", "M10", "3"]],
         )
         self.assertEqual(rows_from_table_payload(None), [])
+
+
+class TableMergeRecordTests(unittest.TestCase):
+    """Merges a parser declares separately from the cells it publishes."""
+
+    def test_declared_merges_reach_the_grid_it_describes(self) -> None:
+        grid = apply_merge_records(
+            grid_from_rows([["Maintenance Plan", ""], ["Task", "Owner"]]),
+            [
+                {
+                    "kind": "col_span",
+                    "origin": "0.0",
+                    "row_index": 0,
+                    "col_index": 0,
+                    "row_span": 1,
+                    "col_span": 2,
+                }
+            ],
+        )
+        self.assertEqual(grid.rows(), [["Maintenance Plan", "Maintenance Plan"], ["Task", "Owner"]])
+        self.assertEqual(
+            [(merge["kind"], merge["origin"], merge["col_span"]) for merge in grid.merged_cells()],
+            [("col_span", "0.0", 2)],
+        )
+        self.assertTrue(grid.cell_at(0, 1).continuation)
+
+    def test_a_merge_outside_the_published_grid_is_not_reported(self) -> None:
+        # An oversized table is published as a preview; a merge on a row the
+        # preview does not contain cannot be expressed by that grid.
+        grid = apply_merge_records(
+            grid_from_rows([["Task", "Owner"]]),
+            [{"row_index": 4, "col_index": 0, "row_span": 1, "col_span": 2}],
+        )
+        self.assertEqual(grid.merged_cells(), [])
+        self.assertEqual(grid.rows(), [["Task", "Owner"]])
+
+    def test_a_range_label_is_not_a_merge_descriptor(self) -> None:
+        # Range labels are a source-range fact, not a cell span: a grid must not
+        # grow a span out of one.
+        grid = apply_merge_records(
+            grid_from_rows([["Task", "Owner"]]),
+            ["A1:B1"],
+        )
+        self.assertEqual(grid.merged_cells(), [])
+        self.assertEqual(cell_records(["A1:B1", {"row_index": 0}]), [{"row_index": 0}])
+
+    def test_a_declared_merge_never_overwrites_a_recorded_span(self) -> None:
+        grid = apply_merge_records(
+            grid_from_cells(MERGED_CELLS),
+            [
+                {
+                    "kind": "row_span",
+                    "origin": "1.0",
+                    "row_index": 1,
+                    "col_index": 0,
+                    "row_span": 1,
+                    "col_span": 1,
+                }
+            ],
+        )
+        self.assertEqual(grid.cell_at(1, 0).row_span, 2)
+        self.assertEqual(sorted(merge["kind"] for merge in grid.merged_cells()), ["col_span", "row_span"])
+
+    def test_a_merge_beyond_the_published_cells_is_still_reported(self) -> None:
+        # An oversized table is published as a preview; the merge on a row the
+        # preview left out is still a fact about the source table, and
+        # ``cells_truncated`` already tells the consumer the cells are partial.
+        grid = grid_from_rows([["Title", ""]])
+        declared = [
+            {
+                "kind": "col_span",
+                "origin": "0.0",
+                "row_index": 0,
+                "col_index": 0,
+                "row_span": 1,
+                "col_span": 2,
+            },
+            {
+                "kind": "row_span",
+                "origin": "7.3",
+                "row_index": 7,
+                "col_index": 3,
+                "row_span": 4,
+                "col_span": 1,
+            },
+        ]
+        descriptors = merge_descriptors(apply_merge_records(grid, declared), declared)
+        self.assertEqual(
+            [(item["row_index"], item["col_index"], item["kind"], item["origin"]) for item in descriptors],
+            [(0, 0, "col_span", "0.0"), (7, 3, "row_span", "7.3")],
+        )
+
+    def test_a_merge_record_is_reported_once(self) -> None:
+        # The grid's span wins; the same merge arriving as a record must not be
+        # published twice.
+        declared = grid_from_cells(MERGED_CELLS).merged_cells()
+        grid = grid_from_cells(MERGED_CELLS)
+        self.assertEqual(len(merge_descriptors(grid, declared)), len(declared))
 
 
 class TableRenderingTests(unittest.TestCase):

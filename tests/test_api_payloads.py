@@ -287,7 +287,18 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
                     "cells": [["Task", "Task", ""], ["A", "B", "C"], ["D", "", "F"]],
                     "header_values": ["Task", "Task", ""],
                     "hidden_sheet": True,
-                    "merged_cells": ["A1:B1"],
+                    # A merge travels as a descriptor -- the single shape every
+                    # parser publishes; a range label such as "A1:B1" is not one.
+                    "merged_cells": [
+                        {
+                            "kind": "col_span",
+                            "origin": "0.0",
+                            "row_index": 0,
+                            "col_index": 0,
+                            "row_span": 1,
+                            "col_span": 2,
+                        }
+                    ],
                     "has_formula": True,
                     "formula_count": 2,
                     "truncated": True,
@@ -310,7 +321,29 @@ class DocumentProjectionQualitySignalTests(unittest.TestCase):
 
         table = payload["tables"][0]
         self.assertEqual(table["header_values"], ["Task", "Task", ""])
-        self.assertEqual(table["merged_cells"], ["A1:B1"])
+        # The published merges are derived from the published grid, so the two
+        # cannot describe different tables.
+        self.assertEqual(
+            table["merged_cells"],
+            [
+                {
+                    "kind": "col_span",
+                    "origin": "0.0",
+                    "row_index": 0,
+                    "col_index": 0,
+                    "row_span": 1,
+                    "col_span": 2,
+                }
+            ],
+        )
+        merged = next(cell for cell in table["cells"] if cell.get("merged"))
+        self.assertEqual(
+            (merged["row_index"], merged["col_index"], merged["col_span"], merged["merged"]),
+            (0, 0, 2, True),
+        )
+        continuation = next(cell for cell in table["cells"] if cell.get("continuation"))
+        self.assertEqual((continuation["row_index"], continuation["col_index"]), (0, 1))
+        self.assertEqual(continuation["origin"], "0.0")
         self.assertTrue(table["hidden_sheet"])
         self.assertTrue(table["has_formula"])
         self.assertTrue(table["cells_truncated"])

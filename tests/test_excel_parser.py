@@ -250,7 +250,10 @@ class ExcelParserTests(unittest.TestCase):
         self.assertEqual(table.metadata["header_values"], ["Task", "Owner"])
         self.assertEqual(table.metadata["cell_range"], "A2:B3")
         self.assertEqual(table.metadata["source_cell_range"], "A1:B3")
-        self.assertEqual(table.metadata["merged_cells"], ["A1:B1"])
+        # The title merge is above the table, so it stays a source-range fact
+        # instead of pretending to be a cell of this table.
+        self.assertEqual(table.metadata["source_merged_ranges"], ["A1:B1"])
+        self.assertNotIn("merged_cells", table.metadata)
         self.assertIn("| Task | Owner |", table.content)
 
     def test_excel_parser_limits_large_cell_metadata(self) -> None:

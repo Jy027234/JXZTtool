@@ -23,7 +23,7 @@ a real merged cell does not have to re-infer it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 #: Structured grid key: one record per grid position, merges preserved.
@@ -178,6 +178,108 @@ class TableGrid:
             }
             merges.append(merge)
         return merges
+
+
+def apply_merge_records(grid: TableGrid, records: Any) -> TableGrid:
+    """Grid with merges a parser declared outside its cells applied.
+
+    A parser that publishes the whole grid records each span on the cell itself.
+    A parser that publishes only a flat view -- an oversized spreadsheet exported
+    as ``cells_preview`` -- keeps its merges as separate descriptors.  Without
+    applying them the published cells and the published ``merged_cells`` would
+    describe two different tables.
+
+    A descriptor whose origin is not on the published grid is skipped: a grid that
+    does not contain the merged region cannot express it, and publishing a
+    dangling merge would be worse than reporting none.  Only descriptors are read;
+    a legacy range label is not one (see :func:`cell_records`).
+    """
+
+    declared = cell_records(records)
+    if grid.empty or not declared:
+        return grid
+    cells = list(grid.cells)
+    by_position = {(cell.row_index, cell.col_index): index for index, cell in enumerate(cells)}
+    for record in declared:
+        row_index = _as_int(record.get("row_index"), default=-1)
+        col_index = _as_int(record.get("col_index"), default=-1)
+        origin_index = by_position.get((row_index, col_index))
+        if origin_index is None:
+            continue
+        row_span = max(1, _as_int(record.get("row_span"), default=1) or 1)
+        col_span = max(1, _as_int(record.get("col_span"), default=1) or 1)
+        if row_span <= 1 and col_span <= 1:
+            continue
+        cells[origin_index] = replace(cells[origin_index], row_span=row_span, col_span=col_span)
+        for extra_row in range(row_index, row_index + row_span):
+            for extra_col in range(col_index, col_index + col_span):
+                if (extra_row, extra_col) == (row_index, col_index):
+                    continue
+                position = by_position.get((extra_row, extra_col))
+                if position is None or cells[position].continuation:
+                    continue
+                cells[position] = replace(
+                    cells[position],
+                    continuation=True,
+                    origin_row=row_index,
+                    origin_col=col_index,
+                )
+    return TableGrid(
+        cells=tuple(cells),
+        row_count=grid.row_count,
+        column_count=grid.column_count,
+        declared_row_widths=grid.declared_row_widths,
+    )
+
+
+def merge_descriptors(
+    grid: TableGrid, declared: Any = ()
+) -> list[dict[str, Any]]:
+    """Merge descriptors for a table: the grid's spans plus undeclared ones.
+
+    The grid's own spans come first.  A parser that could not publish the region a
+    merge covers -- an oversized spreadsheet exported as a ``cells_preview`` -- still
+    declares it, and a merge remains a fact about the source table even when its
+    cells were left out of the payload (``cells_truncated`` says so).
+    """
+
+    descriptors = grid.merged_cells()
+    known = {(item["row_index"], item["col_index"]) for item in descriptors}
+    for record in cell_records(declared):
+        row_index = _as_int(record.get("row_index"), default=-1)
+        col_index = _as_int(record.get("col_index"), default=-1)
+        if row_index < 0 or col_index < 0 or (row_index, col_index) in known:
+            continue
+        row_span = max(1, _as_int(record.get("row_span"), default=1) or 1)
+        col_span = max(1, _as_int(record.get("col_span"), default=1) or 1)
+        if row_span <= 1 and col_span <= 1:
+            continue
+        descriptors.append(
+            {
+                "kind": _as_text(record.get("kind"))
+                or ("col_span" if col_span > 1 else "row_span"),
+                "origin": _as_text(record.get("origin")) or f"{row_index}.{col_index}",
+                "row_index": row_index,
+                "col_index": col_index,
+                "row_span": row_span,
+                "col_span": col_span,
+            }
+        )
+        known.add((row_index, col_index))
+    return descriptors
+
+
+def cell_records(value: Any) -> list[Mapping[str, Any]]:
+    """Read a list of cell/merge descriptors, ignoring anything else.
+
+    One shape per contract: a descriptor is a record.  A legacy range label such
+    as ``"A1:B1"`` is not one and is dropped by the reader instead of being passed
+    through for a consumer to interpret.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
 
 
 def cells_from_payload(raw_cells: Any) -> tuple[GridCell, ...]:

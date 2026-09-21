@@ -813,7 +813,7 @@ extensions = [".xlsx", ".xlsm", ".xls"]
 | `options.max_metadata_cells` | 完整 cell metadata 上限；超过后降级为 `cells_preview`。 |
 | `options.include_hidden_sheets` | 是否解析隐藏 sheet。 |
 
-Excel 输出会按 worksheet 内空行与标题行识别多个表格区域，表格 block metadata 包含 `sheet_name / cell_range / source_cell_range / sheet_table_index / table_title / header_row / header_values / merged_cells / has_formula / hidden_sheet`。
+Excel 输出会按 worksheet 内空行与标题行识别多个表格区域，表格 block metadata 包含 `sheet_name / cell_range / source_cell_range / sheet_table_index / table_title / header_row / header_values / has_formula / hidden_sheet`。合并单元格与 Word/PDF/Docling 一致：`table_cells` 记录每个网格位置的行列与 `row_span`/`col_span`/`continuation`/`origin`，`merged_cells` 由这份跨度派生；表格上方的标题行合并属于来源范围事实，记在 `source_merged_ranges` 而不是本表的单元格。`cells` 被 `options.max_metadata_cells` 降级为 `cells_preview` 时不再发布 `table_cells`（预览只有部分行，装不下跨度），`merged_cells` 仍描述全表。
 
 ## 常用配置场景
 

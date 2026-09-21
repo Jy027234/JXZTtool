@@ -1,8 +1,8 @@
 # 待办 1 交付报告：Word 合并表格结构保真 + Docling 直映结构
 
-日期：2026-09-21（同日续写：补 Docling 直映结构）
+日期：2026-09-21（同日续写：补 Docling 直映结构、Excel 合并表达统一）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：Word 链路与 Docling 直映均已实施；剩余见第 6 节
+状态：Word 链路、Docling 直映、Excel 合并表达均已实施；剩余见第 8 节
 
 ## 1. 这一项解决什么
 
@@ -27,13 +27,13 @@ Word 表格的合并关系在原生提取阶段就被丢了。`_docx_table_cells
 
 | 文件 | 变更 |
 | --- | --- |
-| [src/parsecore/tables.py](../src/parsecore/tables.py)（新增） | 唯一的表格网格约定：`GridCell` / `TableGrid`、`grid_from_metadata()`、`grid_from_rows()`、`grid_from_cells()`、`resolve_table_grid()`、`rows_from_table_payload()`、`render_markdown()` / `render_tsv()` |
-| [src/parsecore/parsers.py](../src/parsecore/parsers.py) | `DocxParser` 读取 `w:gridSpan` / `w:vMerge` / 行内 `r:` 链接（`word/_rels/document.xml.rels`），输出 `table_cells`（起始行列、`row_span`/`col_span`、`continuation`/`origin`、行内 `runs`）、`merged_cells`、`header_values`、`source_row_col_counts`；`cells` 与 Markdown 由同一网格派生 |
-| [src/parsecore/api_payloads.py](../src/parsecore/api_payloads.py) | 结构化表格优先读 `table_cells`，单元格带跨度与合并标记；记录表头用解析器给出的 `header_values` |
+| [src/parsecore/tables.py](../src/parsecore/tables.py)（新增） | 唯一的表格网格约定：`GridCell` / `TableGrid`、`grid_from_metadata()`、`grid_from_rows()`、`grid_from_cells()`、`resolve_table_grid()`、`rows_from_table_payload()`、`render_markdown()` / `render_tsv()`；合并侧 `cell_records()`（只认描述符记录）、`apply_merge_records()`（把表外声明的合并补进网格）、`merge_descriptors()`（统一产出合并记录且不重复） |
+| [src/parsecore/parsers.py](../src/parsecore/parsers.py) | `DocxParser` 读取 `w:gridSpan` / `w:vMerge` / 行内 `r:` 链接（`word/_rels/document.xml.rels`），输出 `table_cells`（起始行列、`row_span`/`col_span`、`continuation`/`origin`、行内 `runs`）、`merged_cells`、`header_values`、`source_row_col_counts`；`cells` 与 Markdown 由同一网格派生。`ExcelParser._excel_table_grid()` 把工作表合并转成同一份跨度（xlsx/xls 共用），表外合并在 `source_merged_ranges` |
+| [src/parsecore/api_payloads.py](../src/parsecore/api_payloads.py) | 结构化表格优先读 `table_cells`，单元格带跨度与合并标记；`merged_cells` 一律由网格派生（不再透传解析器原值），记录表头用解析器给出的 `header_values` |
 | [src/parsecore/ir.py](../src/parsecore/ir.py) | IR 表格携带同一份 `cells`，并派生出 `merged_cells` / `header_values`，Reader 因此也能显示合并 |
 | [src/parsecore/pipelines.py](../src/parsecore/pipelines.py) | 表格增强、知识单元文本与摘要走同一个网格；合并关系进入知识单元 `table_summary` |
 | [src/parsecore/payload_schemas.py](../src/parsecore/payload_schemas.py) | `document-ir` 的表格增加可选 `merged_cells` / `header_values` |
-| [tests/test_tables.py](../tests/test_tables.py)（新增） | 16 项：网格读取优先级、合并值填充、表头展开、Markdown/TSV 转义 |
+| [tests/test_tables.py](../tests/test_tables.py)（新增） | 22 项：网格读取优先级、合并值填充、表头展开、Markdown/TSV 转义、合并记录的读取与应用 |
 | [tests/test_docx_table_grid.py](../tests/test_docx_table_grid.py)（新增） | 8 项：原生提取、结构化/记录/Reader/IR/知识单元一致性、schema 校验 |
 | [tests/support.py](../tests/support.py) | `build_docx_table_xml()`（`col_span` / `vmerge` / 原始 `runs`）、`build_docx_hyperlink()`、`create_docx_with_body(hyperlinks=...)` |
 
@@ -173,12 +173,77 @@ Ran 980 tests / OK (skipped=6)
 `test_provider_comparison_report` 的两个失败），因此该用例结束时会把自己引入的 `docling*` /
 `docling_parse*` 模块移除，恢复进程原状。
 
-## 7. 未完成（同一待办）
+## 7. Excel 合并表达统一（本次补齐）
+
+Excel 是本轮之前唯一没有走共享网格的原生表格解析器：它把合并读成**范围标签列表**
+（`merged_cells: ["A1:B1"]`），而 Word/PDF/Docling 读成**跨度记录**。同一件事两种形状，
+`document-ir` 的表格 schema（`merged_cells: items: object`）只接受后者——Excel 的合并一旦
+进入 IR 就是不合规数据，下游判断合并前得先问"这是哪个解析器出的表"。
+
+现在 Excel 走同一份网格：
+
+| 结构 | 改造前 | 改造后 |
+| --- | --- | --- |
+| 表内合并 | `merged_cells: ["A1:B1", ...]`（范围标签） | `table_cells`（跨度 + `continuation`/`origin`）+ `merged_cells`（跨度记录，字段与 Word 完全一致） |
+| 表外合并（表格上方的标题行） | 混在同一个 `merged_cells` 里，读起来像本表的单元格 | `source_merged_ranges`（来源范围事实，不再是本表的单元格） |
+| `cells` / Markdown 正文 | 各自按合并值填充一次 | 由 `grid.rows()` 派生，与 `table_cells` 同一张网格 |
+| 超大表的元数据降级 | `cells` 降级为 `cells_preview`，`merged_cells` 仍报全表 | 不变：合并是全表事实，`cells_truncated` 已说明单元格是部分 |
+
+落点：
+
+| 位置 | 职责 |
+| --- | --- |
+| `parsers._excel_table_grid()` | 范围内合并 → 跨度；范围外合并 → `source_merged_ranges`（xlsx 与 xls 两条路径共用） |
+| `tables.apply_merge_records()` | "只有扁平行 + 合并记录"的表（降级预览）在投影时补出跨度，使发布的单元格与发布的合并描述同一张网格 |
+| `tables.merge_descriptors()` | 统一产出合并记录：网格跨度优先，网格装不下的声明合并仍然如实报出，同一条合并不重复 |
+| `tables.cell_records()` | 只认记录是描述符；历史范围标签不会被当成长度未知的跨度 |
+
+做减法：`api_payloads` 不再原样透传解析器的 `merged_cells`（那是"两种形状都能穿过"的入口），
+改为只认记录、其余从网格派生；解析器侧那份手工维护的合并列表也随 `TableGrid` 一起消失。
+
+真实样本（`D:\app\uploads`，用 `ExcelParser` 直接解析后再走 `_structured_tables()` 投影）：
+
+| 样本 | 表数 | 带合并表 | 声明的合并 = 投影的合并 | `table_cells` |
+| --- | ---: | ---: | --- | --- |
+| 金鹿维修管理系统升级开发计划控制表-0421.xlsx | 7 | 6 | 4 / 8 / 7 / 21 / 15 / 2，逐表一致 | 有（未降级表） |
+| 发展战略思考.xlsx | 2 | 1 | 13 = 13 | 有 |
+| ARJ21主轮IPC.xls | 1 | 0 | 0 = 0 | — |
+
+- 三个样本的标题行合并（`A1:H1`、`A6:H6`、`A43:H43`）都落在 `source_merged_ranges`，没有再混进
+  表内合并；表内合并的续格数与跨度一致（例如 `A2:H5` 的 4 条 `col_span` 展开出 12 个续格，
+  `A7:I11` 的 8 条 `row_span` 展开出 23 个续格）。
+- 把 `max_metadata_cells` 压到 6 复现降级路径：7 张表仍各自报出全部合并（4/8/7/21/15/2/0），
+  只有落在预览行内的跨度被补进网格——合并是来源事实，不因单元格被截断而消失。
+
+验证：
+
+```text
+.\.venv\Scripts\python.exe -m unittest tests.test_tables tests.test_excel_parser tests.test_api_payloads tests.test_docx_table_grid tests.test_docling_structure
+Ran 79 tests / OK
+
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 1005 tests / OK (skipped=6)
+
+.\.venv\Scripts\python.exe tools/excel_sample_quality.py --sample-dir D:/app/uploads
+documents 3 | total_tables 10 | documents_with_issues 0
+ARJ21主轮IPC.xls                          1 表 | 表内合并 0 | 来源范围合并 0
+发展战略思考.xlsx                          2 表 | 表内合并 1 | 来源范围合并 0
+金鹿维修管理系统升级开发计划控制表-0421.xlsx  7 表（6 张有标题） | 表内合并 6 | 来源范围合并 5
+```
+
+样本质量工具因此拆成两个计数：`merged_cell_tables`（本表网格里的合并）与
+`source_merged_range_tables`（来源范围里的合并，例如表格上方的标题行），不再把两者混为一谈。
+
+新增用例（`tests/test_tables.py`）：声明合并在网格上落地、网格装不下的合并仍被报出、范围标签
+不当成描述符、声明的合并不覆盖已记录的跨度、同一条合并不重复。
+
+## 8. 未完成（同一待办）
 
 1. **`DocumentArtifactItem.kind` 语义迁移**：目前 `kind` 仍是语义角色、内容形态由
    `provenance["block_type"]` 表达。迁移会牵动知识单元类型判定，放在表格链路稳定后做。
-2. **Excel / Markdown 逐样本扩展**：Excel 现有 `cells` + `merged_cells` 继续复用，未改；
-   其原生 `merged_cells` 与 Word/PDF/Docling 的跨度表达尚未统一到同一形状。
+2. **Markdown 表源的相互扩展**：Excel 已统一到跨度表达；由 Markdown 重建的表格
+   （`_markdown_table_cells()`，TextParser / PyMuPDF4LLM / Docling 的降级路径）本身没有合并
+   信息，只能给出扁平行，不会有 `table_cells`——这是格式能力差异，不是待补的分支。
 3. **PDF 来源定位**：表块与图片块现在带 `source_region`（页号、点坐标、原点、页面旋转、页尺寸
    与 `crop_fraction`），见[待办 3 报告第 7 节](r4-todo3-pdf-catalog-table-20260921.md)；
    Word 侧仍用块/单元格标识，不填物理页码，Excel 的工作表与单元格范围沿用原有字段。
@@ -188,7 +253,7 @@ Ran 980 tests / OK (skipped=6)
    真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
    验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 8. 回滚
+## 9. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；

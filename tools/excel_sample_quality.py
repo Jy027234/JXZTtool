@@ -109,6 +109,11 @@ def _summarize_tables(table_blocks: list[Any]) -> tuple[dict[str, Any], list[str
         "tables": len(table_blocks),
         "titled_tables": sum(1 for block in table_blocks if block.metadata.get("table_title")),
         "merged_cell_tables": sum(1 for block in table_blocks if block.metadata.get("merged_cells")),
+        # A merge declared above the table (its title row) is a fact about the
+        # source range, not a cell of this table, so it is counted apart.
+        "source_merged_range_tables": sum(
+            1 for block in table_blocks if block.metadata.get("source_merged_ranges")
+        ),
         "formula_tables": sum(1 for block in table_blocks if block.metadata.get("has_formula")),
         "hidden_tables": sum(1 for block in table_blocks if block.metadata.get("hidden_sheet")),
         "truncated_tables": sum(1 for block in table_blocks if block.metadata.get("truncated")),
@@ -176,6 +181,9 @@ def _summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "total_tables": sum(int(item.get("tables") or 0) for item in results),
         "titled_tables": sum(int(item.get("titled_tables") or 0) for item in results),
         "merged_cell_tables": sum(int(item.get("merged_cell_tables") or 0) for item in results),
+        "source_merged_range_tables": sum(
+            int(item.get("source_merged_range_tables") or 0) for item in results
+        ),
         "formula_tables": sum(int(item.get("formula_tables") or 0) for item in results),
         "empty_tables": sum(int(item.get("empty_tables") or 0) for item in results),
         "truncated_tables": sum(int(item.get("truncated_tables") or 0) for item in results),
@@ -235,18 +243,19 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- total_tables: {summary.get('total_tables', 0)}",
         f"- documents_with_issues: {summary.get('documents_with_issues', 0)}",
         "",
-        "| document | status | tables | titled | merged | empty | truncated | issues | elapsed_s |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
+        "| document | status | tables | titled | merged | src_merge | empty | truncated | issues | elapsed_s |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
     ]
     for item in payload.get("results") or []:
         issues = ", ".join(item.get("issues") or [])
         lines.append(
-            "| {file_name} | {status} | {tables} | {titled} | {merged} | {empty} | {truncated} | {issues} | {elapsed} |".format(
+            "| {file_name} | {status} | {tables} | {titled} | {merged} | {src_merged} | {empty} | {truncated} | {issues} | {elapsed} |".format(
                 file_name=item.get("file_name", ""),
                 status=item.get("status", ""),
                 tables=item.get("tables", 0),
                 titled=item.get("titled_tables", 0),
                 merged=item.get("merged_cell_tables", 0),
+                src_merged=item.get("source_merged_range_tables", 0),
                 empty=item.get("empty_tables", 0),
                 truncated=item.get("truncated_tables", 0),
                 issues=issues,

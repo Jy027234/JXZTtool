@@ -22,7 +22,10 @@ from .record_filters import collect_record_page
 from .quality import ParseQualitySummary, evaluate_parse_quality, evaluate_projected_parse_quality
 from .tables import (
     TableGrid,
+    apply_merge_records,
+    cell_records,
     grid_from_metadata,
+    merge_descriptors,
     resolve_table_grid,
     rows_from_table_payload,
 )
@@ -3887,6 +3890,11 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
         # read real structure, otherwise its flat rows.  Merges are never guessed
         # again downstream.
         grid = grid_from_metadata(metadata)
+        # A parser that kept its merges outside the cells (an oversized table
+        # published as a preview) declares them separately; applying them here keeps
+        # the published cells and the published merges describing one grid.
+        declared_merges = cell_records(metadata.get("merged_cells"))
+        grid = apply_merge_records(grid, declared_merges)
         raw_rows = grid.rows()
         rows = _safe_int(metadata.get("rows"), default=0) or len(raw_rows)
         cols = _safe_int(metadata.get("cols"), default=0) or max(
@@ -3928,7 +3936,6 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
             "table_title",
             "hidden_sheet",
             "header_values",
-            "merged_cells",
             "has_formula",
             "formula_count",
             "truncated",
@@ -3948,10 +3955,12 @@ def _structured_tables(blocks: tuple[Block, ...], *, doc_id: str) -> list[dict[s
         ):
             if key in metadata:
                 table[key] = metadata[key]
-        if "merged_cells" not in table:
-            merges = grid.merged_cells()
-            if merges:
-                table["merged_cells"] = merges
+        # Merge descriptors are derived from the grid, never guessed: a consumer
+        # that reads ``cells`` and one that reads ``merged_cells`` cannot disagree
+        # about a merge the grid contains.
+        merges = merge_descriptors(grid, declared_merges)
+        if merges:
+            table["merged_cells"] = merges
         if not cells and block.content.strip():
             table["text"] = block.content
         table["empty_cell_ratio"] = _empty_cell_ratio(raw_rows)
