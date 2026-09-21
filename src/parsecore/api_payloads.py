@@ -251,6 +251,10 @@ def build_document_publication_payload(
             "preview_endpoint_required_for_partial": True,
             "parse_run_id_alias": PARSE_RUN_ID_ALIAS,
         },
+        # Parsed-but-unpublished content, named so it cannot be mistaken for a
+        # formal version and cannot be mistaken for "nothing parsed yet" either.
+        "preview_run_id": state.get("preview_run_id"),
+        "preview": dict(state["preview"]) if isinstance(state.get("preview"), Mapping) else None,
     }
     if diagnostics:
         payload["diagnostics"] = dict(diagnostics)

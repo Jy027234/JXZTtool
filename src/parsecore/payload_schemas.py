@@ -2438,6 +2438,8 @@ def _document_publication_schema() -> dict[str, Any]:
             "readiness",
             "policy",
             "legacy",
+            "preview_run_id",
+            "preview",
         ],
         "properties": {
             "schema_version": {"const": DOCUMENT_PUBLICATION_SCHEMA_VERSION},
@@ -2468,6 +2470,11 @@ def _document_publication_schema() -> dict[str, Any]:
                 "additionalProperties": True,
             },
             "policy": _generic_object_schema(),
+            "preview_run_id": _string_schema(nullable=True),
+            # Published-or-not: a parsed run that is not a formal version.  Present
+            # only when such a run exists, so "no preview" and "empty document"
+            # stay distinguishable.
+            "preview": _generic_object_schema(nullable=True),
             "runs": {
                 "type": "array",
                 "items": _generic_object_schema(),

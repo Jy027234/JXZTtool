@@ -180,11 +180,86 @@ class RuntimePublicationTests(unittest.TestCase):
         self.assertEqual(outcome.job.state.value, "done")
         self.assertIsNone(outcome.job.failure_reason)
         self.assertFalse(state["formal_version_available"])
-        self.assertEqual(state["consumer_signal"], "not_ready")
+        # Parsed but not published: a preview exists and is named, while the
+        # formal signal stays "no formal version".
+        self.assertEqual(state["consumer_signal"], "preview_only")
+        self.assertEqual(state["preview_run_id"], runs[0].parse_run_id)
+        self.assertEqual(state["preview"]["validation_status"], "warning")
+        self.assertFalse(state["preview"]["pinned"])
+        self.assertFalse(state["preview"]["is_formal_version"])
         self.assertIsNone(state["active_run_id"])
         # The run and its validation report survive as an unpublished preview.
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].validation_status, "warning")
+
+    def test_a_newer_unpublished_run_is_a_preview_next_to_the_published_one(self) -> None:
+        # OLD is published, NEW parses but is not publishable.  The formal version
+        # must stay OLD and be marked pinned, while NEW is reported as a preview:
+        # a consumer has to be able to tell the two apart.
+        from unittest.mock import patch
+
+        from parsecore.bootstrap import build_runtime
+        from parsecore.publication import ValidationStatus
+        from parsecore.run_store import RunArtifacts
+        from parsecore.validation import ValidationReport
+
+        warning_report = ValidationReport(
+            status=ValidationStatus.WARNING,
+            reason="suspect_signature_pages",
+            warnings=("suspect_signature_pages",),
+        )
+        with TemporaryWorkspace(CONFIG) as workspace:
+            document_path = workspace.create_docx("spec.docx", ["NEW content"])
+            runtime = build_runtime(workspace.config_path)
+            published = runtime.publish_run(
+                doc_id="doc-old-new",
+                artifacts=RunArtifacts(
+                    blocks=(_block("b1", "OLD content", doc_id="doc-old-new"),),
+                    views={"pages": [{"page_number": 1, "text": "OLD content"}]},
+                ),
+                job_id="job-old",
+                source_version="sha256:old",
+                validation_status="passed",
+            )
+            with patch("parsecore.runtime.validate_run", return_value=warning_report):
+                outcome = runtime.submit(
+                    ParseRequest(
+                        doc_id="doc-old-new",
+                        file_path=str(document_path),
+                        media_type=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document"
+                        ),
+                    )
+                )
+            state = runtime.publication_state(doc_id="doc-old-new")
+            snapshot = runtime.get_document(doc_id="doc-old-new")
+
+        self.assertEqual(outcome.job.state.value, "done")
+        self.assertEqual(state["consumer_signal"], "published")
+        self.assertEqual(state["active_run_id"], published["parse_run_id"])
+        self.assertTrue(state["formal_version_available"])
+        self.assertIsNotNone(state["preview_run_id"])
+        self.assertNotEqual(state["preview_run_id"], published["parse_run_id"])
+        self.assertEqual(state["preview"]["validation_status"], "warning")
+        self.assertFalse(state["preview"]["pinned"])
+        self.assertFalse(state["preview"]["is_formal_version"])
+        # The formal read still serves OLD, pinned, and never the newest job.
+        self.assertEqual(snapshot["publication"]["served_run_id"], published["parse_run_id"])
+        self.assertTrue(snapshot["publication"]["pinned"])
+        self.assertFalse(snapshot["publication"]["latest_job_used_as_formal_version"])
+        self.assertIn("OLD content", "\n".join(block.content for block in snapshot["blocks"]))
+
+    def test_a_document_with_nothing_parsed_has_no_preview(self) -> None:
+        from parsecore.bootstrap import build_runtime
+
+        with TemporaryWorkspace(CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            state = runtime.publication_state(doc_id="never-parsed")
+
+        self.assertEqual(state["consumer_signal"], "not_ready")
+        self.assertIsNone(state["preview_run_id"])
+        self.assertIsNone(state["preview"])
 
     def test_a_rejected_result_fails_the_job_and_publishes_nothing(self) -> None:
         from unittest.mock import patch
@@ -246,6 +321,11 @@ class RuntimePublicationTests(unittest.TestCase):
         self.assertIn("validation_needs_review", result["message"])
         self.assertEqual(result["consumer_signal"], "not_ready")
         self.assertIsNone(state["active_run_id"])
+        # The run itself is the preview: named, unpinned, not a formal version.
+        self.assertEqual(state["preview_run_id"], result["parse_run_id"])
+        self.assertEqual(state["preview"]["run_id"], result["parse_run_id"])
+        self.assertFalse(state["preview"]["pinned"])
+        self.assertFalse(state["preview"]["is_formal_version"])
 
     def test_publish_is_rejected_when_the_backend_cannot_publish_atomically(self) -> None:
         from parsecore.bootstrap import build_runtime
@@ -297,6 +377,8 @@ class PublicationEndpointTests(unittest.TestCase):
         self.assertFalse(body["formal_version_available"])
         self.assertEqual(body["consumer_signal"], "not_ready")
         self.assertEqual(body["publication_generation"], 0)
+        self.assertIsNone(body["preview_run_id"])
+        self.assertIsNone(body["preview"])
         self.assertEqual(body["legacy"]["legacy_formal_signal_sufficient"], False)
         # The endpoint must never suggest that the newest job is the formal version.
         self.assertFalse(body["diagnostics"]["latest_job_used_for_publication"])

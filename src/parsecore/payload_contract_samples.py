@@ -162,6 +162,17 @@ def build_sample_document_publication() -> dict[str, Any]:
             "formal_signal_sufficient": False,
             "preview_endpoint_required_for_partial": True,
         },
+        "preview_run_id": "run-0001",
+        "preview": {
+            "run_id": "run-0001",
+            "validation_status": ValidationStatus.NEEDS_REVIEW.value,
+            "publication_status": PublicationStatus.UNPUBLISHED.value,
+            "source_version": None,
+            "profile": "default",
+            "created_at": "2026-09-21T00:00:00+00:00",
+            "pinned": False,
+            "is_formal_version": False,
+        },
         "diagnostics": {
             "store_operations": list(RUN_STORE_OPERATIONS),
             "latest_job_used_for_publication": False,

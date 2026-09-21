@@ -43,7 +43,6 @@ publish_run        单个 BEGIN IMMEDIATE 事务：校验全部前置条件 → 
 | [tests/test_run_publication_capability.py](../tests/test_run_publication_capability.py)（新增） | 5 项：能力报告与 health 面 |
 
 ## 3. 发布事务的校验项
-
 `publish_run()` 在**同一个** `BEGIN IMMEDIATE` 事务内依次校验，任一失败即回滚：
 
 1. `execution_status = succeeded`（含未 seal 一律拒绝）；
@@ -106,6 +105,7 @@ Ran 770 tests / OK (skipped=6)
 - `/health` 的 `status` 语义不变；新增的 `run_publication` 能力项为 optional，不与交付阻塞混淆。
 - **memory:// 与 Postgres 后端仍然 `strict_publication_ready = false`**，此时 `publish_run()` 返回 `published: false, reason: run_store_not_ready`，端点报 `not_ready`。这符合 P0-01 的"能力必须真实"：宁可说不能发布，也不做非原子发布。
 - 发布失败返回稳定的错误码（`run_publish_failed` / `run_not_publishable_by_policy` / `publication_rejected_stale` / `run_seal_failed` / `run_not_sealable`），调用方可直接分支。其中 `run_not_publishable_by_policy`（`PublicationPolicyError`）专指"校验结论要求人工决定"：run 与产物都正常，只是策略不允许自动发布，调用方可以按未发布预览处理，而不是把解析判为失败。
+- **未发布内容明确为预览**：`publication_state()` 现在区分三种情形——已发布正式版本（`consumer_signal = published`）、已解析但未发布（`preview_only`，并给出 `preview_run_id` 与 `preview` 详情）、什么都没有（`not_ready`）。`preview` 里 `pinned = false`、`is_formal_version = false`；已发布版本存在时，更新的未发布 run 只作为 preview 出现，正式读取与 `active_run_id` 仍是旧的已发布 run。被拒绝（`rejected`）、校验失败（`error`）或从未校验（`not_run`）的 run 不算预览，因为没有可交付内容。
 
 ## 6. 本批未完成（第 2 批范围）
 

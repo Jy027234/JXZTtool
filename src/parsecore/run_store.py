@@ -1086,7 +1086,18 @@ class SQLiteRunStore:
     def publication_state(
         self, *, doc_id: str, tenant_id: str | None = None
     ) -> dict[str, Any]:
-        """Pointer state for one document, including the "no formal version" case."""
+        """Pointer state for one document, including the "no formal version" case.
+
+        A document can have three different situations, and a consumer has to be
+        able to tell them apart: a published formal version, a parsed run that is
+        *not* published (a preview awaiting a decision), and nothing at all.  The
+        middle case reports ``preview_only`` and names the run, so unpublished
+        content is never mistaken for a formal version and never looks like an
+        empty document.  A preview has to be worth showing: the run must be sealed
+        and carry a validation conclusion (``passed``/``warning``/``needs_review``).
+        A rejected, failed-validation or never-validated run reports ``not_ready``,
+        because it has nothing deliverable.
+        """
 
         tenant = _normalize_tenant(tenant_id)
         with self._connect() as conn:
@@ -1101,18 +1112,54 @@ class SQLiteRunStore:
                     (str(pointer["active_run_id"]),),
                 ).fetchone()
                 active = self._row_to_run(active_row) if active_row else None
+            preview_row = conn.execute(
+                "SELECT * FROM parse_runs WHERE tenant_id = ? AND doc_id = ?"
+                " AND execution_status = ? AND publication_status != ?"
+                " AND validation_status NOT IN (?, ?, ?)"
+                " AND sealed_at IS NOT NULL"
+                " ORDER BY created_at DESC LIMIT 1",
+                (
+                    tenant,
+                    str(doc_id),
+                    ExecutionStatus.SUCCEEDED.value,
+                    PublicationStatus.PUBLISHED.value,
+                    ValidationStatus.REJECTED.value,
+                    ValidationStatus.ERROR.value,
+                    ValidationStatus.NOT_RUN.value,
+                ),
+            ).fetchone()
+        preview = self._row_to_run(preview_row) if preview_row is not None else None
+        if preview is not None and active is not None and preview.parse_run_id == active.parse_run_id:
+            # The published run is not its own preview.
+            preview = None
+        preview_payload = (
+            None
+            if preview is None
+            else {
+                "run_id": preview.parse_run_id,
+                "validation_status": preview.validation_status,
+                "publication_status": preview.publication_status,
+                "source_version": preview.source_version,
+                "profile": preview.profile,
+                "created_at": preview.created_at,
+                "pinned": False,
+                "is_formal_version": False,
+            }
+        )
         if pointer is None or active is None:
             return {
                 "active_run_id": None,
                 "publication_generation": int(pointer["publication_generation"]) if pointer else 0,
                 "publication_status": PublicationStatus.UNPUBLISHED.value,
                 "formal_version_available": False,
-                "consumer_signal": "not_ready",
+                "consumer_signal": "preview_only" if preview is not None else "not_ready",
                 "source_version": None,
                 "profile": "default",
                 "policy_version": None,
                 "published_at": None,
                 "run": None,
+                "preview_run_id": preview.parse_run_id if preview is not None else None,
+                "preview": preview_payload,
             }
         return {
             "active_run_id": active.parse_run_id,
@@ -1125,6 +1172,8 @@ class SQLiteRunStore:
                 if active.publication_status == PublicationStatus.PUBLISHED.value
                 else "withdrawn"
                 if active.publication_status == PublicationStatus.WITHDRAWN.value
+                else "preview_only"
+                if preview is not None
                 else "not_ready"
             ),
             "source_version": active.source_version,
@@ -1132,6 +1181,8 @@ class SQLiteRunStore:
             "policy_version": pointer["policy_version"],
             "published_at": pointer["published_at"],
             "run": active,
+            "preview_run_id": preview.parse_run_id if preview is not None else None,
+            "preview": preview_payload,
         }
 
     def pending_publication_events(self, *, limit: int = 100) -> tuple[dict[str, Any], ...]:

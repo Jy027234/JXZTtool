@@ -359,6 +359,10 @@ _RUN_SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "readiness",
             "policy",
             "legacy",
+            # Parsed-but-unpublished content is named explicitly, so it is neither
+            # mistaken for a formal version nor for "nothing parsed yet".
+            "preview_run_id",
+            "preview",
         ],
         "properties": [
             "schema_version",
@@ -375,6 +379,8 @@ _RUN_SCHEMA_EXPECTATIONS: dict[str, dict[str, object]] = {
             "validation",
             "readiness",
             "policy",
+            "preview_run_id",
+            "preview",
             "runs",
             "legacy",
             "diagnostics",
