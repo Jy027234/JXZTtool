@@ -253,6 +253,8 @@ class NullIndex(IndexAdapter):
 
     is_degraded = True
     degradation_reason = "in_memory_index"
+    #: Nothing is stored, so there is no run state to isolate either.
+    supports_run_isolation = False
 
     def __init__(self) -> None:
         self.upserts: list[dict[str, object]] = []

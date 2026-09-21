@@ -842,7 +842,7 @@ class ParseRuntime:
                 expected_source_version=expected_source_version,
                 expected_generation=expected_generation,
                 claim_token=claim_token,
-                durable_index=isinstance(self.index, PgVectorIndex),
+                durable_index=self._index_supports_run_isolation(),
                 profile=profile_name,
             )
         except PublishError as exc:
@@ -936,7 +936,7 @@ class ParseRuntime:
         result = self.run_store.publish_run(
             parse_run_id=run_id,
             expected_generation=int(state.get("publication_generation") or 0),
-            durable_index=isinstance(self.index, PgVectorIndex),
+            durable_index=self._index_supports_run_isolation(),
             profile=str(record.profile or self.settings.runtime.run_artifact_profile or "default"),
             actor=reviewer or "reviewer",
             reviewed={"reason": reason, "reviewer": reviewer},
@@ -984,6 +984,17 @@ class ParseRuntime:
             tenant_id=getattr(job, "tenant_id", None),
             parent_job_id=str(options.get("parent_job_id") or "") or None,
         )
+
+    def _index_supports_run_isolation(self) -> bool:
+        """Whether the index can be restored to one published run's state.
+
+        The index adapters declare this themselves.  A backend that keys rows by
+        document only cannot roll back to a previous run, so it must not be counted
+        as the durable index a `rag` profile requires -- claiming it would publish
+        a run whose index tier can never be returned to what that run produced.
+        """
+
+        return bool(getattr(self.index, "supports_run_isolation", False))
 
     def _uses_run_publication(self, *, doc_id: str, tenant_id: str | None) -> bool:
         """Whether this document's executions must go through the run store.
@@ -1102,7 +1113,7 @@ class ParseRuntime:
                 expected_source_version=_source_version_of(request),
                 expected_generation=expected_generation,
                 claim_token=claim_token,
-                durable_index=isinstance(self.index, PgVectorIndex),
+                durable_index=self._index_supports_run_isolation(),
                 profile=str(self.settings.runtime.run_artifact_profile or "default"),
             )
         except PublishError as exc:

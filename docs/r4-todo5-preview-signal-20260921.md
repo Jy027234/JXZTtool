@@ -278,6 +278,19 @@ execute：deleted_files 455、missing_files 455（上一轮已删过的文件如
 `{blocks,chunks,views,assets}` 全为 0、正式 run 的计数不变、活层块列表不变、`restore_live_from_run()`
 仍可回滚；dry-run 的 `deleted_staged_rows` 全为 0。全量 **1052 项 OK (skipped=6)**。
 
+### 6.1 运维入口与索引 run 隔离判定（本次补齐）
+
+- **CLI**：parsecore.cli cleanup-run-artifacts --config … [--tenant-id] [--doc-id]
+  [--retention-seconds] [--execute] [--out]，默认 dry-run，--execute 才删除；出错时退出码 1。
+- **索引 run 隔离**：durable_index 不再由 isinstance(index, PgVectorIndex) 决定，而是读索引自己的
+  声明 supports_run_isolation（PgVectorIndex = False：行按文档存放，一次 upsert 覆盖整篇，无法回滚到
+  某个已发布 run；NullIndex = False）。因此要求持久索引的 
+ag profile 在默认索引上会被拒绝
+  （
+un_not_publishable_by_policy / index_backend_not_durable），而不是发布一个索引层永远回不去的版本；
+  一旦某个后端能按 run 隔离，它自己声明即可，运行时不必知道它的类。用例
+  	ests/test_run_publication_capability.py::IndexRunIsolationTests（2 项）覆盖声明与拒绝语义。
+
 ## 7. 仍然留待后续
 
 1. **索引层的 run 隔离**：`PgVectorIndex` 仍不能按 run 过滤，因此索引能力未计入 `SQLiteRunStore` 的能力声明；正式部署的 Postgres/pgvector 一致性与超大目录演练仍按方案留在部署事项里。

@@ -2385,7 +2385,16 @@ class PgVectorIndex(IndexAdapter):
     are skipped so the table only contains real vectors. The vector column
     width is configured when the index is constructed and every upsert is
     validated to fail loudly on dimension drift.
+
+    The rows are keyed by document, not by run: an upsert replaces what the
+    document had, so the index cannot be rolled back to a previous published run
+    the way the staged artifacts can.  Until it can, it does not claim run
+    isolation, and a profile that requires a durable index (``rag``) therefore
+    cannot be published on it -- see ``supports_run_isolation``.
     """
+
+    #: Whether the index can be restored to the state of one published run.
+    supports_run_isolation = False
 
     def __init__(self, database_url: str, *, dim: int = 1536) -> None:
         try:

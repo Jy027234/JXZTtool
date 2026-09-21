@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 
 from parsecore.api_health import clear_probe_cache, health_capabilities
 from parsecore.bootstrap import build_runtime
+from parsecore.models import Block, BlockType, Chunk
 from tests.support import TemporaryWorkspace
 
 CONFIG = """
@@ -34,6 +35,85 @@ mode = "hybrid"
 name = "docx-native"
 extensions = [".docx"]
 """.strip()
+
+
+class IndexRunIsolationTests(unittest.TestCase):
+    """A durable index a profile requires must be one that can be rolled back."""
+
+    def test_the_index_adapters_declare_whether_they_isolate_runs(self) -> None:
+        from parsecore.stores import PgVectorIndex
+        from parsecore.stubs import NullIndex
+
+        # Neither keys its rows by run yet, so neither may claim run isolation --
+        # the pgvector one replaces a document's rows on every upsert.
+        self.assertFalse(PgVectorIndex.supports_run_isolation)
+        self.assertFalse(NullIndex.supports_run_isolation)
+
+    def test_durable_index_follows_the_index_declaration_not_its_class(self) -> None:
+        from parsecore.run_store import RunArtifacts
+        from parsecore.stubs import NullIndex
+
+        with TemporaryWorkspace(CONFIG) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            self.assertFalse(runtime._index_supports_run_isolation())
+
+            # A `rag` profile needs a durable index; with the default index the
+            # publish is refused instead of publishing an index tier that cannot be
+            # returned to what the run produced.
+            refusal = runtime.publish_run(
+                doc_id="doc-rag",
+                artifacts=RunArtifacts(
+                    blocks=(
+                        Block(
+                            block_id="b1",
+                            doc_id="doc-rag",
+                            type=BlockType.PARAGRAPH,
+                            content="text",
+                            metadata={"page": 1},
+                        ),
+                    ),
+                    chunks=(
+                        Chunk(chunk_id="c1", doc_id="doc-rag", block_ids=("b1",), text="text"),
+                    ),
+                    views={"pages": [{"page_number": 1, "text": "text"}]},
+                ),
+                job_id="job-rag",
+                profile="rag",
+                validation_status="passed",
+            )
+            class _IsolatingIndex(NullIndex):
+                supports_run_isolation = True
+
+            runtime.index = _IsolatingIndex()
+            self.assertTrue(runtime._index_supports_run_isolation())
+            with_isolating = runtime.publish_run(
+                doc_id="doc-rag",
+                artifacts=RunArtifacts(
+                    blocks=(
+                        Block(
+                            block_id="b1",
+                            doc_id="doc-rag",
+                            type=BlockType.PARAGRAPH,
+                            content="text",
+                            metadata={"page": 1},
+                        ),
+                    ),
+                    chunks=(
+                        Chunk(chunk_id="c1", doc_id="doc-rag", block_ids=("b1",), text="text"),
+                    ),
+                    views={"pages": [{"page_number": 1, "text": "text"}]},
+                ),
+                job_id="job-rag-2",
+                profile="rag",
+                validation_status="passed",
+            )
+
+        self.assertFalse(refusal["published"])
+        self.assertEqual(refusal["reason"], "run_not_publishable_by_policy")
+        self.assertIn("index_backend_not_durable", refusal["message"])
+        # The declaration is what decides, so an index that can isolate runs is
+        # accepted without the runtime knowing its class.
+        self.assertTrue(with_isolating["published"], with_isolating.get("message"))
 
 
 class PublicationCapabilitySurfaceTests(unittest.TestCase):

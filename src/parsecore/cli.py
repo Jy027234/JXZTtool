@@ -82,6 +82,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     comparison_cleanup.add_argument("--out", default=None)
 
+    run_cleanup = sub.add_parser(
+        "cleanup-run-artifacts",
+        help="Collect the staged artifacts of runs nothing refers to (dry-run by default)",
+    )
+    run_cleanup.add_argument("--config", default="parsecore.toml")
+    run_cleanup.add_argument("--tenant-id")
+    run_cleanup.add_argument("--doc-id")
+    run_cleanup.add_argument("--retention-seconds", type=int)
+    run_cleanup.add_argument(
+        "--execute",
+        action="store_true",
+        help="remove files and staged rows after reviewing the default dry-run report",
+    )
+    run_cleanup.add_argument("--out", default=None)
+
     legacy_import = sub.add_parser(
         "import-legacy-snapshots",
         help="Import pre-P0-03 artifacts as unvalidated legacy snapshot runs",
@@ -170,6 +185,22 @@ def _main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "cleanup-run-artifacts":
+        runtime = build_runtime(args.config)
+        payload = runtime.cleanup_run_artifacts(
+            tenant_id=args.tenant_id,
+            doc_id=args.doc_id,
+            retention_seconds=args.retention_seconds,
+            dry_run=not bool(args.execute),
+        )
+        payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.out:
+            output_path = Path(args.out)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(payload_text + "\n", encoding="utf-8")
+        print(payload_text)
+        return 1 if payload.get("errors") else 0
 
     if args.command == "cleanup-provider-comparison-artifacts":
         settings = load_settings(args.config)
