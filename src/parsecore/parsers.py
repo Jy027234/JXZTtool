@@ -34,7 +34,12 @@ from .ocr_cache import (
     get_default_cache,
     ocr_cache_identity,
 )
-from .tables import GridCell, TableGrid, render_markdown as _render_table_markdown
+from .tables import (
+    GridCell,
+    TableGrid,
+    grid_from_cells,
+    render_markdown as _render_table_markdown,
+)
 
 
 _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
@@ -1676,6 +1681,24 @@ class DoclingParser(ParserAdapter):
             max_file_size=self._max_file_size,
             raises_on_error=self._raises_on_error,
         )
+        runtime_metadata = {
+            "converter_reuse_enabled": self._reuse_converter,
+            "converter_cache_hit": converter_cache_hit,
+        }
+        # Docling hands over a structured document: read the levels, the table grid
+        # and the inline runs from it instead of throwing them away through
+        # Markdown and guessing the grid back.  A converter (or a test double) that
+        # only produces Markdown keeps using the Markdown path below.
+        structured_blocks = _build_docling_provider_blocks(
+            conversion_result,
+            request=request,
+            provider_name=self.name,
+            provider_version=provider_version,
+        )
+        if structured_blocks:
+            for block in structured_blocks:
+                block.metadata.update(runtime_metadata)
+            return tuple(structured_blocks)
         page_chunks = _normalize_docling_pages(conversion_result)
         return _build_markdown_provider_blocks(
             request=request,
@@ -1684,10 +1707,7 @@ class DoclingParser(ParserAdapter):
             page_chunks=page_chunks,
             detect_tables=self._detect_tables,
             source_kind="docling_markdown",
-            provider_runtime_metadata={
-                "converter_reuse_enabled": self._reuse_converter,
-                "converter_cache_hit": converter_cache_hit,
-            },
+            provider_runtime_metadata=runtime_metadata,
         )
 
 
@@ -4686,6 +4706,331 @@ def _docling_page_markdown(item: Any) -> str:
         if value:
             return str(value).strip()
     return ""
+
+
+def _docling_document_object(conversion_result: Any) -> Any | None:
+    """The structured document, when the converter exposes one.
+
+    Docling returns a ``DoclingDocument`` whose items carry their own level,
+    table grid, inline formatting and provenance.  Going through Markdown instead
+    throws the parts Markdown cannot express away -- merged table cells, underline
+    and superscript runs -- and then the grid has to be guessed back from text.
+    """
+
+    for candidate in (getattr(conversion_result, "document", None), conversion_result):
+        if candidate is not None and callable(getattr(candidate, "iterate_items", None)):
+            return candidate
+    return None
+
+
+def _docling_item_label(item: Any) -> str:
+    label = getattr(item, "label", None)
+    value = getattr(label, "value", label)
+    return str(value or "").strip().lower()
+
+
+def _docling_item_provenance(item: Any) -> tuple[int | None, tuple[float, float, float, float] | None]:
+    """Page number and bbox of an item, when the backend provides them."""
+
+    prov = getattr(item, "prov", None)
+    if isinstance(prov, Mapping):
+        prov = [prov]
+    for entry in prov or ():
+        if isinstance(entry, Mapping):
+            page_value = entry.get("page_no")
+            bbox_value = entry.get("bbox")
+        else:
+            page_value = getattr(entry, "page_no", None)
+            bbox_value = getattr(entry, "bbox", None)
+        page_number = _coerce_page_number(page_value, default=0) or None
+        bbox = _docling_bbox(bbox_value)
+        if page_number is not None or bbox is not None:
+            return page_number, bbox
+    return None, None
+
+
+def _docling_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
+    to_tuple = getattr(value, "to_tuple", None)
+    if callable(to_tuple):
+        try:
+            value = to_tuple()
+        except Exception:
+            return None
+    if isinstance(value, Mapping):
+        try:
+            left = float(value.get("l", value.get("left", value.get("x0"))))
+            top = float(value.get("t", value.get("top", value.get("y0"))))
+            right = float(value.get("r", value.get("right", value.get("x1"))))
+            bottom = float(value.get("b", value.get("bottom", value.get("y1"))))
+        except (TypeError, ValueError):
+            return None
+        return (min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        try:
+            numbers = [float(item) for item in value]
+        except (TypeError, ValueError):
+            return None
+        if len(numbers) >= 4:
+            x0, y0, x1, y1 = numbers[:4]
+            return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    return None
+
+
+def _docling_table_payload(item: Any) -> dict[str, Any]:
+    """Table metadata in the same shape the Word and PDF paths publish.
+
+    The cells keep their grid position and span, the flat rows and the rendered
+    text are derived from them through :mod:`parsecore.tables`, so a merged cell
+    from docling reaches the reader exactly like one read from ``w:gridSpan``.
+    """
+
+    data = getattr(item, "data", None)
+    if data is None:
+        return {}
+    row_count = int(getattr(data, "num_rows", 0) or 0)
+    col_count = int(getattr(data, "num_cols", 0) or 0)
+    records: list[dict[str, Any]] = []
+    header_rows = 0
+    for cell in getattr(data, "table_cells", None) or ():
+        try:
+            row = int(getattr(cell, "start_row_offset_idx", 0) or 0)
+            column = int(getattr(cell, "start_col_offset_idx", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        row_span = max(1, int(getattr(cell, "row_span", 1) or 1))
+        col_span = max(1, int(getattr(cell, "col_span", 1) or 1))
+        origin = f"{row}.{column}"
+        records.append(
+            {
+                "row_index": row,
+                "col_index": column,
+                "text": str(getattr(cell, "text", "") or "").strip(),
+                "row_span": row_span,
+                "col_span": col_span,
+                "continuation": False,
+                "origin": origin,
+            }
+        )
+        for extra_row in range(row, row + row_span):
+            for extra_col in range(column, column + col_span):
+                if (extra_row, extra_col) == (row, column):
+                    continue
+                records.append(
+                    {
+                        "row_index": extra_row,
+                        "col_index": extra_col,
+                        "text": "",
+                        "row_span": 1,
+                        "col_span": 1,
+                        "continuation": True,
+                        "origin": origin,
+                    }
+                )
+        if bool(getattr(cell, "column_header", False)) and row == header_rows:
+            header_rows = row + 1
+    if not records:
+        for row_index, row_cells in enumerate(getattr(data, "grid", None) or ()):
+            for col_index, cell in enumerate(row_cells or ()):
+                records.append(
+                    {
+                        "row_index": row_index,
+                        "col_index": col_index,
+                        "text": str(getattr(cell, "text", cell) or "").strip(),
+                        "row_span": 1,
+                        "col_span": 1,
+                        "continuation": False,
+                        "origin": f"{row_index}.{col_index}",
+                    }
+                )
+    if not records:
+        return {}
+    grid = grid_from_cells(records)
+    rows = grid.rows()
+    payload: dict[str, Any] = {
+        "cells": rows,
+        "table_cells": [cell.as_payload() for cell in grid.cells],
+        "rows": row_count or grid.row_count,
+        "cols": col_count or grid.column_count,
+        "header_rows": header_rows or (1 if rows else 0),
+    }
+    merges = grid.merged_cells()
+    if merges:
+        payload["merged_cells"] = merges
+        payload["header_values"] = grid.header_values(payload["header_rows"])
+    return payload
+
+
+def _build_docling_provider_blocks(
+    conversion_result: Any,
+    *,
+    request: ParseRequest,
+    provider_name: str,
+    provider_version: Any,
+    source_kind: str = "docling_structure",
+) -> list[Block] | None:
+    """Map docling's items straight to blocks, or ``None`` when it has no structure."""
+
+    document = _docling_document_object(conversion_result)
+    if document is None:
+        return None
+    try:
+        items = list(document.iterate_items())
+    except Exception:
+        return None
+    if not items:
+        return None
+
+    display_name = str(getattr(document, "name", "") or Path(request.file_path).stem)
+    blocks: list[Block] = [
+        Block(
+            block_id=f"{request.doc_id}-title",
+            doc_id=request.doc_id,
+            type=BlockType.TITLE,
+            content=display_name,
+            metadata=_provider_metadata(
+                {
+                    "page": 1,
+                    "page_kind": "logical",
+                    "page_type": "body",
+                    "kind": BlockType.TITLE.value,
+                    "semantic_role": SemanticRole.TITLE.value,
+                    "source_kind": source_kind,
+                },
+                parser_name=provider_name,
+                provider_version=provider_version,
+            ),
+        )
+    ]
+    position = 1
+    table_index_by_page: dict[int, int] = {}
+    for item, level in items:
+        label = _docling_item_label(item)
+        page_number, bbox = _docling_item_provenance(item)
+        page_value = page_number or 1
+        text = str(getattr(item, "text", "") or "").strip()
+        metadata: dict[str, Any] = _provider_metadata(
+            {
+                "page": page_value,
+                "page_type": "body",
+                "position": position,
+                "source_kind": source_kind,
+                "docling_label": label or type(item).__name__,
+            },
+            parser_name=provider_name,
+            provider_version=provider_version,
+        )
+        if page_number is None:
+            # Docling reports no page for formats without physical pages (Word);
+            # saying so keeps the number from being read as page evidence.
+            metadata["page_kind"] = "logical"
+        if bbox is not None:
+            metadata["bbox"] = bbox
+        try:
+            item_level = int(level)
+        except (TypeError, ValueError):
+            item_level = 0
+        if item_level > 0:
+            metadata["heading_level"] = item_level
+
+        block_type: BlockType | None = None
+        content = text
+        if label in {"title", "section_header"} and text:
+            # Word and PDF headings are TITLE blocks carrying their level and role;
+            # docling's label decides whether it is the document title or a section
+            # heading, and the level comes from the structure.
+            block_type = BlockType.TITLE
+            metadata["semantic_role"] = (
+                SemanticRole.TITLE.value
+                if label == "title"
+                else SemanticRole.BODY_SECTION.value
+            )
+            metadata["is_section_heading"] = True
+            metadata.setdefault("heading_level", 1 if label == "title" else 2)
+        elif label == "table":
+            table_payload = _docling_table_payload(item)
+            if not table_payload:
+                continue
+            table_index = table_index_by_page.get(page_value, 0) + 1
+            table_index_by_page[page_value] = table_index
+            content = _render_table_markdown(table_payload["cells"], header_rows=table_payload["header_rows"])
+            metadata.update(table_payload)
+            metadata.update(
+                {
+                    "kind": BlockType.TABLE.value,
+                    "semantic_role": SemanticRole.TABLE.value,
+                    "table_index": table_index,
+                }
+            )
+            block_type = BlockType.TABLE
+        elif label == "picture":
+            caption = ""
+            caption_text = getattr(item, "caption_text", None)
+            if callable(caption_text):
+                try:
+                    caption = str(caption_text() or "").strip()
+                except Exception:
+                    caption = ""
+            content = caption or text or "figure"
+            metadata.update(
+                {
+                    "kind": BlockType.IMAGE.value,
+                    "semantic_role": SemanticRole.IMAGE.value,
+                    "figure_index": position,
+                    "figure_kind": "image",
+                }
+            )
+            if caption:
+                metadata["alt_text"] = caption
+            block_type = BlockType.IMAGE
+        elif label in {"page_header", "page_footer"}:
+            metadata["semantic_role"] = SemanticRole.HEADER_FOOTER.value
+            metadata["kind"] = "header_footer"
+        elif label in {"formula", "code"} and text:
+            metadata["semantic_role"] = SemanticRole.PARAGRAPH.value
+            # A transcribed formula is kept as-is and marked unverified: correct
+            # LaTeX syntax is not evidence that the content matches the source.
+            metadata["formula_unverified"] = True
+        if not content:
+            continue
+        if block_type is None:
+            block_type = BlockType.PARAGRAPH
+            metadata.setdefault("kind", "paragraph")
+            metadata.setdefault("semantic_role", SemanticRole.PARAGRAPH.value)
+
+        formatting = getattr(item, "formatting", None)
+        hyperlink = getattr(item, "hyperlink", None)
+        runs: list[dict[str, Any]] = []
+        if formatting is not None:
+            run: dict[str, Any] = {"text": content}
+            if bool(getattr(formatting, "bold", False)):
+                run["bold"] = True
+            if bool(getattr(formatting, "italic", False)):
+                run["italic"] = True
+            if bool(getattr(formatting, "underline", False)):
+                run["underline"] = True
+            script = getattr(getattr(formatting, "script", None), "value", None)
+            if str(script or "") in {"superscript", "subscript"}:
+                run["vertical_align"] = str(script)
+            if len(run) > 1:
+                runs.append(run)
+        if hyperlink:
+            runs.append({"text": content, "link": str(hyperlink)})
+        if runs:
+            metadata["runs"] = runs
+
+        blocks.append(
+            Block(
+                block_id=f"{request.doc_id}-{provider_name}-{position}",
+                doc_id=request.doc_id,
+                type=block_type,
+                content=content,
+                metadata=metadata,
+            )
+        )
+        position += 1
+    return blocks if len(blocks) > 1 else None
 
 
 def _docling_document_markdown(document: Any) -> str:

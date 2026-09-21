@@ -1,8 +1,8 @@
-# 待办 1（首批）交付报告：Word 合并表格结构保真
+# 待办 1 交付报告：Word 合并表格结构保真 + Docling 直映结构
 
-日期：2026-09-21
+日期：2026-09-21（同日续写：补 Docling 直映结构）
 待办来源：[docs/parsecore-reliability-mineru-todo-20260920.md](parsecore-reliability-mineru-todo-20260920.md) 待办 1
-状态：首批（Word → 文档产物 → Reader / 知识单元 / 记录 / IR）已实施；次要兼容项见第 6 节
+状态：Word 链路与 Docling 直映均已实施；剩余见第 6 节
 
 ## 1. 这一项解决什么
 
@@ -18,6 +18,10 @@ Word 表格的合并关系在原生提取阶段就被丢了。`_docx_table_cells
 
 结果是同一张合并表头在结构化投影、IR 文本、知识单元、导出里可能给出不同的网格，或者被压成
 无法与"值恰好重复"区分的形式。本次把网格收敛到一处：解析器读原生结构，其余只做派生。
+
+同类问题也存在于 Docling：它本来就给出层级、表格网格（含合并）、行内格式与来源，但旧路径先
+导出 Markdown 再由 Markdown 重建 Blocks——Markdown 表达不了合并、下划线和上标，网格只能再猜
+一次。第 5 节记录这一段的改造与实测。
 
 ## 2. 交付物
 
@@ -120,21 +124,71 @@ regression_suite failed —— 既有漂移，见下
 这四项漂移在未修改的 `14cc7f2` 上同样存在，属于本轮五项待办之外的既有问题；阈值与基线
 未做任何放宽，门禁仍然如实退出 1。
 
-## 6. 本批未完成（同一待办，后续切片）
+## 6. Docling 直映结构（本次补齐）
 
-1. **Docling/PyMuPDF4LLM 直映结构**：`_build_markdown_provider_blocks()` 仍被 TextParser /
-   PyMuPDF4LLM 使用，不能整段删除；把 Docling 的结构对象直接映射到产物（不再 `→ Markdown →`
-   反推单元格）是独立切片，需要真实样本对照。
-2. **`DocumentArtifactItem.kind` 语义迁移**：目前 `kind` 仍是语义角色、内容形态由
+Docling 的转换结果本来就是结构对象：条目带层级（`iterate_items()` 的 `level`）、表格带网格与
+合并跨度（`TableItem.data.table_cells` 的 `start_row_offset_col/idx`、`row_span`、`col_span`、
+`column_header`）、行内格式（`formatting.bold/italic/underline/script`、`hyperlink`）以及来源
+（`prov[].page_no/bbox`）。旧路径把这些导出成 Markdown 再重建，Markdown 表达不了的部分直接
+丢失，网格只能再猜一次。
+
+现在 `DoclingParser.parse()` 优先走 `_build_docling_provider_blocks()`：
+
+| 结构 | 映射 |
+| --- | --- |
+| `title` / `section_header` | `TITLE` 块（`heading_level` + `is_section_heading` + `semantic_role`） |
+| `table` | `TABLE` 块：`table_cells`（行列 + 跨度 + continuation/origin）、`cells`、`header_rows`、`merged_cells`、`header_values` 全部经 `parsecore.tables` 派生，Markdown 正文也由同一网格渲染 |
+| `picture` | `IMAGE` 块，带图注（`caption_text()`）与 `alt_text` |
+| `page_header` / `page_footer` | 段落块 + `semantic_role = header_footer`（页眉页脚保留类别） |
+| `formula` / `code` | 段落块，原文保留并标 `formula_unverified`（语法正确不等于内容已核验） |
+| `text` | 段落块，`formatting` / `hyperlink` 转为 `runs` |
+| 无 `prov`（Word 无物理页） | `page = 1` 且 `page_kind = "logical"`，不冒充页码证据 |
+
+判据是"转换结果是否提供结构对象"：只有 Markdown 的结果（或测试替身）继续走
+`_build_markdown_provider_blocks()`；TextParser / PyMuPDF4LLM 的 Markdown 路径保持不变。
+
+真实对照（`python-docx` 生成的含合并表格 DOCX，本机 docling 2.x 离线转换 0.1 s）：
+
+| 项 | 走 Markdown（改动前） | 直映结构（改动后） |
+| --- | --- | --- |
+| 表格跨度 | 无（`table_cells` 不存在） | 表头 `Part` `col_span=2`（第 2 列标为 continuation），`Bolt` `row_span=2` |
+| `merged_cells` | 无 | `col_span` + `row_span` 两条，带 origin |
+| `header_rows` | 无 | 1 |
+| 标题层级 | `heading_level=2`，无 `is_section_heading` | `heading_level=2` + `is_section_heading=true` |
+| 行内格式（加粗 + 下划线） | 丢失 | `runs = [{"text": "WARNING: do not reuse", "bold": true, "underline": true}]` |
+| Blocks 映射耗时 | 35 ms | **1 ms** |
+
+验证：
+
+```text
+.\.venv\Scripts\python.exe -m unittest tests.test_docling_structure
+Ran 9 tests / OK          # 含一次真实 docling 转换（本机可用，未跳过）
+
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+Ran 980 tests / OK (skipped=6)
+```
+
+真实转换用例会在本机导入真实的 `docling*`，而 Windows 下 docling 加载器会把 `docling*` 模块
+清空并从 ASCII junction 重新导入；那会破坏其它用例安装的模块替身（本轮确实先撞上
+`test_provider_comparison_report` 的两个失败），因此该用例结束时会把自己引入的 `docling*` /
+`docling_parse*` 模块移除，恢复进程原状。
+
+## 7. 未完成（同一待办）
+
+1. **`DocumentArtifactItem.kind` 语义迁移**：目前 `kind` 仍是语义角色、内容形态由
    `provenance["block_type"]` 表达。迁移会牵动知识单元类型判定，放在表格链路稳定后做。
-3. **Excel / Markdown 逐样本扩展**：Excel 现有 `cells` + `merged_cells` 继续复用，未改；
-   其原生 `merged_cells` 与 Word 的跨度表达尚未统一到同一形状。
-4. **Word 物理页码**：Word block 仍写 `page=1`，真实物理页码未知。该字段是兼容字段，页投影
+2. **Excel / Markdown 逐样本扩展**：Excel 现有 `cells` + `merged_cells` 继续复用，未改；
+   其原生 `merged_cells` 与 Word/PDF/Docling 的跨度表达尚未统一到同一形状。
+3. **Word 物理页码**：Word block 仍写 `page=1`，真实物理页码未知。该字段是兼容字段，页投影
    同时给出 `logical_pages[]` 说明其逻辑含义，本次未改（改为缺省会牵动表格 ID、记录页码与
    coverage 分组，需要单独一批）。
-5. **图片/公式/脚注锚点**：按方案"先保留，后理解"，本轮未触碰。
+4. **Docling 的图片/公式落盘**：图片目前只保留图注与来源，未保存原图；公式只保留转写文本并标
+   未核验，没有做区域图保留。
+5. **PDF 后端的本机限制**：本机 `docling-parse` 缺 `pdf_resources/glyphs/standard/additional.dat`，
+   真实 PDF 转换直接失败（`DocumentLoadError`），因此 Docling 直映只在 DOCX 上做了真实样本
+   验证；PDF 侧沿用 `pdf-text` 路径不受影响。
 
-## 7. 回滚
+## 8. 回滚
 
 - 代码回滚：`git revert` 本次提交即可；`tables.py` 为新增模块，回滚后无引用。
 - 行为回滚：如需恢复"按 `cells` 字符串自行重建网格"，可让消费者直接读 `metadata["cells"]`；
