@@ -2632,6 +2632,32 @@ class PdfTextParser(ParserAdapter):
             # the existing splitters do not see table contents twice.
             for index, layout in enumerate(layout_pages):
                 if index < len(page_texts) and layout.text_without_tables is not None:
+                    if (
+                        layout.ocr_acceptance_reason == "regions_enhanced"
+                        and layout.ocr_lines
+                    ):
+                        protected_bboxes = tuple(
+                            table.bbox
+                            for table in layout.tables
+                            if getattr(table, "bbox", None) is not None
+                        )
+                        filtered_lines = _strip_pdf_page_furniture_lines(
+                            layout.ocr_lines,
+                            page_width=layout.width,
+                            page_height=layout.height,
+                            protected_bboxes=protected_bboxes,
+                        )
+                        if filtered_lines != layout.ocr_lines:
+                            layout.ocr_lines = filtered_lines
+                            layout.text_without_tables = _text_from_merged_lines(
+                                filtered_lines,
+                                column_count_hint=layout.column_count_hint,
+                                page_width=layout.width,
+                                page_height=layout.height,
+                            )
+                            layout.final_text_token_count = _estimate_token_count(
+                                layout.text_without_tables
+                            )
                     page_texts[index] = layout.text_without_tables
         if self._strip_hf_enabled:
             cleaned_page_texts = _strip_repeated_headers_footers(
@@ -7076,6 +7102,157 @@ def _native_page_lines(
             for box in table_bboxes
         )
     ]
+
+
+def _strip_pdf_page_furniture_lines(
+    lines: Sequence[Mapping[str, Any]],
+    *,
+    page_width: float,
+    page_height: float,
+    protected_bboxes: Sequence[Sequence[float]] = (),
+) -> list[dict[str, Any]]:
+    """Drop short, semantic running identifiers/page markers at page edges.
+
+    This is intentionally used only after region OCR succeeds. Geometry keeps
+    ordinary in-page numeric content out of the rule, while table boxes remain
+    protected even when they reach an edge.
+    """
+    if page_width <= 0.0 or page_height <= 0.0:
+        return [dict(line) for line in lines]
+
+    records: list[tuple[int, dict[str, Any], tuple[float, float, float, float], str]] = []
+    kept: list[dict[str, Any]] = []
+    removed_indices: set[int] = set()
+    for index, raw_line in enumerate(lines):
+        line = dict(raw_line)
+        text = str(line.get("text") or "").strip()
+        bbox = line.get("bbox")
+        if not text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            kept.append(line)
+            continue
+        try:
+            x0, top, x1, bottom = (float(value) for value in bbox[:4])
+        except (TypeError, ValueError):
+            kept.append(line)
+            continue
+        if x1 <= x0 or bottom <= top:
+            kept.append(line)
+            continue
+        protected = any(
+            len(protected) >= 4 and _boxes_overlap(bbox, protected)
+            for protected in protected_bboxes
+        )
+        records.append((index, line, (x0, top, x1, bottom), text))
+        if protected:
+            kept.append(line)
+            continue
+
+        compact = "".join(text.split())
+        digit_ratio = sum(char.isdigit() for char in compact) / max(1, len(compact))
+        top_identifier = (
+            compact == text
+            and 8 <= len(compact) <= 32
+            and any(char.isdigit() for char in compact)
+            and all(char.isdigit() or not char.isalnum() for char in compact)
+            and digit_ratio >= 0.6
+            and bottom <= page_height * 0.12
+            and (x1 - x0) <= page_width * 0.35
+            and x0 >= page_width * 0.25
+            and x1 <= page_width * 0.75
+        )
+        short_edge_line = bottom - top <= max(16.0, page_height * 0.04)
+        if short_edge_line and top_identifier:
+            removed_indices.add(index)
+            continue
+        kept.append(line)
+
+    footer_candidates = [
+        (index, bbox, text)
+        for index, _line, bbox, text in records
+        if not any(
+            len(protected) >= 4 and _boxes_overlap(bbox, protected)
+            for protected in protected_bboxes
+        )
+        and bbox[1] >= page_height * 0.85
+        and bbox[3] - bbox[1] <= max(16.0, page_height * 0.04)
+        and len(text) <= 32
+    ]
+    footer_groups: list[list[tuple[int, tuple[float, float, float, float], str]]] = []
+    for candidate in sorted(footer_candidates, key=lambda item: (item[1][1], item[1][0])):
+        if not footer_groups:
+            footer_groups.append([candidate])
+            continue
+        group = footer_groups[-1]
+        boxes = [item[1] for item in group]
+        left = min(box[0] for box in boxes)
+        top = min(box[1] for box in boxes)
+        right = max(box[2] for box in boxes)
+        bottom = max(box[3] for box in boxes)
+        x0, next_top, x1, next_bottom = candidate[1]
+        combined_top = min(top, next_top)
+        combined_bottom = max(bottom, next_bottom)
+        adjacent = next_top <= bottom + max(18.0, page_height * 0.03)
+        compact_band = combined_bottom - combined_top <= max(32.0, page_height * 0.07)
+        compact_width = max(right, x1) - min(left, x0) <= page_width * 0.85
+        if adjacent and compact_band and compact_width:
+            group.append(candidate)
+        else:
+            footer_groups.append([candidate])
+
+    for group in footer_groups:
+        # Keep record boundaries so a page number at the end of one native
+        # line cannot absorb the first date/revision digits from the next.
+        combined_text = " ".join(text for _index, _bbox, text in group)
+        if _is_pdf_page_date_marker(combined_text):
+            removed_indices.update(index for index, _bbox, _text in group)
+
+    if removed_indices:
+        return [dict(line) for index, line in enumerate(lines) if index not in removed_indices]
+    return kept
+
+
+def _is_pdf_page_date_marker(value: str) -> bool:
+    if len(value) > 80:
+        return False
+    normalized = re.sub(r"\s+", " ", value).strip().casefold()
+    compact = normalized.replace(" ", "")
+    page_number = re.search(
+        r"^(?:pages?|página|seite|страница|no\.?|p\.?|页|第)\D{0,5}\d{1,5}",
+        compact,
+    )
+    date = re.search(
+        r"(?<!\d)(?:"
+        r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"
+        r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"
+        r"|\d{4}年\d{1,2}月\d{1,2}日"
+        r")(?!\d)",
+        compact,
+    )
+    if page_number is not None and date is not None and page_number.end() <= date.start():
+        return True
+
+    # Some extracted footers split date digits into short spaced groups. Keep
+    # whitespace here so the page number remains distinct from the following
+    # groups; geometry and the page-prefix requirement are enforced by the
+    # caller before this predicate is used.
+    spaced_page_number = re.match(
+        r"^(?:pages?|página|seite|страница|no\.?|p\.?|页|第)\s*\D{0,5}\d{1,5}(?=\s|[-/.]|$)",
+        normalized,
+    )
+    if spaced_page_number is None:
+        return False
+    suffix = normalized[spaced_page_number.end():]
+    groups = re.findall(r"\d+", suffix)
+    numeric_suffix = re.sub(
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+        "",
+        suffix,
+    )
+    return (
+        len(groups) >= 4
+        and all(1 <= len(group) <= 2 for group in groups)
+        and re.fullmatch(r"[\s\d/.-]+", numeric_suffix) is not None
+    )
 
 
 def _merge_native_and_ocr_lines(

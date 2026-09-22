@@ -11,18 +11,23 @@ text layer already provides.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+from parsecore.models import ParseRequest
 from parsecore.parsers import (
     PdfTextParser,
     _image_ocr_regions,
     _merge_native_and_ocr_lines,
     _ocr_enhancement_regions,
     _OcrStageTimings,
+    _PageLayout,
     _page_text_lines,
+    _strip_pdf_page_furniture_lines,
 )
 
 
@@ -346,6 +351,128 @@ class MixedPageEnhancementTests(unittest.TestCase):
         self.assertIn("Torque value", text or "")
         self.assertIn(USABLE_ONE, text or "")
 
+    def test_parse_drops_split_edge_furniture_and_keeps_page_content(self) -> None:
+        running_identifier = "1234567890---"
+        numeric_index_entry = "02 04 196 223 321"
+        body_text = USABLE_ONE
+        recovered_text = "Recovered torque value"
+        line_records = [
+            {
+                "text": running_identifier,
+                "bbox": (120.0, 12.0, 180.0, 24.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": body_text,
+                "bbox": (50.0, 100.0, 280.0, 112.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": numeric_index_entry,
+                "bbox": (50.0, 145.0, 280.0, 157.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": recovered_text,
+                "bbox": (50.0, 200.0, 150.0, 212.0),
+                "source_kind": "pdf_ocr_fallback",
+            },
+            {
+                "text": "Pa",
+                "bbox": (80.0, 430.0, 95.0, 442.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": "ge 129 / 20",
+                "bbox": (97.0, 430.0, 150.0, 442.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": "26-08-20",
+                "bbox": (152.0, 430.0, 215.0, 442.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": "Page 129",
+                "bbox": (80.0, 470.0, 110.0, 482.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": "12 APR-34/",
+                "bbox": (112.0, 470.0, 170.0, 482.0),
+                "source_kind": "pdf_native_text",
+            },
+            {
+                "text": "78 90",
+                "bbox": (172.0, 470.0, 215.0, 482.0),
+                "source_kind": "pdf_native_text",
+            },
+        ]
+        stale_page_text = "\n".join(line["text"] for line in line_records)
+        layout = _PageLayout(
+            page_number=1,
+            width=300.0,
+            height=500.0,
+            text_without_tables=stale_page_text,
+            ocr_attempt_reason="mixed_page_regions",
+            ocr_fallback_reason="mixed_page_regions",
+            ocr_acceptance_reason="regions_enhanced",
+            ocr_lines=line_records,
+        )
+
+        class _FakePdfReader:
+            def __init__(self, _path: str) -> None:
+                self.pages = [_FakePage([])]
+
+        parser = _parser()
+        with TemporaryDirectory(prefix="parsecore-edge-furniture-") as temp_dir:
+            pdf_path = Path(temp_dir) / "region-enhanced.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-edge-furniture",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch(
+                "parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader
+            ), patch(
+                "parsecore.parsers._extract_pdfplumber_layout", return_value=[layout]
+            ):
+                blocks = parser.parse(request)
+
+        content = "\n".join(block.content for block in blocks)
+        self.assertNotIn(running_identifier, content)
+        self.assertNotIn("Page 129 / 2026-08-20", content)
+        self.assertNotIn("2026-08-20", content)
+        self.assertNotIn("Page 129 12 APR-34/78 90", content)
+        self.assertIn(body_text, content)
+        self.assertIn(numeric_index_entry, content)
+        self.assertIn(recovered_text, content)
+        surviving_line_text = {str(line.get("text") or "") for line in layout.ocr_lines}
+        self.assertNotIn(running_identifier, surviving_line_text)
+        self.assertNotIn("Pa", surviving_line_text)
+        self.assertNotIn("ge 129 / 20", surviving_line_text)
+        self.assertNotIn("26-08-20", surviving_line_text)
+        self.assertTrue(surviving_line_text.isdisjoint({"Page 129", "12 APR-34/", "78 90"}))
+        block_line_text = {
+            str(line.get("text") or "")
+            for block in blocks
+            for line in block.metadata.get("lines", [])
+        }
+        self.assertNotIn(running_identifier, block_line_text)
+        self.assertTrue(
+            block_line_text.isdisjoint(
+                {
+                    "Pa",
+                    "ge 129 / 20",
+                    "26-08-20",
+                    "Page 129",
+                    "12 APR-34/",
+                    "78 90",
+                }
+            )
+        )
+
     def test_the_recovered_line_keeps_page_coordinates(self) -> None:
         page = self._page()
         engine = _RecordingEngine([(_box(2.0, 2.0, 60.0, 12.0), "Torque value", 0.95)])
@@ -449,6 +576,22 @@ class MixedPageEnhancementTests(unittest.TestCase):
 
 
 class MergeHelperTests(unittest.TestCase):
+    def test_edge_numeric_cell_inside_a_table_box_is_preserved(self) -> None:
+        table_cell = {
+            "text": "1234567890---",
+            "bbox": (120.0, 12.0, 180.0, 24.0),
+            "source_kind": "pdf_native_text",
+        }
+
+        kept = _strip_pdf_page_furniture_lines(
+            [table_cell],
+            page_width=300.0,
+            page_height=400.0,
+            protected_bboxes=((100.0, 0.0, 200.0, 40.0),),
+        )
+
+        self.assertEqual(kept, [table_cell])
+
     def test_conflicts_resolve_towards_the_reliable_side(self) -> None:
         native = _page_text_lines(
             _FakePage([_line(USABLE_ONE, 100.0), _line(GARBLED, 200.0)])
