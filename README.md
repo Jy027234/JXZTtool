@@ -532,3 +532,10 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 6. `parsecore self-check` 和 `parsecore large-pdf-stress` 已作为默认运维入口落地；下一步继续收敛 OCR 长尾样本性能。
 7. 在 queue-worker + pgvector 模式下固化入口鉴权、灰度配置与回滚口径。
 8. 为 `fast/full/perf` 三档门禁补稳定样本环境与持续趋势跟踪。
+
+
+### 版本化回归基线与来源
+
+`regression_baseline.py save` 写入 schema version 2 元数据，记录基线版本、源码 commit 和 tracked tree 状态；无 Git 环境仍可保存并标记来源未知。只有来源证据声明为 `exact_commit_run` 时，才要求源码 commit 已知且 tracked tree clean。
+
+`tools/regression_baseline_registry.py validate` 可离线校验登记工件的相对路径、SHA-256、元数据和指定投影，不解析 PDF。R4 对照登记在 `var/regression/baseline-registry.json`，独立项目609 suite 位于 `var/regression/suite.project609.json`；默认 suite 和旧冻结基线保持原样。

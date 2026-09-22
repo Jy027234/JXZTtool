@@ -51,6 +51,8 @@ import argparse
 import dataclasses
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -536,12 +538,104 @@ def _run_all(*, config: Path, fixtures: list[Path], top_pages: int) -> dict[str,
     }
 
 
+def _current_git_revision() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    return revision or None
+
+
+def _current_source_tree_state() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return "dirty" if result.stdout.strip() else "clean"
+
+
+def _baseline_version_metadata(
+    args: argparse.Namespace,
+    *,
+    output_path: Path,
+    source_commit: str | None,
+    source_tree_state: str,
+) -> dict[str, Any]:
+    evidence_id = str(getattr(args, "source_evidence_id", "") or "").strip()
+    evidence_sha256 = str(getattr(args, "source_evidence_sha256", "") or "").strip().lower()
+    evidence_provenance = str(getattr(args, "source_evidence_provenance", "") or "").strip()
+    if bool(evidence_id) != bool(evidence_sha256):
+        raise ValueError("--source-evidence-id and --source-evidence-sha256 must be supplied together")
+    if evidence_sha256 and re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) is None:
+        raise ValueError("--source-evidence-sha256 must be a 64-character SHA-256 digest")
+    allowed_provenance = {
+        "exact_commit_run",
+        "count_aligned_recorded_measurement",
+        "opaque_historical_digest",
+    }
+    if evidence_id and evidence_provenance not in allowed_provenance:
+        raise ValueError("source evidence requires a supported --source-evidence-provenance")
+    if not evidence_id and evidence_provenance:
+        raise ValueError("--source-evidence-provenance requires source evidence id and digest")
+    revision = str(getattr(args, "baseline_revision", "") or output_path.stem).strip()
+    if not revision:
+        raise ValueError("baseline revision cannot be blank")
+    if source_commit and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_commit) is None:
+        raise ValueError("source_commit must be a full Git object id when available")
+    if source_tree_state not in {"clean", "dirty", "unknown"}:
+        raise ValueError("source tree state must be clean, dirty, or unknown")
+    if evidence_provenance == "exact_commit_run" and (
+        not source_commit or source_tree_state != "clean"
+    ):
+        raise ValueError("exact_commit_run requires a known commit and clean tracked source tree")
+    return {
+        "schema_version": 2,
+        "baseline_revision": revision,
+        "source_commit": source_commit,
+        "source_tree_state": source_tree_state,
+        "source_evidence": (
+            {"id": evidence_id, "sha256": evidence_sha256, "provenance": evidence_provenance}
+            if evidence_id
+            else None
+        ),
+    }
+
+
 def _cmd_save(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    try:
+        version_metadata = _baseline_version_metadata(
+            args,
+            output_path=out,
+            source_commit=_current_git_revision(),
+            source_tree_state=_current_source_tree_state(),
+        )
+    except ValueError as exc:
+        print(f"[save] invalid baseline metadata: {exc}")
+        return 2
     runtime = build_runtime(Path(args.config))
     _apply_runtime_overrides(runtime, args)
     request_option_overrides = _request_option_overrides_from_args(args)
     fixture_root = _resolve_fixture_root(getattr(args, "fixture_root", None))
     payload = {
+        **version_metadata,
         "config": str(Path(args.config)),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "post_process_overrides": {"strip_headers_footers": args.strip_headers_footers},
@@ -558,7 +652,6 @@ def _cmd_save(args: argparse.Namespace) -> int:
             for p in args.pdf
         ],
     }
-    out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     for fixture in payload["fixtures"]:
@@ -1087,6 +1180,23 @@ def _build_parser() -> argparse.ArgumentParser:
     save = sub.add_parser("save", help="Run fixtures and save baseline JSON")
     save.add_argument("--pdf", action="append", required=True, help="Fixture path (repeatable)")
     save.add_argument("--out", required=True, help="Baseline output JSON path")
+    save.add_argument(
+        "--baseline-revision",
+        help="Stable version label recorded in new snapshot metadata (default: output filename)",
+    )
+    save.add_argument(
+        "--source-evidence-id",
+        help="Portable evidence id to bind this snapshot to its source record",
+    )
+    save.add_argument(
+        "--source-evidence-sha256",
+        help="SHA-256 of the source evidence artifact; requires --source-evidence-id",
+    )
+    save.add_argument(
+        "--source-evidence-provenance",
+        choices=("exact_commit_run", "count_aligned_recorded_measurement", "opaque_historical_digest"),
+        help="Evidence strength; required when a source evidence id and digest are provided",
+    )
     save.set_defaults(func=_cmd_save)
 
     check = sub.add_parser("check", help="Re-run fixtures and diff against baseline")

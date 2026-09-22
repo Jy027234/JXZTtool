@@ -18,6 +18,9 @@ var/regression/*
 !var/regression/provider-suite.fast.json
 !var/regression/provider-suite.full.json
 !var/regression/provider-suite.perf.json
+!var/regression/baseline-registry.json
+!var/regression/baseline.project609.609b25b.json
+!var/regression/suite.project609.json
 var/knowledge-structuring/
 var/self-check/
 var/tmp/
