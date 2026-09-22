@@ -32,6 +32,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import unquote
 from uuid import uuid4
 
+from .models import Block, BlockType, Chunk
 from .publication import (
     ARTIFACT_PROFILES,
     SQLITE_RUN_STORE_CAPABILITIES,
@@ -43,6 +44,7 @@ from .publication import (
     ValidationStatus,
     assert_transition,
 )
+from .record_filters import collect_record_query, normalize_field_filters
 
 
 RUN_STORE_SCHEMA_VERSION = "2026-09-run-store-v1"
@@ -370,6 +372,20 @@ class SQLiteRunStore:
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
+    @contextmanager
+    def _read_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Open an explicit, read-only SQLite snapshot transaction."""
+
+        with self._connect() as conn:
+            conn.execute("PRAGMA query_only = ON")
+            conn.execute("BEGIN")
             try:
                 yield conn
             except Exception:
@@ -990,6 +1006,7 @@ class SQLiteRunStore:
             policy_version = (
                 str(report.get("policy_version") or "") if report else ""
             ) or DEFAULT_VALIDATION_POLICY.version
+            effective_profile = str(profile or row["profile"] or "default")
             decision: dict[str, Any] | None = None
             if legacy_import:
                 self._assert_legacy_import_publishable(row=row, policy_version=policy_version)
@@ -997,15 +1014,23 @@ class SQLiteRunStore:
             elif reviewed is not None and self._review_allows_publication(
                 validation_status=str(row["validation_status"] or ""), reviewed=reviewed
             ):
-                allowed, reason = True, "reviewed_publication"
-                decision = _normalize_review_decision(reviewed)
+                policy = self._policy_for(policy_version)
+                if (
+                    not durable_index
+                    and effective_profile.strip().lower()
+                    in policy.require_durable_index_for_profiles
+                ):
+                    allowed, reason = False, "index_backend_not_durable"
+                else:
+                    allowed, reason = True, "reviewed_publication"
+                    decision = _normalize_review_decision(reviewed)
             else:
                 allowed, reason = self._policy_for(policy_version).may_publish(
                     validation_status=row["validation_status"],
                     warning_codes=tuple(
                         str(code) for code in ((report or {}).get("warning_codes") or ())
                     ),
-                    profile=str(profile or row["profile"] or "default"),
+                    profile=effective_profile,
                     durable_index=durable_index,
                 )
             if not allowed:
@@ -1121,19 +1146,14 @@ class SQLiteRunStore:
     ) -> bool:
         """Whether a human decision may publish this conclusion.
 
-        Only a conclusion that *asked* for a decision can be decided.  A rejected
-        or errored run has nothing deliverable, and a run that was never validated
-        is not something a reviewer can accept.
+        Only a ``warning`` or ``needs_review`` conclusion can be overridden by a
+        human decision.  Clean passes follow the ordinary publication policy.
         """
 
-        status = str(validation_status or "")
-        if status in {
-            ValidationStatus.REJECTED.value,
-            ValidationStatus.ERROR.value,
-            ValidationStatus.NOT_RUN.value,
-            # ``withdrawn`` is a publication state, not a validation one, but a run
-            # carrying it must not be pushed back into service by a review.
-            "withdrawn",
+        status = str(validation_status or "").strip().lower()
+        if status not in {
+            ValidationStatus.WARNING.value,
+            ValidationStatus.NEEDS_REVIEW.value,
         }:
             return False
         return bool(
@@ -1267,45 +1287,77 @@ class SQLiteRunStore:
             for row in rows
         )
 
-    def delete_staged_artifacts(self, *, parse_run_id: str) -> dict[str, int]:
-        """Drop everything a run staged, and report what was removed.
+    def delete_staged_artifacts(self, *, parse_run_id: str, dry_run: bool = False) -> dict[str, Any]:
+        """Collect unreferenced evidence under the same lock as publication.
 
-        The live tier is untouched: it belongs to the published run, not to the
-        run being collected.  Callers delete the asset files this returns first,
-        so a failure leaves descriptors pointing at nothing rather than files
-        nobody knows about.
+        Recheck ownership here, not only in the caller's earlier scan.  Assets
+        can be shared by a parent, child or rerun; another run's reference keeps
+        the file alive even when this run's descriptors are collected.
         """
-
+        result: dict[str, Any] = {
+            "blocks": 0, "chunks": 0, "views": 0, "assets": 0,
+            "protected": False, "deleted_files": 0, "freed_bytes": 0,
+            "missing_files": 0, "errors": [],
+        }
         with self._write_transaction() as conn:
-            self._require_run(conn, parse_run_id)
-            counts = {
-                "blocks": int(
-                    conn.execute(
-                        "DELETE FROM run_blocks WHERE parse_run_id = ?", (str(parse_run_id),)
-                    ).rowcount
-                    or 0
-                ),
-                "chunks": int(
-                    conn.execute(
-                        "DELETE FROM run_chunks WHERE parse_run_id = ?", (str(parse_run_id),)
-                    ).rowcount
-                    or 0
-                ),
-                "views": int(
-                    conn.execute(
-                        "DELETE FROM run_document_views WHERE parse_run_id = ?",
-                        (str(parse_run_id),),
-                    ).rowcount
-                    or 0
-                ),
-                "assets": int(
-                    conn.execute(
-                        "DELETE FROM run_assets WHERE parse_run_id = ?", (str(parse_run_id),)
-                    ).rowcount
-                    or 0
-                ),
+            run = self._require_run(conn, parse_run_id)
+            active = conn.execute(
+                "SELECT active_run_id FROM document_publication WHERE tenant_id = ? AND doc_id = ?",
+                (run["tenant_id"], run["doc_id"]),
+            ).fetchone()
+            preview = conn.execute(
+                "SELECT parse_run_id FROM parse_runs WHERE tenant_id = ? AND doc_id = ?"
+                " AND execution_status = 'succeeded' AND publication_status = 'unpublished'"
+                " AND validation_status NOT IN ('rejected', 'error', 'not_run')"
+                " AND sealed_at IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+                (run["tenant_id"], run["doc_id"]),
+            ).fetchone()
+            if (
+                run["execution_status"] in {"pending", "running"}
+                or (active is not None and active[0] == parse_run_id)
+                or (preview is not None and preview[0] == parse_run_id)
+            ):
+                result["protected"] = True
+                return result
+            files = conn.execute(
+                "SELECT DISTINCT path FROM run_assets WHERE parse_run_id = ?", (parse_run_id,),
+            ).fetchall()
+            shared_paths = {
+                Path(other[0]).resolve()
+                for other in conn.execute(
+                    "SELECT DISTINCT path FROM run_assets WHERE parse_run_id != ?", (parse_run_id,),
+                )
             }
-        return counts
+            for asset in files:
+                # Compare resolved paths as old descriptors need not use the
+                # same relative/absolute spelling for a shared file.
+                path = Path(asset["path"]).resolve()
+                if path in shared_paths:
+                    continue
+                try:
+                    if not path.exists():
+                        result["missing_files"] += 1
+                        continue
+                    size = path.stat().st_size
+                    if not dry_run:
+                        path.unlink()
+                    result["deleted_files"] += 1
+                    result["freed_bytes"] += size
+                except OSError as exc:
+                    result["errors"].append(f"{parse_run_id}:{path.name}:{type(exc).__name__}")
+            if dry_run or result["errors"]:
+                return result
+            for key, table in (
+                ("blocks", "run_blocks"), ("chunks", "run_chunks"),
+                ("views", "run_document_views"), ("assets", "run_assets"),
+            ):
+                result[key] = conn.execute(
+                    f"DELETE FROM {table} WHERE parse_run_id = ?", (parse_run_id,),
+                ).rowcount
+            # A collected preview cannot later become the next preview or be
+            # offered for publication after its artifacts have gone.
+            conn.execute("UPDATE parse_runs SET sealed_at = NULL WHERE parse_run_id = ?", (parse_run_id,))
+        return result
 
     def delete_run_assets(self, *, parse_run_id: str) -> int:
         """Drop a run's asset descriptors after their files have been removed."""
@@ -1353,6 +1405,127 @@ class SQLiteRunStore:
                 (tenant, str(doc_id), max(1, int(limit))),
             ).fetchall()
             return tuple(self._row_to_run(row) for row in rows)
+
+    def read_published_snapshot(
+        self,
+        *,
+        doc_id: str,
+        tenant_id: str | None = None,
+        view_types: Sequence[str] = (),
+        record_query: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one active publication and its sealed artifacts atomically.
+
+        The live tables are intentionally not consulted here.  The publication
+        pointer and every artifact row are read in one SQLite snapshot, so a
+        concurrent publish or artifact collection cannot mix two run versions.
+        """
+
+        tenant = _normalize_tenant(tenant_id)
+        doc = str(doc_id)
+        if isinstance(view_types, str):
+            requested_views = (view_types,)
+        else:
+            requested_views = tuple(view_types or ())
+        requested_views = tuple(
+            dict.fromkeys(
+                normalized
+                for value in requested_views
+                if (normalized := str(value or "").strip().lower())
+            )
+        )
+
+        with self._read_transaction() as conn:
+            active = conn.execute(
+                "SELECT p.active_run_id, p.publication_generation,"
+                " p.publication_status AS pointer_publication_status, r.*"
+                " FROM document_publication AS p"
+                " JOIN parse_runs AS r"
+                " ON r.parse_run_id = p.active_run_id"
+                " AND r.tenant_id = p.tenant_id AND r.doc_id = p.doc_id"
+                " WHERE p.tenant_id = ? AND p.doc_id = ?"
+                " AND p.active_run_id IS NOT NULL",
+                (tenant, doc),
+            ).fetchone()
+            if active is None:
+                return None
+
+            record = self._row_to_run(active)
+            run_id = str(active["active_run_id"])
+            publication_status = str(
+                record.publication_status or active["pointer_publication_status"] or ""
+            )
+            if publication_status not in {
+                PublicationStatus.PUBLISHED.value,
+                PublicationStatus.WITHDRAWN.value,
+            }:
+                return None
+
+            publication = {
+                "schema_version": "2026-09-publication-read-context-v1",
+                "served_run_id": run_id,
+                "run_identity": run_id,
+                "pinned": True,
+                "publication_status": publication_status,
+                "publication_generation": int(active["publication_generation"] or 0),
+                "consumer_signal": (
+                    "withdrawn"
+                    if publication_status == PublicationStatus.WITHDRAWN.value
+                    else "published"
+                ),
+                "latest_job_used_as_formal_version": False,
+            }
+
+            blocks: tuple[Block, ...] = ()
+            chunks: tuple[Chunk, ...] = ()
+            if record_query is None:
+                block_rows = conn.execute(
+                    "SELECT block_id, doc_id, payload_json FROM run_blocks"
+                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                    " ORDER BY position",
+                    (run_id, tenant, doc),
+                ).fetchall()
+                chunk_rows = conn.execute(
+                    "SELECT chunk_id, doc_id, payload_json FROM run_chunks"
+                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                    " ORDER BY position",
+                    (run_id, tenant, doc),
+                ).fetchall()
+                blocks = tuple(_run_block_from_row(row) for row in block_rows)
+                chunks = tuple(_run_chunk_from_row(row) for row in chunk_rows)
+
+            views: dict[str, tuple[dict[str, Any], ...]] = {}
+            for view_type in requested_views:
+                rows = conn.execute(
+                    "SELECT payload_json FROM run_document_views"
+                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                    " AND view_type = ? ORDER BY position",
+                    (run_id, tenant, doc, view_type),
+                ).fetchall()
+                views[view_type] = tuple(
+                    payload
+                    for row in rows
+                    if isinstance((payload := json.loads(row["payload_json"])), dict)
+                )
+
+            result: dict[str, Any] = {
+                "record": record,
+                "publication": publication,
+                "artifacts": RunArtifacts(
+                    blocks=blocks,
+                    chunks=chunks,
+                    views=views,
+                ),
+            }
+            if record_query is not None:
+                result["records"] = _query_run_records(
+                    conn,
+                    parse_run_id=run_id,
+                    tenant_id=tenant,
+                    doc_id=doc,
+                    record_query=record_query,
+                )
+            return result
 
     def restore_live_from_run(
         self, *, tenant_id: str | None = None, doc_id: str | None = None
@@ -2023,6 +2196,148 @@ def _colliding_artifact_ids(
         if owner is not None and (owner["tenant_id"] != tenant_id or owner["doc_id"] != doc_id):
             colliding.append(f"chunk:{row['chunk_id']}")
     return colliding
+
+
+def _run_block_from_row(row: sqlite3.Row) -> Block:
+    payload = json.loads(row["payload_json"])
+    metadata = payload.get("metadata")
+    return Block(
+        block_id=str(payload.get("block_id") or row["block_id"]),
+        doc_id=str(payload.get("doc_id") or row["doc_id"]),
+        type=BlockType(str(payload.get("type") or BlockType.PARAGRAPH.value)),
+        content=str(payload.get("content") or ""),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+    )
+
+
+def _run_chunk_from_row(row: sqlite3.Row) -> Chunk:
+    payload = json.loads(row["payload_json"])
+    raw_block_ids = payload.get("block_ids") or ()
+    if isinstance(raw_block_ids, str):
+        raw_block_ids = (raw_block_ids,)
+    embedding = payload.get("embedding")
+    return Chunk(
+        chunk_id=str(payload.get("chunk_id") or row["chunk_id"]),
+        doc_id=str(payload.get("doc_id") or row["doc_id"]),
+        block_ids=tuple(str(value) for value in raw_block_ids),
+        text=str(payload.get("text") or ""),
+        language=str(payload.get("language") or "und"),
+        semantic_role=str(payload.get("semantic_role") or "paragraph"),
+        embedding=(
+            tuple(float(value) for value in embedding)
+            if isinstance(embedding, (list, tuple))
+            else None
+        ),
+    )
+
+
+def _iter_run_view_payloads(cursor: sqlite3.Cursor) -> Iterator[dict[str, Any]]:
+    while True:
+        rows = cursor.fetchmany(512)
+        if not rows:
+            return
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if isinstance(payload, dict):
+                yield payload
+
+
+def _query_run_records(
+    conn: sqlite3.Connection,
+    *,
+    parse_run_id: str,
+    tenant_id: str,
+    doc_id: str,
+    record_query: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Query one run's records with the same filters and result shape as stores."""
+
+    args = dict(record_query)
+    start = _optional_int(args.get("page_start"))
+    end = _optional_int(args.get("page_end"))
+    if start is not None and end is not None and start > end:
+        raise ValueError("invalid_page_range")
+
+    raw_limit = args.get("limit", 100)
+    limit = None if raw_limit is None else max(1, int(raw_limit))
+    offset = max(0, int(args.get("offset", 0) or 0))
+    query = args.get("query")
+    table_id = args.get("table_id")
+    quality_signal = args.get("quality_signal")
+    field_filters = args.get("field_filters")
+
+    where = [
+        "parse_run_id = ?",
+        "tenant_id = ?",
+        "doc_id = ?",
+        "view_type = ?",
+    ]
+    params: list[Any] = [parse_run_id, tenant_id, doc_id, "records"]
+    if start is not None:
+        where.append("COALESCE(page_end, page_start, 1) >= ?")
+        params.append(start)
+    if end is not None:
+        where.append("COALESCE(page_start, page_end, 1) <= ?")
+        params.append(end)
+    where_sql = " AND ".join(where)
+
+    count_row = conn.execute(
+        f"SELECT COUNT(*) FROM run_document_views WHERE {where_sql}", tuple(params)
+    ).fetchone()
+    candidate_count = int(count_row[0] if count_row is not None else 0)
+    if candidate_count <= 0:
+        return {
+            "items": (),
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "persisted": False,
+        }
+
+    select_sql = (
+        "SELECT payload_json FROM run_document_views "
+        f"WHERE {where_sql} "
+        "ORDER BY COALESCE(page_start, 0) ASC, position ASC"
+    )
+    select_params = list(params)
+    payload_filter = (
+        any(str(value or "").strip() for value in (query, table_id, quality_signal))
+        or bool(normalize_field_filters(field_filters))
+    )
+    if not payload_filter:
+        if limit is not None:
+            select_sql += " LIMIT ? OFFSET ?"
+            select_params.extend([limit, offset])
+        elif offset:
+            select_sql += " LIMIT -1 OFFSET ?"
+            select_params.append(offset)
+        rows = conn.execute(select_sql, tuple(select_params)).fetchall()
+        return {
+            "items": tuple(
+                payload
+                for row in rows
+                if isinstance((payload := json.loads(row["payload_json"])), dict)
+            ),
+            "total": candidate_count,
+            "limit": limit,
+            "offset": offset,
+            "persisted": True,
+        }
+
+    cursor = conn.execute(select_sql, tuple(select_params))
+    result = collect_record_query(
+        _iter_run_view_payloads(cursor),
+        limit=limit,
+        offset=offset,
+        query=query,
+        table_id=table_id,
+        quality_signal=quality_signal,
+        field_filters=field_filters,
+        page_start=start,
+        page_end=end,
+    )
+    result["persisted"] = True
+    return result
 
 
 def _block_payload(block: Any) -> dict[str, Any]:

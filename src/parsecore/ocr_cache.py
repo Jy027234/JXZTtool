@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -101,6 +102,30 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _entry_timestamp(entry: Any) -> float | None:
+    """Return a valid cache timestamp, or ``None`` for a damaged entry."""
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
+        return None
+    timestamp = entry.get("ts")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        return None
+    try:
+        timestamp = float(timestamp)
+    except (OverflowError, ValueError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _discard(path: Path) -> None:
+    """Best-effort removal for corrupt or expired cache files."""
+
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _key(
@@ -202,15 +227,20 @@ class PageOcrCache:
         k = _key(file_bytes, file_path, page_number, provider_tag, options_repr)
         path = self._path(k)
         try:
-            raw = path.read_text(encoding="utf-8")
-            entry: dict[str, Any] = json.loads(raw)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return None
-        if self._ttl > 0 and time.time() - entry.get("ts", 0) > self._ttl:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _discard(path)
+            return None
+        except OSError:
+            return None
+        timestamp = _entry_timestamp(entry)
+        if timestamp is None:
+            _discard(path)
+            return None
+        if self._ttl > 0 and time.time() - timestamp > self._ttl:
+            _discard(path)
             return None
         return entry
 
@@ -320,10 +350,15 @@ class PageOcrCache:
                 try:
                     raw = entry_path.read_text(encoding="utf-8")
                     data = json.loads(raw)
-                    if now - data.get("ts", 0) > self._ttl:
+                    timestamp = _entry_timestamp(data)
+                    if timestamp is None:
+                        _discard(entry_path)
+                    elif now - timestamp > self._ttl:
                         entry_path.unlink(missing_ok=True)
                         count += 1
-                except (OSError, json.JSONDecodeError):
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    _discard(entry_path)
+                except OSError:
                     pass
         except OSError:
             pass

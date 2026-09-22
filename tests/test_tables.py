@@ -21,6 +21,13 @@ from parsecore.tables import (
     resolve_table_grid,
     rows_from_table_payload,
 )
+from parsecore.pipelines import (
+    DocumentArtifactItem,
+    ParsedDocumentArtifact,
+    TableStructureStage,
+    _knowledge_unit_table_summary,
+    _knowledge_unit_table_text,
+)
 
 
 MERGED_CELLS = [
@@ -315,6 +322,75 @@ class TableGridInputTests(unittest.TestCase):
 
     def test_rows_of_strings_are_accepted(self) -> None:
         self.assertEqual(grid_from_rows(["A", "B"]).rows(), [["A"], ["B"]])
+
+
+class TruncatedTableConsumerTests(unittest.TestCase):
+    def _item(self) -> DocumentArtifactItem:
+        # Excel keeps all merge descriptors when the cell payload is limited to a
+        # preview.  Both in-preview and out-of-preview merges remain table facts.
+        return DocumentArtifactItem(
+            item_id="itm-table-preview",
+            block_ids=("blk-table-preview",),
+            kind="table",
+            semantic_role="table",
+            text="| Maintenance Plan | Maintenance Plan |\n| --- | --- |\n| full table row | value |",
+            metadata={
+                "rows": 8,
+                "cols": 4,
+                "cells_preview": [["Maintenance Plan", ""]],
+                "cells_truncated": True,
+                "merged_cells": [
+                    {
+                        "kind": "col_span",
+                        "origin": "0.0",
+                        "row_index": 0,
+                        "col_index": 0,
+                        "row_span": 1,
+                        "col_span": 2,
+                    },
+                    {
+                        "kind": "row_span",
+                        "origin": "7.3",
+                        "row_index": 7,
+                        "col_index": 3,
+                        "row_span": 2,
+                        "col_span": 1,
+                    },
+                ],
+            },
+        )
+
+    def test_knowledge_unit_keeps_declared_merges_for_a_preview(self) -> None:
+        item = self._item()
+        summary = _knowledge_unit_table_summary(item)
+        text = _knowledge_unit_table_text(item)
+
+        self.assertEqual(
+            [(merge["row_index"], merge["col_index"]) for merge in summary["merged_cells"]],
+            [(0, 0), (7, 3)],
+        )
+        self.assertEqual(text, item.text)
+
+    def test_table_structure_stage_does_not_replace_full_text_with_preview(self) -> None:
+        item = self._item()
+        document = ParsedDocumentArtifact(
+            doc_id="doc-preview",
+            pipeline_name="test",
+            parser_name="excel-native",
+            backend_name="native",
+            format_name="xlsx",
+            source_path="",
+            options_hash="",
+            blocks=(),
+            items=(item,),
+        )
+        stage = TableStructureStage(registration=type("Registration", (), {"options": {}})())
+
+        result = stage.run(request=type("Request", (), {"options": {}})(), document=document)
+
+        self.assertEqual(result.items[0].text, item.text)
+        self.assertNotIn("rendered_text", result.items[0].metadata)
+        self.assertEqual(result.metadata["table_structure"]["skipped_items"], 1)
 
 
 if __name__ == "__main__":

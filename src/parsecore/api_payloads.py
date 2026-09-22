@@ -3461,6 +3461,7 @@ def _document_records_response(
         "projection": "records",
         "doc_id": str(snapshot.get("doc_id") or getattr(job, "doc_id", "") or ""),
         "parse_run_id": str(getattr(job, "job_id", "") or ""),
+        "publication": _publication_read_context(snapshot),
         "profile": str(profile_resolution["resolved_profile"]),
         "profile_resolution": profile_resolution,
         "state": _state_value(getattr(job, "state", None)),

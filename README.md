@@ -34,8 +34,8 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - 可选 OpenAI-compatible embedding provider 与 chunk 级 embedding 落库
 - 可选 DashScope-compatible 二阶段 rerank provider，支持阿里 Qwen 排序模型与安全降级
 - 启动期能力真实性校验：未知 parser / index / provider 名称、mock provider 与占位解析器默认被拒绝，能力状态通过 `/health` 与 `/v1/runtime` 的 `capabilities` 报告暴露（`accepting_jobs` / `formal_parse_ready` / `degraded_capabilities`）
-- 独立的 SQLite RunStore 快照与发布事务：`begin_run → staged → seal → publish` 可原子切换 active 指针，事务失败保留旧版；默认解析与正文读取尚未全面接入，不能据此宣称端到端原子交付
-- 发布准入校验（P0-04 部分）：`publish_run()` 已接必需产物、占位、CID、OCR 失败及阅读顺序等共享规则；默认执行已将必需视图写入检查移到 `DONE` 之前，用途质量与默认发布链路仍需收口
+- SQLite RunStore 快照与发布事务：默认解析接入 `begin_run → staged → seal → publish`；正式正文、chunks 与 records 从同一读事务取得已发布 run 的封存产物，事务失败保留旧版
+- 发布准入校验：`publish_run()` 接入必需产物、占位、CID、OCR 失败及阅读顺序等共享规则；人工复核不能绕过用途要求的后端能力，生产与 Postgres/pgvector 验证仍有待办
 - 租户边界（P0-07）：`tenant_scope = "enforced"` 时由宿主注入的已认证租户决定归属，请求参数只能复述；job / 导出 / 文档资源按持久化租户授权，越界返回与"不存在"相同的响应
 - 可切换的 `inline` / `queue-worker` 执行模式
 - 同步上传入口的文件大小保护与分层 CI 门禁
@@ -49,11 +49,11 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 当前交付状态：`0.1.0 可交付灰度版`。中小文档可直接试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版结论见 [docs/release-notes.md](docs/release-notes.md)。
 
-可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：配置真实性、run 契约、SQLite 发布事务、共享质量校验、租户边界、迁移与 corpus/release 门禁已有实现。默认解析仍写活层，正文读取尚未固定到已发布 run；发布身份字段不代表正文一致性已闭环，P0-03/P0-04 按部分完成管理，生产与 Postgres 验收仍有待办。
+可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：配置真实性、run 契约、SQLite 发布事务、共享质量校验、租户边界、迁移与 corpus/release 门禁已有实现。正式正文读取已固定到封存 run，并覆盖发布切换时的一致性回归；素材覆盖、跨租户清理与复核发布的问题已修复。生产与 Postgres/pgvector 验收仍有待办，当前证据见 [R4 复评记录](docs/r4-closing-review-20260922.md#8-2026-09-22-复评与按需修复)。
 
-下一轮重点是解析效果与性能提升：先保住原生结构，让阅读、检索和导出共用文档产物，再改善段落、版面与表格，通过局部 OCR 和缓存减少重复处理，并修复正文与发布版本不一致的问题。改造同时替换、合并和删除被淘汰的逻辑。验收采用同样本修改前后的结果与耗时对比；MinerU 接入、成本管理和完整领域包平台移出本轮。这些待办尚未实施。
+本轮围绕解析效果与性能，已实施原生结构保留、段落与版面改进、选定 PDF 表格处理、局部 OCR/缓存及发布读取一致性修复，并合并被替代的重复逻辑。验收采用同样本结果与耗时对比；真实样本门禁和未验证部分见复评记录，不能将代码已实现等同于全部验收通过。MinerU 接入、成本管理和完整领域包平台不在本轮范围内。
 
-## 建议演进路径
+## 本轮改进路径
 
 1. 先打通 Word 合并表格的原生结构保留与下游一致性，复用现有产物层；同步推进段落保真和现用 SQLite 发布一致性修复。
 2. 将相同产物约定用于一种 PDF 表格，改善区域阅读顺序、错列和跨页问题，按需做局部 OCR/模型增强并复用缓存。

@@ -931,13 +931,17 @@ class ParseRuntime:
         if not run_id:
             raise LookupError(f"no preview run to publish for doc_id={doc_id!r}")
         record = self.run_store.get_run(parse_run_id=run_id)
-        if record is None or str(record.doc_id) != str(doc_id):
+        if (
+            record is None
+            or str(record.doc_id) != str(doc_id)
+            or str(record.tenant_id) != str(tenant_id or "default").strip()
+        ):
             raise LookupError(f"run {run_id!r} does not belong to doc_id={doc_id!r}")
         result = self.run_store.publish_run(
             parse_run_id=run_id,
             expected_generation=int(state.get("publication_generation") or 0),
             durable_index=self._index_supports_run_isolation(),
-            profile=str(record.profile or self.settings.runtime.run_artifact_profile or "default"),
+            profile=str(record.artifact_profile or self.settings.runtime.run_artifact_profile or "default"),
             actor=reviewer or "reviewer",
             reviewed={"reason": reason, "reviewer": reviewer},
         )
@@ -999,18 +1003,15 @@ class ParseRuntime:
     def _uses_run_publication(self, *, doc_id: str, tenant_id: str | None) -> bool:
         """Whether this document's executions must go through the run store.
 
-        True when the backend can publish atomically *and* the document already
-        has (or is about to get) a published version.  In that case writing the
-        live tables directly would overwrite a formal version with an attempt
-        that may never be published.
+        A capable backend stages every execution, including the first one, so
+        unvalidated content cannot be mistaken for a formal version.
         """
 
         if not self.run_publication_ready:
             return False
         if self.run_store is None:  # pragma: no cover - guarded by run_publication_ready
             return False
-        state = self.publication_state(doc_id=doc_id, tenant_id=tenant_id)
-        return bool(state.get("active_run_id")) or True
+        return True
 
     def _begin_execution_run(
         self,
@@ -1051,6 +1052,7 @@ class ParseRuntime:
         claim_token: str | None,
         placeholder_parsers: Sequence[str] = (),
         quality_signals: Sequence[Mapping[str, Any]] = (),
+        index_manifest: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Stage, seal, validate and publish one execution.
 
@@ -1059,6 +1061,9 @@ class ParseRuntime:
         """
 
         assert self.run_store is not None
+        views = dict(views)
+        if index_manifest is not None:
+            views["index_manifest"] = (dict(index_manifest),)
         self.run_store.set_execution_status(
             parse_run_id=run.parse_run_id, status="running", claim_token=claim_token
         )
@@ -1519,6 +1524,7 @@ class ParseRuntime:
                         blocks=blocks,
                         chunks=chunks,
                         views=self._document_views_for_snapshot(job=job, blocks=blocks),
+                        index_manifest=index_manifest,
                         claim_token=claim_token,
                         # Only the placeholder parser that actually produced these
                         # blocks counts. Passing every configured placeholder made
@@ -1903,8 +1909,8 @@ class ParseRuntime:
         old they are: the active published run, which ``restore_live_from_run()``
         would rebuild the live tier from, and the preview run an operator may
         still publish.  Everything else past the retention window is collected --
-        asset files first, then the staged rows, so a failure leaves a run whose
-        descriptors point at nothing rather than files nobody knows about.  The
+        unshared asset files and staged rows under the publication lock. Failed
+        file deletions keep their descriptors for a later retry.  The
         live tier is never touched by this: it belongs to the published run.
         """
 
@@ -1921,10 +1927,10 @@ class ParseRuntime:
         )
         cutoff = time.time() - max(0, window)
         runs = self.run_store.list_staged_runs(tenant_id=tenant_id, doc_id=doc_id)
-        docs = {str(run["doc_id"]) for run in runs}
+        docs = {(str(run["tenant_id"]), str(run["doc_id"])) for run in runs}
         protected_runs: set[str] = set()
-        for document in docs:
-            state = self.publication_state(doc_id=document, tenant_id=tenant_id)
+        for tenant, document in docs:
+            state = self.publication_state(doc_id=document, tenant_id=tenant)
             for key in ("active_run_id", "preview_run_id"):
                 value = str(state.get(key) or "")
                 if value:
@@ -1942,42 +1948,32 @@ class ParseRuntime:
             if _rfc3339_timestamp(run.get("created_at")) > cutoff:
                 continue
             staged = dict(run.get("staged") or {})
-            assets = self._run_asset_files(
-                parse_run_id=parse_run_id, tenant_id=tenant_id, doc_id=doc_id
-            )
+            if not any(staged.values()):
+                continue
+            try:
+                removed = self.run_store.delete_staged_artifacts(
+                    parse_run_id=parse_run_id, dry_run=dry_run
+                )
+            except Exception as exc:
+                errors.append(f"{parse_run_id}:staged:{type(exc).__name__}")
+                continue
+            if removed.get("protected"):
+                protected_runs.add(parse_run_id)
+                continue
             collected.append(
                 {
                     "parse_run_id": parse_run_id,
                     "doc_id": str(run.get("doc_id") or ""),
+                    "tenant_id": str(run.get("tenant_id") or ""),
                     "publication_status": str(run.get("publication_status") or ""),
                     "staged": staged,
-                    "asset_files": len(assets),
+                    "asset_files": int(staged.get("assets", 0)),
                 }
             )
-            for asset in assets:
-                path = Path(str(asset.get("path") or ""))
-                if not path.exists():
-                    missing_files += 1
-                    continue
-                if dry_run:
-                    deleted_files += 1
-                    freed_bytes += int(asset.get("bytes") or 0)
-                    continue
-                try:
-                    size = path.stat().st_size
-                    path.unlink()
-                except OSError as exc:
-                    errors.append(f"{parse_run_id}:{path.name}:{type(exc).__name__}")
-                    continue
-                deleted_files += 1
-                freed_bytes += size
-            if dry_run:
-                continue
-            try:
-                removed = self.run_store.delete_staged_artifacts(parse_run_id=parse_run_id)
-            except Exception as exc:  # pragma: no cover - store failure path
-                errors.append(f"{parse_run_id}:staged:{type(exc).__name__}")
-                continue
+            deleted_files += int(removed.get("deleted_files", 0))
+            freed_bytes += int(removed.get("freed_bytes", 0))
+            missing_files += int(removed.get("missing_files", 0))
+            errors.extend(removed.get("errors", ()))
             for key in deleted_rows:
                 deleted_rows[key] += int(removed.get(key, 0) or 0)
         if not dry_run and collected:
@@ -2003,19 +1999,6 @@ class ParseRuntime:
             "runs": collected,
             "errors": errors,
         }
-
-    def _run_asset_files(
-        self, *, parse_run_id: str, tenant_id: str | None, doc_id: str | None
-    ) -> list[dict[str, Any]]:
-        """The asset files one run claims."""
-
-        list_assets = getattr(self.run_store, "list_run_assets", None)
-        if not callable(list_assets):
-            return []
-        for run in list_assets(tenant_id=tenant_id, doc_id=doc_id):
-            if str(run.get("parse_run_id") or "") == str(parse_run_id):
-                return [dict(asset) for asset in run.get("assets") or ()]
-        return []
 
     def _persist_document_views(
         self,
@@ -2220,7 +2203,7 @@ class ParseRuntime:
         }
 
     def _served_run_job(
-        self, *, publication: Mapping[str, Any], tenant_id: str
+        self, *, publication: Mapping[str, Any], tenant_id: str, record: Any = None
     ) -> Any | None:
         """The job behind the run a read is serving, if it can be resolved.
 
@@ -2241,7 +2224,8 @@ class ParseRuntime:
         if not served_run_id:
             return None
         try:
-            record = self.run_store.get_run(parse_run_id=served_run_id)
+            if record is None:
+                record = self.run_store.get_run(parse_run_id=served_run_id)
         except Exception:
             return None
         job_id = str(getattr(record, "job_id", "") or "").strip()
@@ -2278,6 +2262,38 @@ class ParseRuntime:
     ) -> dict[str, Any]:
         latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
         normalized_tenant = str(tenant_id or getattr(latest_job, "tenant_id", "default") or "default")
+        if self.run_publication_ready and self.run_store is not None:
+            published = self.run_store.read_published_snapshot(
+                doc_id=doc_id, tenant_id=normalized_tenant,
+                view_types=(*_normalized_document_view_types(document_view_types or ()), "index_manifest"),
+            )
+            if published is not None:
+                publication = published["publication"]
+                artifacts = published["artifacts"]
+                document_views = dict(artifacts.views)
+                manifests = document_views.pop("index_manifest", ())
+                served_job = self._served_run_job(
+                    publication=publication, tenant_id=normalized_tenant, record=published["record"]
+                )
+                return {
+                    "doc_id": doc_id,
+                    "job": served_job,
+                    "blocks": artifacts.blocks,
+                    "chunks": artifacts.chunks,
+                    "document_views": document_views,
+                    # The live index can already belong to the next execution.
+                    # Derive the read description from this snapshot instead.
+                    "index_manifest": dict(manifests[0]) if manifests else self._derive_index_manifest_from_snapshot(
+                        job=served_job, blocks=artifacts.blocks, chunks=artifacts.chunks,
+                    ),
+                    "partition_parts": self.partition_parts_for_document(
+                        doc_id=doc_id, tenant_id=normalized_tenant,
+                        parent_job_id=served_job.job_id if _job_kind(served_job) == _PDF_PARENT_JOB_KIND else None,
+                    ) if served_job is not None else [],
+                    "provider_registry": self.provider_registry(),
+                    "quality_gate": self.quality_gate_config(),
+                    "publication": publication,
+                }
         if latest_job is None:
             blocks: tuple[Any, ...] = ()
             chunks: tuple[Any, ...] = ()
@@ -2308,6 +2324,11 @@ class ParseRuntime:
         publication = self.publication_read_context(
             doc_id=doc_id, tenant_id=normalized_tenant
         )
+        if self.run_publication_ready and publication.get("pinned"):
+            # The first publication occurred during the legacy/no-run read.
+            return self.get_document(
+                doc_id=doc_id, tenant_id=normalized_tenant, document_view_types=document_view_types,
+            )
         describe_document = getattr(self.index, "describe_document", None)
         index_manifest = None
         if callable(describe_document):
@@ -2352,6 +2373,41 @@ class ParseRuntime:
         page_end: int | None = None,
     ) -> dict[str, Any] | None:
         latest_job = self._resolve_latest_job(doc_id=doc_id, tenant_id=tenant_id)
+        normalized_tenant = str(tenant_id or getattr(latest_job, "tenant_id", "default") or "default")
+        if self.run_publication_ready and self.run_store is not None:
+            published = self.run_store.read_published_snapshot(
+                doc_id=doc_id, tenant_id=normalized_tenant,
+                record_query={
+                    "limit": limit, "offset": offset, "query": query, "table_id": table_id,
+                    "quality_signal": quality_signal, "field_filters": field_filters,
+                    "page_start": page_start, "page_end": page_end,
+                },
+            )
+            if published is not None and published["records"]["persisted"]:
+                from .api_payloads import _document_records_response
+
+                result = published["records"]
+                snapshot = self._minimal_document_snapshot(
+                    doc_id=doc_id,
+                    job=self._served_run_job(
+                        publication=published["publication"], tenant_id=normalized_tenant,
+                        record=published["record"],
+                    ),
+                )
+                snapshot["publication"] = published["publication"]
+                return _document_records_response(
+                    snapshot, total=result["total"], limit=result["limit"],
+                    offset=result["offset"], items=result["items"],
+                )
+            if published is not None:
+                from .api_payloads import _document_records_projection
+
+                return _document_records_projection(
+                    self.get_document(doc_id=doc_id, tenant_id=normalized_tenant),
+                    limit=limit, offset=offset, query=query, table_id=table_id,
+                    quality_signal=quality_signal, field_filters=field_filters,
+                    page_start=page_start, page_end=page_end,
+                )
         if latest_job is None:
             return None
         snapshot = self._minimal_document_snapshot(doc_id=doc_id, job=latest_job)
@@ -2974,6 +3030,11 @@ class ParseRuntime:
         )
         if run is None:
             return None
+        describe_index = getattr(self.index, "describe_document", None)
+        index_manifest = (
+            describe_index(doc_id=doc_id, tenant_id=tenant_id)
+            if callable(describe_index) else None
+        )
         try:
             return self._publish_execution_run(
                 run=run,
@@ -2983,6 +3044,7 @@ class ParseRuntime:
                 views=self._document_views_for_snapshot(job=job, blocks=blocks),
                 claim_token=claim_token,
                 quality_signals=quality_signals,
+                index_manifest=index_manifest,
             )
         except PublishError as exc:
             self.event_logger.log(

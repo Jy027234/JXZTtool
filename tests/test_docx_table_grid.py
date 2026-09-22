@@ -148,6 +148,35 @@ class WordTableGridExtractionTests(unittest.TestCase):
             [{"text": "spec", "link": "https://example.com/spec"}],
         )
 
+    def test_spaces_at_inline_run_boundaries_are_preserved(self) -> None:
+        body = build_docx_table_xml(
+            [
+                [
+                    {
+                        "runs": [
+                            '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Part </w:t></w:r>',
+                            "<w:r><w:t>number</w:t></w:r>",
+                        ]
+                    },
+                    "Qty",
+                ],
+                ["PN-1", "2"],
+            ]
+        )
+        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+            document_path = workspace.create_docx_with_body("run-space.docx", body)
+            parser = DocxParser(media_types=[DOCX_MEDIA_TYPE], extensions=[".docx"])
+            blocks = parser.parse(
+                ParseRequest(doc_id="doc-run-space", file_path=str(document_path))
+            )
+
+        table = next(block for block in blocks if block.type.value == "table")
+        self.assertEqual(table.metadata["cells"][0][0], "Part number")
+        self.assertEqual(
+            table.metadata["table_cells"][0]["runs"],
+            [{"text": "Part ", "bold": True}],
+        )
+
     def test_markdown_flattens_the_header_but_keeps_one_row(self) -> None:
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             blocks = _parse_docx_blocks(workspace)

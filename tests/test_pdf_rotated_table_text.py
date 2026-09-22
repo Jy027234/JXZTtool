@@ -12,6 +12,8 @@ import unittest
 
 from parsecore.parsers import (
     _pdf_char_reading_frame,
+    _pdf_table_cells,
+    _page_has_rotated_text,
     _text_along_char_direction,
 )
 
@@ -55,6 +57,20 @@ def _rotated_line(text: str, *, x: float, start_top: float, step: float = 6.0) -
     ]
 
 
+def _upside_down_char(text: str, x0: float, top: float, *, size: float = 8.0) -> dict:
+    """A character rotated 180° (advance -x, next line -top)."""
+
+    return {
+        "text": text,
+        "x0": x0,
+        "x1": x0 + size * 0.6,
+        "top": top,
+        "bottom": top + size,
+        "size": size,
+        "matrix": (-size, 0.0, 0.0, -size, x0, top),
+    }
+
+
 class RotatedCellTextTests(unittest.TestCase):
     def test_upright_text_is_left_to_the_caller(self) -> None:
         chars = [_upright_char("A", 10, 10), _upright_char("B", 16, 10)]
@@ -69,6 +85,29 @@ class RotatedCellTextTests(unittest.TestCase):
         text = _text_along_char_direction(chars)
 
         self.assertEqual(text, "SCREW\n6.A")
+
+    def test_upside_down_cell_text_is_detected_and_reordered(self) -> None:
+        chars = [_upside_down_char("A", 106.0, 100.0), _upside_down_char("B", 100.0, 100.0)]
+        self.assertTrue(_page_has_rotated_text(chars))
+
+        class _Row:
+            bbox = (90.0, 90.0, 120.0, 120.0)
+            cells = [(90.0, 90.0, 120.0, 120.0)]
+
+        class _Table:
+            rows = [_Row()]
+
+            def extract(self):
+                return [["BA"]]
+
+        class _Page:
+            def __init__(self) -> None:
+                self.chars = chars
+
+        self.assertEqual(
+            _pdf_table_cells(_Page(), _Table(), rotated_text=_page_has_rotated_text(chars)),
+            [["AB"]],
+        )
 
     def test_an_explicit_space_is_kept(self) -> None:
         chars = _rotated_line("OF", x=210.0, start_top=200.0)

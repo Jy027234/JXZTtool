@@ -13,7 +13,9 @@ from .config import ParserSettings
 from .contracts import ChunkBuilder, ParserAdapter
 from .models import Block, Chunk, ParseRequest
 from .tables import (
+    apply_merge_records,
     grid_from_metadata,
+    merge_descriptors,
     render_markdown as _render_table_markdown,
     render_tsv as _render_table_tsv,
 )
@@ -321,7 +323,17 @@ class TableStructureStage:
                 updated_items.append(item)
                 continue
 
+            # ``cells_preview`` is only a metadata projection.  The parser's item
+            # text still contains the complete table; replacing it with Markdown
+            # from the preview would silently drop rows from the knowledge unit
+            # and its chunks.
+            if bool(item.metadata.get("cells_truncated")):
+                skipped_items += 1
+                updated_items.append(item)
+                continue
+
             grid = grid_from_metadata(item.metadata)
+            grid = apply_merge_records(grid, item.metadata.get("merged_cells"))
             cells = grid.rows()
             if not cells:
                 skipped_items += 1
@@ -632,8 +644,10 @@ def _knowledge_unit_table_text(item: DocumentArtifactItem) -> str:
     metadata = item.metadata or {}
     caption = str(metadata.get("normalized_title") or metadata.get("table_title") or metadata.get("caption") or "").strip()
     rendered = str(metadata.get("rendered_text") or metadata.get("table_markdown") or "").strip()
-    cells = grid_from_metadata(metadata).rows()
-    if not rendered and cells:
+    grid = grid_from_metadata(metadata)
+    grid = apply_merge_records(grid, metadata.get("merged_cells"))
+    cells = grid.rows()
+    if not rendered and cells and not bool(metadata.get("cells_truncated")):
         rendered = _render_table_text(
             cells,
             header_rows=max(1, _as_int(metadata.get("header_rows"), default=1)),
@@ -664,6 +678,8 @@ def _knowledge_unit_figure_text(item: DocumentArtifactItem) -> str:
 def _knowledge_unit_table_summary(item: DocumentArtifactItem) -> dict[str, Any]:
     metadata = item.metadata or {}
     grid = grid_from_metadata(metadata)
+    declared_merges = metadata.get("merged_cells")
+    grid = apply_merge_records(grid, declared_merges)
     cells = grid.rows()
     row_count = _as_int(metadata.get("rows", metadata.get("row_count")), default=len(cells))
     col_count = _as_int(
@@ -676,7 +692,7 @@ def _knowledge_unit_table_summary(item: DocumentArtifactItem) -> dict[str, Any]:
         "col_count": col_count,
         "has_cells": bool(cells),
     }
-    merges = grid.merged_cells()
+    merges = merge_descriptors(grid, declared_merges)
     if merges:
         # Markdown cannot express a merge; the summary keeps it so a consumer can
         # tell a merged header (and the columns it governs) from a repeated value.

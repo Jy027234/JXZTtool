@@ -21,6 +21,7 @@ from parsecore.parsers import (
     _ocr_fallback_reason_for_page,
     _ocr_line_records,
     _ocr_line_records_for_page,
+    _pdf_ocr_cache_identity,
     _pdf_page_image_count_hint,
     _select_pdf_layout_pages,
     _select_pdf_layout_work,
@@ -124,6 +125,89 @@ def _fake_page_layout(
 
 
 class PdfTextParserOptionsTests(unittest.TestCase):
+    def test_pdf_ocr_cache_identity_includes_output_affecting_adapter_settings(self) -> None:
+        settings = OcrProviderSettings(enabled=True, provider="rapidocr")
+        defaults = {
+            "render_resolution": 144,
+            "confidence_threshold": 0.5,
+            "merge_line_gap_ratio": 1.6,
+            "min_cid_tokens": 5,
+            "min_cid_char_ratio": 0.12,
+        }
+        original = _pdf_ocr_cache_identity(settings, **defaults)
+        disabled = _pdf_ocr_cache_identity(
+            OcrProviderSettings(enabled=False, provider="rapidocr"), **defaults
+        )
+        self.assertNotEqual(original, disabled)
+
+        for key, changed_value in (
+            ("render_resolution", 192),
+            ("confidence_threshold", 0.7),
+            ("merge_line_gap_ratio", 2.0),
+            ("min_cid_tokens", 6),
+            ("min_cid_char_ratio", 0.2),
+        ):
+            changed = {**defaults, key: changed_value}
+            with self.subTest(setting=key):
+                self.assertNotEqual(
+                    original, _pdf_ocr_cache_identity(settings, **changed)
+                )
+
+    def test_mixed_page_blocks_keep_the_source_of_each_paragraph(self) -> None:
+        native_text = "Native paragraph with reliable text remains unchanged."
+        recovered_text = "Recovered paragraph contains corrected OCR text."
+        layout = _fake_page_layout(
+            text_without_tables=f"{native_text}\n\n{recovered_text}",
+            ocr_fallback_reason="mixed_page_regions",
+            ocr_lines=[
+                {
+                    "text": native_text,
+                    "bbox": (20.0, 20.0, 220.0, 34.0),
+                    "source_kind": "pdf_native_text",
+                },
+                {
+                    "text": recovered_text,
+                    "bbox": (20.0, 100.0, 220.0, 114.0),
+                    "source_kind": "pdf_ocr_fallback",
+                },
+            ],
+        )
+        layout.ocr_acceptance_reason = "regions_enhanced"
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={
+                "post_process": {
+                    "dual_channel": True,
+                    "ocr_bad_pages": True,
+                    "parse_cache": False,
+                }
+            },
+        )
+
+        with TemporaryDirectory(prefix="parsecore-pdf-source-") as temp_dir:
+            pdf_path = Path(temp_dir) / "mixed.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            request = ParseRequest(
+                doc_id="doc-mixed-source",
+                file_path=str(pdf_path),
+                media_type="application/pdf",
+            )
+            with patch(
+                "parsecore.parsers._load_pdf_reader", return_value=_FakePdfReader
+            ), patch(
+                "parsecore.parsers._extract_pdfplumber_layout", return_value=[layout]
+            ):
+                blocks = parser.parse(request)
+
+        paragraph_sources = {
+            block.content: block.metadata.get("source_kind")
+            for block in blocks
+            if block.type == BlockType.PARAGRAPH
+        }
+        self.assertEqual(paragraph_sources[native_text], "pdf_native_text")
+        self.assertEqual(paragraph_sources[recovered_text], "pdf_ocr_fallback")
+
     def test_blank_pdf_page_is_preserved_as_non_indexable_artifact(self) -> None:
         parser = PdfTextParser(
             media_types=["application/pdf"],

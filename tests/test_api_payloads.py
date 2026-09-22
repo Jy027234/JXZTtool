@@ -104,6 +104,37 @@ class TableUnitAndFootnoteTests(unittest.TestCase):
         self.assertNotIn("unit", second)
         self.assertNotIn("footnotes", second)
 
+    def test_records_projection_carries_the_snapshot_publication_context(self) -> None:
+        publication = {
+            "schema_version": "2026-09-publication-read-context-v1",
+            "served_run_id": "run-published",
+            "run_identity": "identity-published",
+            "pinned": True,
+            "publication_status": "published",
+            "publication_generation": 4,
+            "consumer_signal": "ready",
+            "latest_job_used_as_formal_version": False,
+        }
+        payload = _document_records_projection(
+            {
+                "job": SimpleNamespace(
+                    job_id="job-latest",
+                    doc_id="doc-publication",
+                    state=ParseJobState.DONE,
+                    media_type="application/pdf",
+                    options={},
+                ),
+                "doc_id": "doc-publication",
+                "blocks": (),
+                "chunks": (),
+                "publication": publication,
+            },
+            limit=10,
+            offset=0,
+        )
+
+        self.assertEqual(payload["publication"], publication)
+
     def test_a_bracket_is_only_a_unit_when_it_holds_one(self) -> None:
         # "(a)" is a note marker and "(25)" is a row label; reading either as the
         # table's unit would put a wrong unit on every record of the table.  The

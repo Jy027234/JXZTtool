@@ -51,6 +51,42 @@ _BUILTIN_PROVIDER_VERSION = "parsecore-builtin"
 _BUILTIN_ADAPTER_VERSION = "2026-06-local-provider-adapter"
 
 
+def _pdf_ocr_cache_identity(
+    settings: Any,
+    *,
+    render_resolution: int,
+    confidence_threshold: float,
+    merge_line_gap_ratio: float,
+    min_cid_tokens: int,
+    min_cid_char_ratio: float,
+) -> tuple[str, str]:
+    """Identify both the OCR engine and the PDF settings that shape its text.
+
+    The shared provider identity covers engine options, but the PDF adapter also
+    filters low-confidence lines and groups OCR lines using local settings. Those
+    values must invalidate cached page output too.
+    """
+
+    provider_tag, provider_options = ocr_cache_identity(settings)
+    provider_enabled = (
+        settings.get("enabled", True)
+        if isinstance(settings, Mapping)
+        else getattr(settings, "enabled", True)
+    )
+    pdf_options = repr(
+        (
+            provider_options,
+            bool(provider_enabled),
+            int(render_resolution),
+            float(confidence_threshold),
+            float(merge_line_gap_ratio),
+            int(min_cid_tokens),
+            float(min_cid_char_ratio),
+        )
+    )
+    return provider_tag, hashlib.sha256(pdf_options.encode("utf-8")).hexdigest()[:16]
+
+
 def _provider_metadata(
     metadata: Mapping[str, Any],
     *,
@@ -600,7 +636,11 @@ def _docx_paragraph_runs(
                         run_text.append(" ")
                     elif inner_name in {"br", "cr"}:
                         run_text.append("\n")
-                fragment = _normalize_inline_whitespace("".join(run_text))
+                # Keep spaces at run boundaries.  Word commonly stores a space
+                # at the end of the bold/link run immediately before a plain
+                # run; stripping each run independently turns "Part number"
+                # into "Partnumber" when formatted fragments are concatenated.
+                fragment = re.sub(r"[ \t\u3000]+", " ", "".join(run_text))
                 if not fragment:
                     continue
                 text_parts.append(fragment)
@@ -622,7 +662,7 @@ def _docx_paragraph_runs(
             _walk(child, inherited_link)
 
     _walk(paragraph)
-    return "".join(text_parts), tuple(runs)
+    return "".join(text_parts).strip(), tuple(runs)
 
 
 def _docx_table_grid(
@@ -2351,7 +2391,12 @@ class PdfTextParser(ParserAdapter):
             if merged_lines is None:
                 return None, reason, region_failure or "empty_ocr_text", timings
             timings.ocr_lines = merged_lines
-            text = _text_from_merged_lines(merged_lines)
+            text = _text_from_merged_lines(
+                merged_lines,
+                column_count_hint=column_count_hint,
+                page_width=page_width,
+                page_height=page_height,
+            )
             if not text:
                 return None, reason, "empty_ocr_text", timings
             return text, reason, None, timings
@@ -2570,7 +2615,14 @@ class PdfTextParser(ParserAdapter):
                 ocr_page_text_fn=ocr_page_text_fn,
                 ocr_cache=effective_ocr_cache,
                 ocr_cache_fast_path=effective_ocr_cache_fast_path,
-                ocr_cache_identity=ocr_cache_identity(self._ocr_provider_settings),
+                ocr_cache_identity=_pdf_ocr_cache_identity(
+                    self._ocr_provider_settings,
+                    render_resolution=self._ocr_render_resolution,
+                    confidence_threshold=self._ocr_confidence_threshold,
+                    merge_line_gap_ratio=self._ocr_merge_line_gap_ratio,
+                    min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
+                    min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
+                ),
                 page_numbers=adaptive_layout_page_numbers,
                 table_page_numbers=adaptive_table_page_numbers,
                 figure_page_numbers=adaptive_figure_page_numbers,
@@ -2833,7 +2885,10 @@ class PdfTextParser(ParserAdapter):
                     )
                 if page_layout is not None:
                     _attach_page_layout_metadata(metadata, page_layout)
-                    if page_layout.ocr_fallback_reason is not None:
+                    if (
+                        page_layout.ocr_fallback_reason is not None
+                        and page_layout.ocr_acceptance_reason != "regions_enhanced"
+                    ):
                         metadata["source_kind"] = "pdf_ocr_fallback"
                     ocr_lines = _ocr_lines_for_paragraph(
                         paragraph,
@@ -2842,6 +2897,16 @@ class PdfTextParser(ParserAdapter):
                     )
                     if ocr_lines:
                         metadata["lines"] = ocr_lines
+                        line_sources = {
+                            str(line.get("source_kind") or "") for line in ocr_lines
+                        }
+                        if "pdf_ocr_fallback" in line_sources:
+                            metadata["source_kind"] = "pdf_ocr_fallback"
+                        elif (
+                            line_sources == {"pdf_native_text"}
+                            and page_layout.ocr_acceptance_reason == "regions_enhanced"
+                        ):
+                            metadata["source_kind"] = "pdf_native_text"
                         ocr_bbox = _bbox_union_from_line_records(ocr_lines)
                         if ocr_bbox is not None:
                             metadata["bbox"] = ocr_bbox
@@ -5950,7 +6015,10 @@ def _page_has_rotated_text(chars: Sequence[Mapping[str, Any]]) -> bool:
             a, b = float(matrix[0]), float(matrix[1])
         except (TypeError, ValueError):
             continue
-        if abs(b) > abs(a) * 0.5:
+        length = math.hypot(a, b)
+        if length > 0.0 and (
+            abs(a / length - 1.0) > 0.01 or abs(b / length) > 0.01
+        ):
             return True
     return False
 
@@ -7036,10 +7104,28 @@ def _merge_native_and_ocr_lines(
                 "source_kind": "pdf_native_text",
             }
         )
-    native_texts = {_compact_ocr_locator_text(line.text) for line in native_lines}
+
+    def _same_located_text(record: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
+        if _compact_ocr_locator_text(record.get("text")) != _compact_ocr_locator_text(
+            candidate.get("text")
+        ):
+            return False
+        left, right = record.get("bbox"), candidate.get("bbox")
+        return bool(
+            isinstance(left, (list, tuple))
+            and isinstance(right, (list, tuple))
+            and len(left) >= 4
+            and len(right) >= 4
+            and _boxes_overlap(left, right)
+        )
+
     for record in ocr_lines:
         text = str(record.get("text") or "").strip()
-        if not text or _compact_ocr_locator_text(text) in native_texts:
+        if not text:
+            continue
+        if any(_same_located_text(record, existing) for existing in merged):
+            # OCR can re-read either a retained native line or overlapping OCR
+            # regions; the location check keeps genuine repeated labels.
             continue
         merged.append(dict(record))
     merged.sort(
@@ -7051,12 +7137,37 @@ def _merge_native_and_ocr_lines(
     return merged
 
 
-def _text_from_merged_lines(lines: Sequence[Mapping[str, Any]]) -> str:
+def _text_from_merged_lines(
+    lines: Sequence[Mapping[str, Any]],
+    *,
+    column_count_hint: int = 1,
+    page_width: float = 0.0,
+    page_height: float = 0.0,
+) -> str:
     """Join located lines back into page text, keeping paragraph breaks.
 
     Blank lines are reintroduced where the source had a visible vertical gap, so
     the downstream paragraph splitter still sees the page's paragraph structure.
     """
+
+    if column_count_hint > 1 and page_width > 0.0:
+        located: list[_PageTextLine] = []
+        for line in lines:
+            text = str(line.get("text") or "").strip()
+            bbox = line.get("bbox")
+            if not text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            try:
+                x0, top, x1, bottom = (float(value) for value in bbox[:4])
+            except (TypeError, ValueError):
+                continue
+            located.append(
+                _PageTextLine(text=text, x0=x0, x1=x1, top=top, bottom=bottom)
+            )
+        if located:
+            return _order_page_lines_by_region(
+                located, width=page_width, height=page_height
+            )
 
     boxes: list[tuple[float, float]] = []
     for line in lines:

@@ -18,7 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Mapping, Sequence
 
 #: Version of the asset descriptor that lands in block metadata.
@@ -217,21 +219,31 @@ def write_region_assets(
             updated.append(block)
             continue
         content, width, height = rendered
+        digest = sha256(content).hexdigest()
+        temporary: Path | None = None
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            target = directory / f"{_safe_segment(str(getattr(block, 'block_id', 'region')))}.png"
-            target.write_bytes(content)
+            # Block ids are reused on reruns.  The bytes, not that mutable id,
+            # identify evidence retained by an older published version.
+            target = directory / f"{_safe_segment(str(getattr(block, 'block_id', 'region')))}-{digest}.png"
+            with NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(content)
+            os.replace(temporary, target)
         except OSError:
             failure = failure or "asset_write_failed"
             updated.append(block)
             continue
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         asset = RegionAsset(
             block_id=str(getattr(block, "block_id", "")),
             kind=str(region.get("kind") or ""),
             page_number=int(region.get("page_number") or 1),
             bbox=bbox,
             path=str(target),
-            sha256=sha256(content).hexdigest(),
+            sha256=digest,
             bytes=len(content),
             width=width,
             height=height,

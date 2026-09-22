@@ -368,7 +368,7 @@ class MixedPageEnhancementTests(unittest.TestCase):
         self.assertLessEqual(x1, crop[2] + 1.0)
         self.assertLessEqual(bottom, crop[3] + 1.0)
 
-    def test_a_line_the_text_layer_already_provides_is_not_repeated(self) -> None:
+    def test_an_ocr_match_at_a_different_location_is_not_a_duplicate(self) -> None:
         page = _FakePage([_line(USABLE_ONE, 100.0), _line(GARBLED, 200.0)])
         engine = _RecordingEngine(
             [
@@ -383,7 +383,9 @@ class MixedPageEnhancementTests(unittest.TestCase):
                 page, [], 1, USABLE_ONE
             )
 
-        self.assertEqual((text or "").count(USABLE_ONE), 1)
+        # The OCR box is in the garbled-line crop, far from the native line at
+        # y=100.  Equal words at different locations are separate source text.
+        self.assertEqual((text or "").count(USABLE_ONE), 2)
         self.assertIn("Torque value", text or "")
 
     def test_an_unreadable_line_stays_visible_when_ocr_recovers_nothing(self) -> None:
@@ -469,6 +471,80 @@ class MergeHelperTests(unittest.TestCase):
         merged = _merge_native_and_ocr_lines(native_lines=native, ocr_lines=[], replaced=[])
 
         self.assertEqual([line["text"] for line in merged], [USABLE_TWO, USABLE_ONE])
+
+    def test_recovered_text_repeated_elsewhere_on_the_page_is_not_dropped(self) -> None:
+        repeated = "Apply the specified torque."
+        native = _page_text_lines(
+            _FakePage([_line(repeated, 100.0), _line(GARBLED, 200.0)])
+        )
+        merged = _merge_native_and_ocr_lines(
+            native_lines=native,
+            ocr_lines=[
+                {
+                    "text": repeated,
+                    "bbox": (50.0, 200.0, 280.0, 212.0),
+                    "source_kind": "pdf_ocr_fallback",
+                }
+            ],
+            replaced=[native[1]],
+        )
+
+        self.assertEqual([line["text"] for line in merged].count(repeated), 2)
+
+    def test_an_ocr_line_already_present_at_the_same_location_is_not_repeated(self) -> None:
+        repeated = "Apply the specified torque."
+        native = _page_text_lines(_FakePage([_line(repeated, 100.0)]))
+        merged = _merge_native_and_ocr_lines(
+            native_lines=native,
+            ocr_lines=[
+                {
+                    "text": repeated,
+                    "bbox": (50.0, 100.0, 280.0, 112.0),
+                    "source_kind": "pdf_ocr_fallback",
+                }
+            ],
+            replaced=[],
+        )
+
+        self.assertEqual([line["text"] for line in merged].count(repeated), 1)
+
+
+class MixedPageReadingOrderTests(unittest.TestCase):
+    def test_region_ocr_keeps_two_column_reading_order(self) -> None:
+        left_top = "The inspection procedure requires a torque wrench."
+        left_bottom = "Record the measured torque on the work card."
+        right_top = "Remove the retaining ring with the spreader tool."
+        right_bottom = "Check the axle and bearing before service."
+        page = _FakePage(
+            [
+                _line(left_top, 100.0, x0=40.0, x1=140.0),
+                _line(right_top, 100.0, x0=170.0, x1=280.0),
+                _line(GARBLED, 120.0, x0=40.0, x1=140.0),
+                _line(right_bottom, 120.0, x0=170.0, x1=280.0),
+                _line(left_bottom, 140.0, x0=40.0, x1=140.0),
+            ]
+        )
+        engine = _RecordingEngine(
+            [(_box(2.0, 2.0, 180.0, 12.0), "Recovered left-column text.", 0.95)]
+        )
+        parser = _parser()
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, _reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                page,
+                [],
+                2,
+                "\n".join([left_top, right_top, GARBLED, right_bottom, left_bottom]),
+            )
+
+        self.assertIsNone(error)
+        assert text is not None
+        left_end = text.index(left_bottom)
+        right_start = text.index(right_top)
+        self.assertLess(text.index(left_top), text.index("Recovered left-column text."))
+        self.assertLess(text.index("Recovered left-column text."), left_end)
+        self.assertLess(left_end, right_start)
+        self.assertLess(right_start, text.index(right_bottom))
 
 
 if __name__ == "__main__":
