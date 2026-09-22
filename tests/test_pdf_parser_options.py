@@ -1204,6 +1204,7 @@ class PdfTextParserOptionsTests(unittest.TestCase):
                     layout_reading_order_strategy=None,
                     layout_elapsed_s=0.0,
                     ocr_attempt_reason=attempt_reason,
+                    ocr_acceptance_reason=None,
                     ocr_fallback_reason=attempt_reason if recovered_text else None,
                     ocr_error_reason=error_reason,
                     ocr_engine_init_elapsed_s=0.0,
