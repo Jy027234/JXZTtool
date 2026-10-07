@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from parsecore.garble import detect_page_garble_reason
 from parsecore.ir import rag_coverage_quality_payload
-from parsecore.models import Block, BlockType, Chunk
-from parsecore.pipelines import DocumentArtifactItem, _build_structure_quality, _infer_manual_role
+from parsecore.models import Block, BlockType, Chunk, ParseRequest
+from parsecore.parsers import TextParser
+from parsecore.pipelines import (
+    DocumentArtifactItem,
+    _build_document_items,
+    _build_manual_anatomy,
+    _build_structure_quality,
+    _infer_manual_role,
+)
 from parsecore.quality import (
     evaluate_blocks,
     evaluate_chunk_embeddings,
@@ -158,6 +167,31 @@ class ManualHeadingStructureQualityTests(unittest.TestCase):
             metadata=metadata or {},
         )
 
+    def test_text_and_markdown_keep_bare_numbered_chapters_and_body_binding(self) -> None:
+        headings = ("1 Introduction", "2 Scope of Work")
+        body = "This section explains the inspection procedure and its acceptance criteria."
+        for extension, media_type, prefix in (
+            (".txt", "text/plain", ""),
+            (".md", "text/markdown", "# "),
+        ):
+            with self.subTest(extension=extension), TemporaryDirectory() as directory:
+                source = Path(directory) / f"manual{extension}"
+                source.write_text(
+                    "\n\n".join(f"{prefix}{heading}\n\n{body}" for heading in headings),
+                    encoding="utf-8",
+                )
+                blocks = TextParser(media_types=[media_type], extensions=[extension]).parse(
+                    ParseRequest(doc_id="manual", file_path=str(source), media_type=media_type)
+                )
+                items = _build_document_items(blocks)
+                anatomy = _build_manual_anatomy(items)
+                quality = _build_structure_quality(items)
+
+                self.assertEqual([entry["text"] for entry in anatomy["chapter_tree"]], list(headings))
+                self.assertEqual(quality["counts"]["body_like_headings"], 2)
+                self.assertEqual(quality["heading_body_binding_rate"], 1.0)
+                self.assertEqual(sum(block.content == body for block in blocks), 2)
+
     def test_manual_heading_inference_skips_product_ids_and_revision_annotations(self) -> None:
         product_id = self._item("product-id", "320-366-701-0")
         product_id_with_heading = self._item(
@@ -176,7 +210,11 @@ class ManualHeadingStructureQualityTests(unittest.TestCase):
             self._item("chinese-heading", "第2章范围"),
             self._item("appendix-heading", "APPENDIX A Reference Table"),
         )
-        procedure_step = self._item("procedure-step", "1 Adjust the positioner of the turret")
+        procedure_steps = (
+            self._item("procedure-step", "1 Adjust the positioner of the turret"),
+            self._item("remove-cover", "2 Remove the cover"),
+            self._item("tighten-screws", "3 Tighten the screws."),
+        )
 
         self.assertIsNone(_infer_manual_role(product_id))
         self.assertEqual(_infer_manual_role(product_id_with_heading), "body_section")
@@ -188,7 +226,7 @@ class ManualHeadingStructureQualityTests(unittest.TestCase):
             [_infer_manual_role(item) for item in ordinary_headings],
             ["body_section", "body_section", "body_section", "appendix"],
         )
-        self.assertIsNone(_infer_manual_role(procedure_step))
+        self.assertEqual([_infer_manual_role(item) for item in procedure_steps], [None, None, None])
 
     def test_first_line_heading_with_inline_body_is_bound_even_for_long_blocks(self) -> None:
         item = self._item(

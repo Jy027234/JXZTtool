@@ -51,7 +51,13 @@ _STRUCTURED_UNIT_ROLES = {
 }
 
 _MANUAL_NUMBERED_HEADING_PATTERN = re.compile(
-    r"^(?:\d+(?:\.\d+)*[.)](?=\s|$)|\d+(?:\.\d+)+(?=\s|$)|第[\d一二三四五六七八九十百千]+[章节条款]|chapter\s+[a-z0-9ivxlcdm]+\b|section\s+[a-z0-9ivxlcdm]+\b)",
+    r"^(?:\d+(?:\.\d+)*[.)](?=\s|$)|\d+(?:\.\d+)+(?=\s|$)"
+    r"|第[\d一二三四五六七八九十百千]+[章节条款]"
+    r"|chapter\s+[a-z0-9ivxlcdm]+\b|section\s+[a-z0-9ivxlcdm]+\b"
+    # Bare integers need title casing, rather than accepting every numbered
+    # sentence. Keep this branch case-sensitive despite the outer flag.
+    r"|\d+\s+(?-i:[A-Z][A-Za-z0-9'/-]*"
+    r"(?:\s+(?:[A-Z][A-Za-z0-9'/-]*|and|or|of|the|to|for|in|on|with))*)$)",
     re.IGNORECASE,
 )
 
