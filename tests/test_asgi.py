@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import Future
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -1133,6 +1134,14 @@ gate_status = "pending"
         self.assertEqual(response.json()["code"], "file_path_not_allowed")
 
     def test_job_lifecycle_endpoints(self) -> None:
+        # Native DOCX parsing uses the archive/XML reader. The optional legacy
+        # library's health flag still reports whether it can be imported.
+        try:
+            import_module("docx")
+        except ImportError:
+            docx_available = False
+        else:
+            docx_available = True
         with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
             document_path = workspace.create_docx("spec.docx", ["Maintenance Manual", "Apply torque"])
             app = create_app(workspace.config_path)
@@ -1143,7 +1152,7 @@ gate_status = "pending"
                 self.assertEqual(health_payload["status"], "ok")
                 self.assertEqual(health_payload["version"], "0.1.0")
                 self.assertIn("services", health_payload)
-                self.assertEqual(health_payload["services"]["python_docx"], True)
+                self.assertEqual(health_payload["services"]["python_docx"], docx_available)
                 self.assertEqual(health_payload["services"]["pdfplumber"], False)
                 self.assertEqual(health_payload["services"]["paddleocr"], False)
 
