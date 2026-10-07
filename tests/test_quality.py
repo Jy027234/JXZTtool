@@ -5,7 +5,7 @@ import unittest
 from parsecore.garble import detect_page_garble_reason
 from parsecore.ir import rag_coverage_quality_payload
 from parsecore.models import Block, BlockType, Chunk
-from parsecore.pipelines import DocumentArtifactItem, _build_structure_quality
+from parsecore.pipelines import DocumentArtifactItem, _build_structure_quality, _infer_manual_role
 from parsecore.quality import (
     evaluate_blocks,
     evaluate_chunk_embeddings,
@@ -143,6 +143,94 @@ class StructuralAuditArtifactQualityTests(unittest.TestCase):
         quality = _build_structure_quality((item,))
         self.assertEqual(quality["counts"]["quality_denominator_items"], 1)
         self.assertEqual(quality["counts"]["audit_artifact_items"], 0)
+
+
+class ManualHeadingStructureQualityTests(unittest.TestCase):
+    @staticmethod
+    def _item(item_id: str, text: str, *, metadata: dict[str, object] | None = None) -> DocumentArtifactItem:
+        return DocumentArtifactItem(
+            item_id=item_id,
+            block_ids=(f"blk-{item_id}",),
+            kind="paragraph",
+            semantic_role="paragraph",
+            text=text,
+            page_number=1,
+            metadata=metadata or {},
+        )
+
+    def test_manual_heading_inference_skips_product_ids_and_revision_annotations(self) -> None:
+        product_id = self._item("product-id", "320-366-701-0")
+        product_id_with_heading = self._item(
+            "product-id-heading",
+            "320-366-701-0\nASSEMBLY (INCLUDING STORAGE)",
+        )
+        revision_markers = (
+            self._item("sb-pre", "R PRE SB 73-046"),
+            self._item("sb-branch", '5 Branch "ABCDEF". R'),
+            self._item("sb-branch-letter", 'R 5.A. Branch "ABCEF".'),
+            self._item("sb-post", "R POST SB 73-046"),
+        )
+        ordinary_headings = (
+            self._item("numbered-heading", "7.1 Maintenance License"),
+            self._item("chapter-heading", "Chapter IV Maintenance"),
+            self._item("chinese-heading", "第2章范围"),
+            self._item("appendix-heading", "APPENDIX A Reference Table"),
+        )
+        procedure_step = self._item("procedure-step", "1 Adjust the positioner of the turret")
+
+        self.assertIsNone(_infer_manual_role(product_id))
+        self.assertEqual(_infer_manual_role(product_id_with_heading), "body_section")
+        self.assertEqual(
+            [_infer_manual_role(item) for item in revision_markers],
+            ["revision_record", None, None, "revision_record"],
+        )
+        self.assertEqual(
+            [_infer_manual_role(item) for item in ordinary_headings],
+            ["body_section", "body_section", "body_section", "appendix"],
+        )
+        self.assertIsNone(_infer_manual_role(procedure_step))
+
+    def test_first_line_heading_with_inline_body_is_bound_even_for_long_blocks(self) -> None:
+        item = self._item(
+            "storage",
+            "2. Storage.\nThis paragraph shows the steps necessary to put the electrical harness "
+            "in a container for storage before or after use.",
+        )
+
+        quality = _build_structure_quality((item,))
+
+        self.assertEqual(quality["counts"]["body_like_headings"], 1)
+        self.assertEqual(quality["heading_body_binding_rate"], 1.0)
+
+    def test_adjacent_pure_headings_do_not_satisfy_body_binding(self) -> None:
+        items = (
+            self._item("assembly", "1. Assembly."),
+            self._item("revision-marker", "R PRE SB 73-046"),
+            self._item("storage", "2. Storage."),
+        )
+
+        quality = _build_structure_quality(items)
+
+        self.assertEqual(quality["counts"]["body_like_headings"], 2)
+        self.assertEqual(quality["heading_body_binding_rate"], 0.0)
+
+    def test_manual_page_with_subsection_body_counts_only_the_inline_sections(self) -> None:
+        items = (
+            self._item(
+                "assembly-title",
+                "320-366-701-0\nASSEMBLY (INCLUDING STORAGE)",
+            ),
+            self._item("assembly-subsection", "1. Assembly.\nNot applicable."),
+            self._item(
+                "storage-subsection",
+                "2. Storage.\nThis paragraph shows the steps necessary to put the harness in storage.",
+            ),
+        )
+
+        quality = _build_structure_quality(items)
+
+        self.assertEqual(quality["counts"]["body_like_headings"], 3)
+        self.assertAlmostEqual(quality["heading_body_binding_rate"], 2 / 3, places=3)
 
 
 class EvaluateChunkEmbeddingsTests(unittest.TestCase):

@@ -128,6 +128,18 @@ class OcrFallbackReasonTests(unittest.TestCase):
             )
         )
 
+    def test_numeric_dates_and_page_ranges_do_not_look_like_pdf_name_garble(self) -> None:
+        text = "LIST OF EFFECTIVE PAGES (CONTINUED)\n" + "\n".join(
+            [f"698.{index}/698.{index + 1} May 31/08" for index in range(1, 18)]
+        )
+        self.assertIsNone(
+            _ocr_fallback_reason_for_page(
+                text,
+                min_cid_tokens=5,
+                min_cid_char_ratio=0.12,
+            )
+        )
+
 
 class PrepareOcrInputImageTests(unittest.TestCase):
     def test_rapidocr_uses_grayscale_image(self) -> None:

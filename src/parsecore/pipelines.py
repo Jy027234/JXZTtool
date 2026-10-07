@@ -51,9 +51,31 @@ _STRUCTURED_UNIT_ROLES = {
 }
 
 _MANUAL_NUMBERED_HEADING_PATTERN = re.compile(
-    r"^(?:\d+(?:\.\d+)*|第[\d一二三四五六七八九十百千]+[章节条款]|chapter\s+[a-z0-9ivxlcdm]+|section\s+[a-z0-9ivxlcdm]+)\b",
+    r"^(?:\d+(?:\.\d+)*[.)](?=\s|$)|\d+(?:\.\d+)+(?=\s|$)|第[\d一二三四五六七八九十百千]+[章节条款]|chapter\s+[a-z0-9ivxlcdm]+\b|section\s+[a-z0-9ivxlcdm]+\b)",
     re.IGNORECASE,
 )
+
+_MANUAL_PRODUCT_NUMBER_PREFIX_PATTERN = re.compile(
+    r"^\d{3}-\d{3}-\d{3}-\d(?=\s|$)\s*"
+)
+
+_MANUAL_SERVICE_BULLETIN_MARKER_PATTERN = re.compile(
+    r"^(?:R\s+)?(?:PRE|POST|END)\s+SB\s+\d{2}-\d{3}$",
+    re.IGNORECASE,
+)
+
+_MANUAL_SERVICE_BULLETIN_BRANCH_PATTERN = re.compile(
+    r'^(?:R\s+)?\d+(?:\.[A-Z])?\.?\s+Branch\s+"[^"\r\n]+"\.?(?:\s+R)?$',
+    re.IGNORECASE,
+)
+
+_MANUAL_NON_BODY_BINDING_ROLES = {
+    "front_matter",
+    "toc_entry",
+    "lep_entry",
+    "revision_record",
+    "distribution_list",
+}
 
 _MANUAL_APPENDIX_HEADING_PATTERN = re.compile(
     r"^(?:appendix|annex|附录|附件)\b",
@@ -806,7 +828,19 @@ def _has_evidence_anchor(item: DocumentArtifactItem) -> bool:
     return item.page_number is not None and int(item.page_number) > 0
 
 
-def _looks_manual_heading_text(text: str) -> bool:
+def _manual_heading_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        normalized = " ".join(raw_line.split())
+        if not normalized:
+            continue
+        normalized = _MANUAL_PRODUCT_NUMBER_PREFIX_PATTERN.sub("", normalized).strip()
+        if normalized:
+            lines.append(normalized)
+    return lines
+
+
+def _looks_manual_heading_line(text: str) -> bool:
     normalized = " ".join(str(text or "").split())
     if not normalized or len(normalized) > 90:
         return False
@@ -816,6 +850,36 @@ def _looks_manual_heading_text(text: str) -> bool:
         return True
     if _MANUAL_ALL_CAPS_HEADING_PATTERN.match(normalized):
         return True
+    return False
+
+
+def _looks_manual_heading_text(text: str) -> bool:
+    lines = _manual_heading_lines(text)
+    return bool(lines and _looks_manual_heading_line(lines[0]))
+
+
+def _has_inline_heading_body(item: DocumentArtifactItem, *, inferred_role: str) -> bool:
+    if inferred_role not in {"body_section", "appendix"}:
+        return False
+    lines = _manual_heading_lines(item.text)
+    if len(lines) < 2 or not _looks_manual_heading_line(lines[0]):
+        return False
+
+    metadata = item.metadata or {}
+    role = str(item.semantic_role or metadata.get("semantic_role") or "paragraph").strip().lower()
+    explicit_heading = bool(metadata.get("is_section_heading")) and role in _DOCX_SECTION_ANCHOR_ROLES
+    if not explicit_heading and not re.search(r"[.!?:)]$", lines[0]):
+        return False
+
+    for line in lines[1:]:
+        if _looks_manual_heading_line(line):
+            continue
+        if _MANUAL_SERVICE_BULLETIN_MARKER_PATTERN.match(line):
+            continue
+        if _MANUAL_SERVICE_BULLETIN_BRANCH_PATTERN.match(line):
+            continue
+        if len(line) >= 12 and len(line.split()) >= 2:
+            return True
     return False
 
 
@@ -864,6 +928,14 @@ def _infer_manual_role(item: DocumentArtifactItem) -> str | None:
         return None
 
     normalized = " ".join(text.split())
+    heading_lines = _manual_heading_lines(text)
+    heading_line = heading_lines[0] if heading_lines else ""
+    if _MANUAL_SERVICE_BULLETIN_MARKER_PATTERN.match(normalized):
+        return "revision_record"
+    if _MANUAL_SERVICE_BULLETIN_BRANCH_PATTERN.match(normalized):
+        # A diagram's branch/applicability label is useful business content,
+        # but it is neither a chapter heading nor a revision-history record.
+        return None
     if _MANUAL_EFFECTIVE_PAGE_PATTERN.search(normalized):
         return "lep_entry"
     if _MANUAL_REVISION_PATTERN.search(normalized):
@@ -872,12 +944,12 @@ def _infer_manual_role(item: DocumentArtifactItem) -> str | None:
         return "distribution_list"
     if _MANUAL_FRONT_MATTER_PATTERN.search(normalized):
         return "front_matter"
-    if _MANUAL_APPENDIX_HEADING_PATTERN.match(normalized) or page_type == "appendix":
-        if _looks_manual_heading_text(normalized):
+    if _MANUAL_APPENDIX_HEADING_PATTERN.match(heading_line) or page_type == "appendix":
+        if _looks_manual_heading_line(heading_line):
             return "appendix"
     if page_type in {"toc", "signature"}:
-        return "front_matter" if _looks_manual_heading_text(normalized) else None
-    if _looks_manual_heading_text(normalized):
+        return "front_matter" if _looks_manual_heading_text(text) else None
+    if _looks_manual_heading_line(heading_line):
         return "body_section"
     return None
 
@@ -936,10 +1008,10 @@ def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str,
     audit_artifact_items = [item for item in items if _is_non_content_audit_item(item)]
     quality_items = [item for item in items if not _is_non_content_audit_item(item)]
     total_items = max(len(quality_items), 1)
+    inferred_roles = [_infer_manual_role(item) for item in quality_items]
     heading_items: list[tuple[int, DocumentArtifactItem, str]] = []
     body_like_headings: list[tuple[int, DocumentArtifactItem, str]] = []
-    for position, item in enumerate(quality_items):
-        inferred_role = _infer_manual_role(item)
+    for position, (item, inferred_role) in enumerate(zip(quality_items, inferred_roles)):
         if inferred_role in {"front_matter", "body_section", "appendix"}:
             heading_items.append((position, item, inferred_role))
         if inferred_role in {"body_section", "appendix"}:
@@ -968,14 +1040,24 @@ def _build_structure_quality(items: Sequence[DocumentArtifactItem]) -> dict[str,
         if _has_evidence_anchor(item):
             evidence_bound_items += 1
         relevant_for_evidence += 1
+        if _has_inline_heading_body(item, inferred_role=_inferred_role):
+            bound_sections += 1
+            continue
         next_heading_position = (
             body_like_headings[list_index + 1][0]
             if list_index + 1 < len(body_like_headings)
             else len(quality_items)
         )
-        for follower in quality_items[start_position + 1 : next_heading_position]:
+        for follower_position in range(start_position + 1, next_heading_position):
+            follower = quality_items[follower_position]
             follower_role = str(follower.semantic_role or "paragraph").strip().lower()
             if follower_role in _ARTIFACT_SEMANTIC_ROLES:
+                continue
+            if follower_role in _MANUAL_NON_BODY_BINDING_ROLES:
+                continue
+            if inferred_roles[follower_position] in _MANUAL_NON_BODY_BINDING_ROLES:
+                continue
+            if not follower.text.strip() and _item_block_type(follower) != "table":
                 continue
             if _item_block_type(follower) == "table":
                 relevant_for_evidence += 1

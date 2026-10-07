@@ -15,20 +15,21 @@ ParseCore 当前支持四种使用形态：
 | Queue Worker | 大文件、长任务、生产灰度 | `parsecore.cli worker` |
 | CLI 工具 | 本地自检、压测、运维任务 | `python -m parsecore.cli ...` |
 
-生产建议优先使用 `HTTP API + queue-worker + Postgres/pgvector`。本地开发或单机验证可以使用默认 SQLite/inline 配置。
+本地开发先使用默认 SQLite/inline 配置；需要独立 worker 时使用 `parsecore.queue.toml`。当前正式版本发布与待审内容读取仅支持 SQLite。Postgres/pgvector 可用于存储和索引联调，其正式版本发布仍未实现，不能据此认定生产发布链路可用。
 
 ## 快速启动
 
-安装开发依赖：
+在仓库根目录创建虚拟环境并安装开发依赖（Python 3.13 或以上）：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[api,parsers,test]"
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[api,parsers,test]"
 ```
 
 启动本地 API：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
+.\.venv\Scripts\python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
 ```
 
 检查服务：
@@ -39,6 +40,21 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/runtime
 Invoke-RestMethod http://127.0.0.1:8090/v1/parse/profiles
 ```
 
+嵌入式 SDK 最小示例（输入文件由宿主提供）：
+
+```python
+from parsecore.bootstrap import build_runtime
+from parsecore.models import ParseRequest
+
+runtime = build_runtime("parsecore.toml")
+outcome = runtime.submit(ParseRequest(
+    doc_id="demo-doc", file_path="samples/demo.txt", media_type="text/plain",
+    options={"profile": "auto"},
+))
+print(outcome.job.job_id, outcome.job.state)
+document = runtime.get_document(doc_id="demo-doc", tenant_id="default")
+```
+
 ## 推荐解析流程
 
 ### 中小文档
@@ -46,15 +62,12 @@ Invoke-RestMethod http://127.0.0.1:8090/v1/parse/profiles
 中小 Word、Excel、PDF 可用同步入口：
 
 ```powershell
-$body = @{
-  doc_id = "demo-doc"
-  file_path = "D:/app/uploads/demo.xlsx"
-  media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  options = @{ profile = "auto" }
-} | ConvertTo-Json -Depth 8
-
-Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http://127.0.0.1:8090/v1/parse
+New-Item -ItemType Directory -Force .\samples | Out-Null
+Set-Content -LiteralPath .\samples\demo.txt -Value "ParseCore demo: native text parsing." -Encoding UTF8
+curl.exe -sS -F "file=@samples/demo.txt;type=text/plain" -F "doc_id=demo-doc" -F "profile=auto" http://127.0.0.1:8090/v1/parse
 ```
+
+Word、Excel、PDF 同样通过 `file=@实际文件路径` 上传，并设置对应 MIME 类型。JSON 提交的 `file_path` 是服务端路径；默认仅允许对象存储目录内已存在的文件，不能直接填客户端路径或任意 `D:/app/uploads/...` 路径。
 
 读取结构化结果：
 
@@ -62,6 +75,36 @@ Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http:
 Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=structured"
 Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/quality"
 ```
+
+### 待审内容与正式发布
+
+解析 job 的 `done` 只代表执行完成。先检查 publication：
+
+```powershell
+$publication = Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/publication"
+```
+
+若返回 `preview_run_id`，显式选择这个 run 查看待审正文：
+
+```powershell
+$runId = $publication.preview_run_id
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/preview?run_id=$runId&projection=structured"
+```
+
+SDK 对应调用为 `runtime.get_document_preview(doc_id="demo-doc", parse_run_id=run_id, tenant_id="default")`。预览响应标注 `is_formal_version=false`、`pinned=false` 和 `served_run_id`；只允许读取指定文档、租户下已封存且可复核的未发布 run。预览不会替换普通 GET 返回的旧正式版本。没有正式版本时，普通 GET 仍不提供待审正文；已有 job 时可能返回 HTTP 200 和空正文，消费方应检查 `publication.is_formal_version` 与 `served_run_id`，不能只据 HTTP 状态认定已有正式结果。
+
+人工核对确认可以发布后，提交明确 run 和复核依据：
+
+```powershell
+$review = @{
+  parse_run_id = $runId
+  reviewer = "reviewer-name"
+  reason = "Checked source pages and confirmed this version."
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -ContentType "application/json" -Body $review "http://127.0.0.1:8090/v1/parse/documents/demo-doc/publication/publish"
+```
+
+发布成功后，普通 GET、records 与导出读取同一正式 run。缺少必需产物或后端能力不能通过人工复核绕过；不要在未看过待审正文时自动调用 publish。
 
 ### 大文件和超长 PDF
 
@@ -75,9 +118,10 @@ Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/quality"
 示例：
 
 ```powershell
+$upload = curl.exe -sS -F "file=@samples/big.pdf;type=application/pdf" -F "doc_id=big-pdf" -F "profile=large-pdf-catalog" http://127.0.0.1:8090/v1/parse/uploads | ConvertFrom-Json
 $job = @{
   doc_id = "big-pdf"
-  file_path = "D:/app/uploads/big.pdf"
+  file_path = $upload.parsecore_server_file_path
   media_type = "application/pdf"
   options = @{ profile = "large-pdf-catalog" }
 } | ConvertTo-Json -Depth 8
@@ -101,6 +145,8 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/big-pdf
 ## Profile 选择
 
 默认让宿主传 `profile=auto`。只有已知文件类型才显式覆盖：
+
+这里的请求 `profile` 选择解析策略；配置中的 `runtime.run_artifact_profile` 选择发布所需产物，两者用途不同。一般保留后者为 `default` 即可查询 records 和导出，不需要设置为 `records`。当前 `records` 缺少 staged export 通道，`rag` 缺少内置的文档 run 隔离索引，启用发布时会在启动阶段拒绝这些组合。详见 [配置手册](configuration.md#runtime-配置)。
 
 | Profile | 使用场景 |
 | --- | --- |
@@ -207,9 +253,9 @@ jsonl | csv | tsv | sqlite | xlsx
 
 生产或灰度建议：
 
-- 使用 `parsecore.pgvector.toml.example` 或由它派生的生产配置。
+- 需要正式发布和待审读取时，以 `parsecore.queue.toml` 的 SQLite 配置作为验证起点。
 - 使用 `queue-worker`，不要让 API 进程承接所有大文件解析。
-- 使用 Postgres 持久化 job、blocks、chunks、document views 和 metrics。
+- Postgres/pgvector 仅用于对应存储和索引的独立联调，正式发布链路需后续实现与验收。
 - 设置 `runtime.api_key_env`，除 `/health` 外保护所有 HTTP 入口。
 - 保留 `runtime.max_upload_bytes`，同步入口超限后切到 `/v1/parse/uploads + /v1/parse/jobs`。
 - 为大 PDF 设置 `runtime.max_active_parts_per_doc = 2-4` 起步。
@@ -220,9 +266,9 @@ jsonl | csv | tsv | sqlite | xlsx
 交付给宿主产品前，建议完成：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 git diff --check
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
 Invoke-RestMethod http://127.0.0.1:8090/health
 ```
 
@@ -321,6 +367,10 @@ Invoke-RestMethod http://127.0.0.1:8090/health
 | `export_not_found` | 404 | 导出任务不存在 | export_job_id 不存在或文件已过期 |
 | `missing_doc_id` | 400 | 缺少 doc_id | 请求体未传 doc_id |
 | `invalid_projection` | 400 | 无效投影类型 | projection 参数不在允许枚举中 |
+| `preview_run_id_required` | 400 | 未显式选择待审 run | `/preview` 缺少 `run_id` |
+| `preview_run_not_found` | 404 | 待审 run 不存在或归属不匹配 | run、文档或租户不匹配 |
+| `preview_run_not_available` | 409 | 指定 run 不能作为待审内容读取 | 未成功、未封存、已发布、被拒绝等 |
+| `run_preview_unavailable` | 503 | 当前后端不支持待审 run 读取 | 未启用 SQLite 发布能力 |
 | `invalid_limit` | 400 | 无效的 limit 参数 | limit 非正整数或超范围 |
 | `invalid_since_hours` | 400 | 无效的 since_hours | since_hours 非正数 |
 | `invalid_sample_size` | 400 | 无效的 sample_size | sample_size 非正整数 |

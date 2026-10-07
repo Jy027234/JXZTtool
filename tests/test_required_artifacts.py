@@ -133,13 +133,14 @@ class RequiredViewDeliveryTests(unittest.TestCase):
             },
         )
         with TemporaryWorkspace(_config(profile="optional-reader")) as workspace:
-            runtime = build_runtime(workspace.config_path)
             with patch.dict(
                 ARTIFACT_PROFILES, {"optional-reader": optional_reader}, clear=False
-            ), patch.object(
-                runtime, "_document_views_for_snapshot", return_value={"pages": []}
             ):
-                outcome = self._submit(workspace, runtime)
+                runtime = build_runtime(workspace.config_path)
+                with patch.object(
+                    runtime, "_document_views_for_snapshot", return_value={"pages": []}
+                ):
+                    outcome = self._submit(workspace, runtime)
             state = runtime.publication_state(doc_id="doc-views")
 
         self.assertEqual(outcome.job.state.value, "done")
@@ -167,9 +168,10 @@ class RequiredViewDeliveryTests(unittest.TestCase):
             self.assertEqual(runtime._artifact_requirement("records"), "optional")
 
         with TemporaryWorkspace(_config(profile="records")) as workspace:
-            runtime = build_runtime(workspace.config_path)
-            self.assertEqual(runtime._artifact_requirement("records"), "required")
-            self.assertEqual(runtime._artifact_requirement("rag"), "disabled")
+            from parsecore.capabilities import CapabilityConfigurationError
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                build_runtime(workspace.config_path)
+            self.assertEqual(captured.exception.code, "artifact_profile_unavailable")
 
 
 class ValidationWiringTests(unittest.TestCase):

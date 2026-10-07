@@ -95,6 +95,66 @@ def _write_config(workspace: TemporaryWorkspace, text: str) -> Path:
 
 
 class CapabilityConfigValidationTests(unittest.TestCase):
+    def test_unknown_artifact_profile_is_rejected_at_load_time(self) -> None:
+        with TemporaryWorkspace(
+            _config(resource_extra='run_artifact_profile = "typo"')
+        ) as workspace:
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                load_settings(workspace.config_path)
+        self.assertEqual(captured.exception.code, "unknown_artifact_profile")
+        self.assertEqual(captured.exception.field, "runtime.run_artifact_profile")
+
+    def test_records_profile_is_rejected_before_building_parsers(self) -> None:
+        with TemporaryWorkspace(
+            _config(resource_extra='run_artifact_profile = "records"')
+        ) as workspace, patch("parsecore.bootstrap._build_parsers") as parsers:
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                build_runtime(workspace.config_path)
+        parsers.assert_not_called()
+        self.assertEqual(captured.exception.code, "artifact_profile_unavailable")
+        self.assertIn("export", str(captured.exception))
+
+    def test_rag_profile_requires_a_durable_index(self) -> None:
+        with TemporaryWorkspace(
+            _config(resource_extra='run_artifact_profile = "rag"')
+        ) as workspace:
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                build_runtime(workspace.config_path)
+        self.assertEqual(captured.exception.code, "artifact_profile_unavailable")
+        self.assertIn("durable index", str(captured.exception))
+
+    def test_rag_profile_rejects_non_isolated_index_before_database_connection(self) -> None:
+        text = _config(
+            index_mode="pgvector", resource_extra='run_artifact_profile = "rag"'
+        ).replace("__DB_URL__", "postgresql://localhost/parsecore-test")
+        with TemporaryWorkspace(text) as workspace, patch(
+            "parsecore.bootstrap._build_job_store"
+        ) as store:
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                build_runtime(workspace.config_path)
+        store.assert_not_called()
+        self.assertEqual(captured.exception.code, "artifact_profile_unavailable")
+        self.assertIn("isolate document runs", str(captured.exception))
+
+    def test_assets_profile_requires_region_assets(self) -> None:
+        with TemporaryWorkspace(
+            _config(resource_extra='run_artifact_profile = "assets-only"')
+        ) as workspace:
+            with self.assertRaises(CapabilityConfigurationError) as captured:
+                load_settings(workspace.config_path)
+        self.assertEqual(captured.exception.code, "artifact_profile_unavailable")
+        self.assertIn("region_assets", str(captured.exception))
+
+    def test_profile_prerequisites_are_disabled_with_run_publication(self) -> None:
+        with TemporaryWorkspace(
+            _config(resource_extra='run_publication_enabled = false\nrun_artifact_profile = "records"')
+        ) as workspace:
+            runtime = build_runtime(workspace.config_path)
+            report = runtime.capability_report()
+        entry = next(item for item in report["capabilities"] if item["name"] == "run_artifact_profile")
+        self.assertEqual(entry["status"], "disabled")
+        self.assertTrue(report["accepting_jobs"])
+
     def test_unknown_parser_name_is_rejected_with_stable_code(self) -> None:
         with TemporaryWorkspace(_config(parser_name="mineru-local")) as workspace:
             with self.assertRaises(CapabilityConfigurationError) as captured:

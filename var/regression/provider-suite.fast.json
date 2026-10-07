@@ -17,7 +17,7 @@
   "entries": [
     {
       "name": "primary-default",
-      "baseline": "baseline.json",
+      "baseline": "baseline.native-preservation-20261007.default.json",
       "page_range": {
         "start": 204,
         "end": 206
@@ -30,7 +30,7 @@
     },
     {
       "name": "primary-table-structure",
-      "baseline": "baseline.table-structure.primary.json",
+      "baseline": "baseline.native-preservation-20261007.table.json",
       "page_range": {
         "start": 85,
         "end": 85
@@ -43,7 +43,7 @@
     },
     {
       "name": "primary-strip-hf",
-      "baseline": "baseline.strip_hf.json",
+      "baseline": "baseline.native-preservation-20261007.strip-hf.json",
       "page_range": {
         "start": 145,
         "end": 147

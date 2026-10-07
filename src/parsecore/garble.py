@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 _CID_TOKEN_RE = re.compile(r"\(cid:\d+\)")
-_PDF_NAME_TOKEN_RE = re.compile(r"/(?:(?:\d+)|(?:i\d+))(?![\w])")
+_PDF_NAME_TOKEN_RE = re.compile(r"(?<!\w)/(?:(?:\d+)|(?:i\d+))(?![\w])")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
+_TOKEN_COMPONENT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
+_TOKEN_RE = re.compile(r"\d+(?:[./-]\d+)+|[A-Za-z0-9\u4e00-\u9fff]+")
 
 
 @dataclass(slots=True, frozen=True)
@@ -39,6 +40,9 @@ def analyze_text_garble(text: str) -> GarbleSignals:
     printable_ratio = _safe_ratio(printable_count, total_chars)
 
     tokens = [token.lower() for token in _TOKEN_RE.findall(content)]
+    # Keep numeric page/date/part compounds together so their short components
+    # do not look like repeated OCR tokens.  Standalone repeated numbers still
+    # count, as do repeated short words.
     short_tokens = [token for token in tokens if len(token) <= 2]
     repeated_short = 0
     if short_tokens:
@@ -46,7 +50,14 @@ def analyze_text_garble(text: str) -> GarbleSignals:
         for token in short_tokens:
             counts[token] = counts.get(token, 0) + 1
         repeated_short = sum(count for count in counts.values() if count >= 3)
-    repeated_short_ratio = _safe_ratio(repeated_short, len(tokens))
+    # Compounds stay whole when counting repeated short tokens, while the
+    # denominator keeps counting the original alphanumeric components. This
+    # prevents numeric-heavy tables from inflating the ratio by collapsing
+    # many page/part components into a handful of compound tokens.
+    repeated_short_ratio = _safe_ratio(
+        repeated_short,
+        len(_TOKEN_COMPONENT_RE.findall(content)),
+    )
 
     cjk_count = sum(1 for ch in content if "\u4e00" <= ch <= "\u9fff")
     latin_count = sum(1 for ch in content if ("a" <= ch.lower() <= "z"))

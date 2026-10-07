@@ -7,14 +7,63 @@ import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from parsecore.models import Block, BlockType, Chunk, SemanticRole
 from tools import corpus_manifest, regression_baseline
 
 
 class RegressionBaselineTests(unittest.TestCase):
+    def test_warning_run_measures_its_sealed_manifest_instead_of_old_formal(self) -> None:
+        outcome = SimpleNamespace(
+            job=SimpleNamespace(job_id="job-new"), blocks=(), chunks=(),
+        )
+        runtime = Mock(run_publication_ready=True)
+        runtime.submit.return_value = outcome
+        runtime.get_document.return_value = {
+            "publication": {"served_run_id": "run-old"},
+            "index_manifest": {"structure_quality": {"heading_body_binding_rate": 1.0}},
+        }
+        runtime.run_store.list_runs.return_value = (
+            SimpleNamespace(job_id="job-new", parse_run_id="run-new"),
+            SimpleNamespace(job_id="job-old", parse_run_id="run-old"),
+        )
+        runtime.get_document_preview.return_value = {
+            "publication": {"served_run_id": "run-new"},
+            "index_manifest": {"structure_quality": {"heading_body_binding_rate": 0.5}},
+        }
+        with TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "sample.txt"
+            fixture.write_text("body", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                measured = regression_baseline._run_one(
+                    runtime, fixture=fixture, top_pages=5, request_options={},
+                )
+        self.assertEqual(measured["structure_quality"]["heading_body_binding_rate"], 0.5)
+        runtime.get_document_preview.assert_called_once_with(
+            doc_id="regression:sample.txt", tenant_id="default", parse_run_id="run-new",
+        )
+
+    def test_regression_refuses_to_measure_another_job_when_run_is_missing(self) -> None:
+        runtime = Mock(run_publication_ready=True)
+        runtime.submit.return_value = SimpleNamespace(
+            job=SimpleNamespace(job_id="job-new"), blocks=(), chunks=(),
+        )
+        runtime.run_store.list_runs.return_value = (
+            SimpleNamespace(job_id="job-old", parse_run_id="run-old"),
+        )
+        with TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "sample.txt"
+            fixture.write_text("body", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "no matching run"):
+                    regression_baseline._run_one(
+                        runtime, fixture=fixture, top_pages=5, request_options={},
+                    )
+        runtime.get_document_preview.assert_not_called()
+
     def test_fixture_record_captures_relative_path_from_fixture_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             fixture_root = Path(temp_dir)

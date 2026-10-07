@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "name": "primary-default",
+      "baseline": "baseline.native-preservation-20261007.default.json"
+    },
+    {
+      "name": "primary-table-structure",
+      "baseline": "baseline.native-preservation-20261007.table.json"
+    },
+    {
+      "name": "primary-strip-hf",
+      "baseline": "baseline.native-preservation-20261007.strip-hf.json"
+    }
+  ]
+}

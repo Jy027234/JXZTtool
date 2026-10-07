@@ -10,7 +10,7 @@
 | --- | --- | --- | --- | --- |
 | 本地 SDK 或单进程 API | `parsecore.toml` | `inline` | SQLite + 本地对象目录 | `python -m parsecore.cli serve --config parsecore.toml` |
 | API + 独立 Worker | `parsecore.queue.toml` | `queue-worker` | SQLite + 本地对象目录 | `docker compose up -d --build` |
-| 灰度/生产持久化 | `parsecore.pgvector.toml.example` | `queue-worker` | Postgres + pgvector | `docker compose --profile pgvector up -d --build` |
+| Postgres/pgvector 存储索引联调（正式发布未实现） | `parsecore.pgvector.toml.example` | `queue-worker` | Postgres + pgvector | `docker compose --profile pgvector up -d --build` |
 | 本地验证 pgvector 链路 | `parsecore.pgvector.fake-embedding.toml.example` | `queue-worker` | Postgres + pgvector + fake embedding | `docker compose --profile pgvector up -d --build` |
 | 阿里 Qwen RAG + 二阶段排序 | `parsecore.pgvector.aliyun-rag.toml.example` | `queue-worker` | Postgres + pgvector + Qwen embedding/rerank | 注入 `PARSECORE_ALIYUN_API_KEY` 后按下文 smoke 验收 |
 | 复用宿主 OCR 网关 | `parsecore.remote-http.toml.example` | `queue-worker` | SQLite + 本地对象目录 | `PARSECORE_RUNTIME_CONFIG=./parsecore.remote-http.toml.example` |
@@ -24,26 +24,26 @@
 
 ## 安装依赖
 
-按使用形态安装 extras：
+使用 Python 3.13 或以上，在仓库根目录执行 `py -3.13 -m venv .venv`，再按使用形态安装 extras：
 
 ```powershell
 # 核心 SDK
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -e .
 
 # HTTP API
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[api]"
+.\.venv\Scripts\python.exe -m pip install -e ".[api]"
 
 # 解析 PDF/DOCX/Excel/OCR 常用能力
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[parsers]"
+.\.venv\Scripts\python.exe -m pip install -e ".[parsers]"
 
 # Worker 与 Postgres/pgvector
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[worker,storage]"
+.\.venv\Scripts\python.exe -m pip install -e ".[worker,storage]"
 
 # 可选 PDF baseline provider（pymupdf4llm）
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[pymupdf4llm]"
+.\.venv\Scripts\python.exe -m pip install -e ".[pymupdf4llm]"
 
 # 可选 Docling 统一结构 provider
-# d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[docling]"
+# .\.venv\Scripts\python.exe -m pip install -e ".[docling]"
 ```
 
 > `pymupdf4llm` 和 `docling` 是可选 extra，不会随 `.[parsers]` 自动安装。启用前请参阅下文 [可选 Provider 安装](#可选-provider-安装) 章节。
@@ -51,7 +51,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip 
 生产或灰度环境通常安装：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[api,parsers,worker,storage]"
+.\.venv\Scripts\python.exe -m pip install -e ".[api,parsers,worker,storage]"
 ```
 
 ## 环境变量
@@ -108,6 +108,8 @@ allow_placeholder_parsers = false
 | `unknown_llm_provider` / `unknown_embedding_provider` / `unknown_rerank_provider` / `unknown_ocr_provider` | 对应 `providers.*.provider` 不是已实现 provider。 |
 | `mock_providers_not_allowed` | 启用了 `fake`/`test`/`stub` provider，但 `runtime.allow_mock_providers` 仍为 `false`。 |
 | `unknown_capability_name` | `runtime.capability_optional` 含未知能力名。 |
+| `unknown_artifact_profile` | `runtime.run_artifact_profile` 不在已注册的产物 profile 中。 |
+| `artifact_profile_unavailable` | 启用发布时，所选产物 profile 的静态前提未满足，如缺少 staged export、可隔离文档 run 的持久索引或区域素材配置。启动阶段即拒绝，不先执行耗时解析。 |
 
 CLI 遇到上述错误时以退出码 `2` 输出 JSON（`code` / `field` / `message`），不会打印 traceback。
 
@@ -142,7 +144,7 @@ allow_mock_providers = false
 | --- | ---: | --- | --- |
 | `allow_mock_providers` | `false` | 布尔 | 允许 `fake`/`test`/`stub` provider。它们产出非正式结果，只用于联调与冒烟；开启后 `/health` 会把这些能力列进 `mock_capabilities`。生产必须保持 `false`。 |
 | `run_publication_enabled` | `true` | 布尔 | P0-03：允许通过 run store 发布文档版本。仅当存储后端能原子切换 active 指针（当前为 SQLite）时生效；否则 `publish_run()` 返回 `run_store_not_ready`，`/v1/parse/documents/{doc_id}/publication` 报 `not_ready`，绝不降级为非原子发布。设为 `false` 即退回本批次之前的单版本行为。 |
-| `run_artifact_profile` | `default` | `default` / `rag` / `records` / `assets-only` | 封存时按哪个 profile 判定必需产物。`default` 要求 blocks 与 reader 页视图，RAG 为 optional；`rag` 额外要求 RAG 产物且需要持久索引；`assets-only` 要求 blocks 与 **assets**（区域素材描述 + 文件摘要校验，需同时开启 `region_assets`，否则封存报 `required artifacts are missing or empty: assets`）；`records` 要求 export，当前尚无 staged 通道，会封存失败。 |
+| `run_artifact_profile` | `default` | `default` / `rag` / `records` / `assets-only` | 发布必需产物，与请求的解析策略 `options.profile` 分开。通常保留 `default`：要求 blocks 与 reader 页视图，照常支持 records 查询和导出。`records` 要求 staged export，当前解析管线没有该通道；`rag` 要求持久且隔离文档 run 的索引，内置索引尚不满足；启用发布时这两项在启动阶段报 `artifact_profile_unavailable`。`assets-only` 启动时要求 `region_assets=true` 和 `local://` 对象存储，封存时仍校验真实素材与文件摘要，缺少实际区域素材时不能发布。关闭发布时不执行这些发布前提检查。 |
 | `tenant_scope` | `trusted` | `trusted` / `enforced` | P0-07：谁决定请求属于哪个租户。`trusted` 保持既有语义（宿主负责认证，`tenant_id` 参数即租户）。`enforced` 要求宿主通过 `tenant_header` 注入已认证租户，参数只能复述，不一致返回 `403 tenant_mismatch`，缺少身份返回 `403 tenant_identity_required`。对外多租户开放前必须设为 `enforced`。 |
 | `region_assets` | `false` | 布尔 | 待办 1/3：把表区/图片区的**原图**落盘（`<object_store>/regions/<doc_id>/<block_id>.png`），块元数据加 `asset` 描述（含 `sha256`/字节数/尺寸/来源框，`verified: false`）。只写 `local://` 对象存储。默认关闭：297 页目录图册实测 455 张、约 15 MB、多花约 16 秒，不看不用的图不必先渲染。 |
 | `region_asset_resolution` | `144` | 36–600 | 区域素材渲染分辨率（dpi）。越高越清晰也越慢。 |
@@ -173,6 +175,8 @@ allow_mock_providers = false
 | `log_path` | `var/logs/job_events.jsonl` | 路径 | 运行事件日志路径。 |
 
 调度内部会为每次 claim 写入 `claim_token / claimed_at / lease_expires_at / next_attempt_at`。这些字段会出现在 job 查询 payload 中，宿主通常只需要透传或忽略；中台会用 `claim_token` 拒绝超时回收后的旧 worker 写回，避免旧 attempt 把新 attempt 的状态或产物覆盖掉。
+
+`/health` 与 `/v1/runtime` 的 `capabilities.capabilities` 列表同时报告 `run_publication` 和 `run_artifact_profile`。当前发布后端只有 SQLite；Postgres/pgvector 示例不提供正式版本的原子发布与待审 run 读取。启动配置检查只验证可提前确定的前提，实际文档产物和质量仍在 seal/publish 时校验。
 
 生产建议：
 
@@ -663,7 +667,7 @@ Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/providers/route-plan?file_name
 `pymupdf4llm-local` 已有可选 adapter。启用前需要安装额外依赖：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[pymupdf4llm]"
+.\.venv\Scripts\python.exe -m pip install -e ".[pymupdf4llm]"
 ```
 
 然后显式增加 parser 配置：
@@ -681,7 +685,7 @@ options = { page_chunks = true, detect_tables = true }
 `docling-local` 现也提供可选 adapter。启用前需要安装额外依赖：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[docling]"
+.\.venv\Scripts\python.exe -m pip install -e ".[docling]"
 ```
 
 然后显式增加 parser 配置：
@@ -832,7 +836,7 @@ max_upload_bytes = 52428800
 
 ```powershell
 $env:PARSECORE_API_KEY = "replace-with-secret"
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
+.\.venv\Scripts\python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
 ```
 
 ### API + Worker
@@ -846,8 +850,8 @@ poll_interval_ms = 500
 启动：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli serve --config parsecore.queue.toml --host 127.0.0.1 --port 8090
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli worker --config parsecore.queue.toml
+.\.venv\Scripts\python.exe -m parsecore.cli serve --config parsecore.queue.toml --host 127.0.0.1 --port 8090
+.\.venv\Scripts\python.exe -m parsecore.cli worker --config parsecore.queue.toml
 ```
 
 说明：`/v1/parse/jobs` 等异步 job 入口需要 Worker 消费；`/parse` 和 `/v1/parse/batch` 是同步解析入口。Worker 模式下跨服务传文件建议走 `/v1/parse/uploads`，确保暂存文件落在 `storage.object_store` 下。
@@ -878,7 +882,7 @@ docker compose up -d --build
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8090/health
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/ocr_benchmark.py --config parsecore.remote-http.toml.example --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
+.\.venv\Scripts\python.exe tools/ocr_benchmark.py --config parsecore.remote-http.toml.example --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
 ```
 
 `ocr_benchmark` 结果中的 `ocr_decision_trace` 字段可用于核验 OCR 决策口径（attempted / fallback / rejected / failed）以及 `native_text_token_count / final_text_token_count` 变化。
@@ -913,23 +917,23 @@ P0-03～P0-05 引入的运维命令（均使用同一个 `--config`）：
 配置变更后建议至少执行：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli payload-contract-check
+.\.venv\Scripts\python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+.\.venv\Scripts\python.exe -m parsecore.cli self-check --config parsecore.toml
 ```
 
 Excel 真实样本：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/excel_sample_quality.py --config parsecore.toml --sample-dir D:/app/uploads --out-json var/self-check/excel-sample-quality.json --out-md var/self-check/excel-sample-quality.md
+.\.venv\Scripts\python.exe tools/excel_sample_quality.py --config parsecore.toml --sample-dir D:/app/uploads --out-json var/self-check/excel-sample-quality.json --out-md var/self-check/excel-sample-quality.md
 ```
 
 解析性能基线：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .pdf,.docx,.xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
+.\.venv\Scripts\python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .pdf,.docx,.xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
 ```
 
 该报告除 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables` 外，还会为每个样本写入 `provider_report.comparison_report`，并在 Markdown 中展示 `primary_provider / best_provider / provider_score`，用于把固定样本性能与本地 Provider 对比口径放在同一份报告中。`parse_perf_baseline.py` 为兼容历史内存基线默认启用 `tracemalloc`；只测量低干扰端到端延迟时追加 `--no-track-python-memory`，此时 `peak_kb=null`，Provider 内存轴保持 pending，不能与内存追踪通道的耗时混作同一序列。独立的 Provider 对比工具默认不启用 `tracemalloc`，`elapsed_s` 只计 parser 执行时间；需要 Python 峰值内存诊断时显式追加 `--track-python-memory`，但该模式不应作为真实耗时 SLA。
@@ -937,9 +941,9 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 本地 Provider 离线对比：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.json --out-md var/self-check/provider-comparison.md
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/suite.fast.json --fixture-root D:/app/uploads --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.suite.json --out-md var/self-check/provider-comparison.suite.md
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.json --out-md var/self-check/provider-comparison.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/suite.fast.json --fixture-root D:/app/uploads --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.suite.json --out-md var/self-check/provider-comparison.suite.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --sample D:/samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
 ```
 
 该工具对同一样本逐个运行已配置的本地 parser，输出 `ir_summary / coverage_summary / rag_coverage_quality / provider_report.comparison_report`。未配置、依赖缺失或不支持文件类型的候选会写成 `skipped/failed`，不会中断整批样本；远程 OCR provider 会在该离线工具中禁用，避免 Provider 对比时触发外部 OCR API。真正失败的 provider 还会写入 `failure_category`，并在 gate summary 的 `failure_categories` 中汇总 `provider_unavailable / timeout / invalid_input / permission_denied / unsupported / provider_failed`，用于区分环境阻塞与解析器运行退化。若候选暴露了 Docling converter telemetry，单次 run 还会带 `converter_reuse_enabled / converter_cache_hit / converter_cache_state`，suite summary 汇总 `converter_cache.observations / hits / misses`，方便把冷启动成本从稳态吞吐中拆出来。`--suite` 可读取新的 `samples / fixtures / cases` 清单，也可直接复用现有 `entries -> baseline -> fixtures` 回归套件；每个样本可用 `providers / provider_ids / profile / fixture_relative_path / page_range` 覆盖全局参数，suite 顶层还可声明 `gate_policy.max_provider_reading_order_warning_runs`、`gate_policy.max_provider_quality_warning_runs`、`gate_policy.max_samples_best_provider_differs_from_route_primary`、`gate_policy.max_providers_with_multiple_provider_versions`、`gate_policy.max_providers_with_multiple_adapter_versions` 这类基础门禁预算。仓库当前内置了 `var/regression/provider-suite.fast.json`、`var/regression/provider-suite.full.json` 与 `var/regression/provider-suite.perf.json` 三套工件，分别对应 `fast`、`full` 与 `perf` 自检默认 Provider 门禁。默认 auto route-plan 模式下，报告仍会保留 disabled/未接入候选的 `skipped` 解释，但 gate 不再把这类 `parser_not_configured` / `unsupported_media_type_or_extension` 直接当成 warning；只有显式指定的 Provider 被跳过，或出现非预期 skipped，才会进入 `provider_runs_skipped`。现在每次 provider run 还会显式回填 `provider_version / adapter_version`，suite 顶层新增 `provider_identity_summary`，用于追踪“同一个 provider id 实际跑的是哪版上游库/哪版 Adapter”；一旦同名 Provider 混入多版上游库或多版 Adapter，gate 会先给出 drift warning，再按上面的 budget 决定是否 fail。与此同时，报告还会输出 `provider_admission_summary`，把 suite 结果直接翻译成每个 provider 的 `recommended_admission.route_mode / gate_status / route_ready`、`recommended_action` 与 `requires_config_update`，并补齐 `drift_fields / drift_details / config_patch`，便于把对比结论直接回写到 `providers.local_parsers` 配置。如果希望把“准入建议还没收敛”也纳入 fail gate，suite 顶层还支持 `gate_policy.max_providers_requiring_config_update`、`gate_policy.max_providers_with_route_mode_drift`、`gate_policy.max_providers_with_gate_status_drift`、`gate_policy.max_providers_with_gate_checks_drift`、`gate_policy.max_providers_with_route_ready_drift` 五类 admission drift 预算，分别约束待回写 provider 数量以及 `route_mode / gate_status / gate_checks / route_ready` 四类配置漂移。`parsecore self-check` 在实际执行 provider comparison 时，会把 identity 和 admission 两份摘要一起带回检查结果，并在 summary 中追加 `identity_drift / admission_ready / admission_update` 计数。与此同时，self-check 仍会在输出目录自动落盘 `provider-comparison.fast/full/perf.json/.md`，并把路径写回 self-check JSON。`--fixture-root` 或 `PARSECORE_REGRESSION_FIXTURE_ROOT` 用于跨机器恢复真实样本路径。对 PDF 还支持 `--page-start / --page-end` 或 suite 内 `page_range` 局部评估：工具会先切出 part 文件，再把 IR / coverage / provider_report 页码平移回原始页号，便于大文件异常页和采样页灰度对比。
@@ -1025,8 +1029,8 @@ py tools/provider_gold_evidence.py `
 大 PDF part 调度压测：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
+.\.venv\Scripts\python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
+.\.venv\Scripts\python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
 ```
 
 HTTP smoke：

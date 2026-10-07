@@ -21,6 +21,11 @@ var/regression/*
 !var/regression/baseline-registry.json
 !var/regression/baseline.project609.609b25b.json
 !var/regression/suite.project609.json
+!var/regression/suite.fast.json
+!var/regression/evidence.native-preservation-20261007.json
+!var/regression/baseline.native-preservation-20261007.default.json
+!var/regression/baseline.native-preservation-20261007.table.json
+!var/regression/baseline.native-preservation-20261007.strip-hf.json
 var/knowledge-structuring/
 var/self-check/
 var/tmp/

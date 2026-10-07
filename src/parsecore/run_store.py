@@ -166,6 +166,29 @@ class StalePublicationError(PublishError):
     code = PUBLICATION_REJECTED_STALE
 
 
+class PreviewRunNotAvailableError(RunStoreError):
+    """A scoped run exists but is not an eligible unpublished preview."""
+
+    code = "preview_run_not_available"
+
+
+class RunPreviewUnavailableError(RuntimeError):
+    """The configured backend cannot read run-scoped previews."""
+
+
+_PREVIEW_RUN_QUALIFICATION_SQL = (
+    "execution_status = ? AND publication_status = ?"
+    " AND validation_status NOT IN (?, ?, ?) AND sealed_at IS NOT NULL"
+)
+_PREVIEW_RUN_QUALIFICATION_PARAMS = (
+    ExecutionStatus.SUCCEEDED.value,
+    PublicationStatus.UNPUBLISHED.value,
+    ValidationStatus.REJECTED.value,
+    ValidationStatus.ERROR.value,
+    ValidationStatus.NOT_RUN.value,
+)
+
+
 @dataclass(slots=True, frozen=True)
 class RunRecord:
     """One execution attempt."""
@@ -1406,6 +1429,65 @@ class SQLiteRunStore:
             ).fetchall()
             return tuple(self._row_to_run(row) for row in rows)
 
+    @staticmethod
+    def _normalize_run_view_types(view_types: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(view_types, str):
+            values = (view_types,)
+        else:
+            values = tuple(view_types or ())
+        return tuple(
+            dict.fromkeys(
+                normalized
+                for value in values
+                if (normalized := str(value or "").strip().lower())
+            )
+        )
+
+    @staticmethod
+    def _read_run_artifacts(
+        conn: sqlite3.Connection,
+        *,
+        parse_run_id: str,
+        tenant_id: str,
+        doc_id: str,
+        view_types: Sequence[str],
+        include_content: bool = True,
+    ) -> RunArtifacts:
+        """Read a run's sealed block, chunk, and view rows on the caller's snapshot."""
+
+        blocks: tuple[Block, ...] = ()
+        chunks: tuple[Chunk, ...] = ()
+        if include_content:
+            block_rows = conn.execute(
+                "SELECT block_id, doc_id, payload_json FROM run_blocks"
+                " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                " ORDER BY position",
+                (parse_run_id, tenant_id, doc_id),
+            ).fetchall()
+            chunk_rows = conn.execute(
+                "SELECT chunk_id, doc_id, payload_json FROM run_chunks"
+                " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                " ORDER BY position",
+                (parse_run_id, tenant_id, doc_id),
+            ).fetchall()
+            blocks = tuple(_run_block_from_row(row) for row in block_rows)
+            chunks = tuple(_run_chunk_from_row(row) for row in chunk_rows)
+
+        views: dict[str, tuple[dict[str, Any], ...]] = {}
+        for view_type in view_types:
+            rows = conn.execute(
+                "SELECT payload_json FROM run_document_views"
+                " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
+                " AND view_type = ? ORDER BY position",
+                (parse_run_id, tenant_id, doc_id, view_type),
+            ).fetchall()
+            views[view_type] = tuple(
+                payload
+                for row in rows
+                if isinstance((payload := json.loads(row["payload_json"])), dict)
+            )
+        return RunArtifacts(blocks=blocks, chunks=chunks, views=views)
+
     def read_published_snapshot(
         self,
         *,
@@ -1423,17 +1505,7 @@ class SQLiteRunStore:
 
         tenant = _normalize_tenant(tenant_id)
         doc = str(doc_id)
-        if isinstance(view_types, str):
-            requested_views = (view_types,)
-        else:
-            requested_views = tuple(view_types or ())
-        requested_views = tuple(
-            dict.fromkeys(
-                normalized
-                for value in requested_views
-                if (normalized := str(value or "").strip().lower())
-            )
-        )
+        requested_views = self._normalize_run_view_types(view_types)
 
         with self._read_transaction() as conn:
             active = conn.execute(
@@ -1466,6 +1538,7 @@ class SQLiteRunStore:
                 "served_run_id": run_id,
                 "run_identity": run_id,
                 "pinned": True,
+                "is_formal_version": publication_status == PublicationStatus.PUBLISHED.value,
                 "publication_status": publication_status,
                 "publication_generation": int(active["publication_generation"] or 0),
                 "consumer_signal": (
@@ -1476,46 +1549,19 @@ class SQLiteRunStore:
                 "latest_job_used_as_formal_version": False,
             }
 
-            blocks: tuple[Block, ...] = ()
-            chunks: tuple[Chunk, ...] = ()
-            if record_query is None:
-                block_rows = conn.execute(
-                    "SELECT block_id, doc_id, payload_json FROM run_blocks"
-                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
-                    " ORDER BY position",
-                    (run_id, tenant, doc),
-                ).fetchall()
-                chunk_rows = conn.execute(
-                    "SELECT chunk_id, doc_id, payload_json FROM run_chunks"
-                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
-                    " ORDER BY position",
-                    (run_id, tenant, doc),
-                ).fetchall()
-                blocks = tuple(_run_block_from_row(row) for row in block_rows)
-                chunks = tuple(_run_chunk_from_row(row) for row in chunk_rows)
-
-            views: dict[str, tuple[dict[str, Any], ...]] = {}
-            for view_type in requested_views:
-                rows = conn.execute(
-                    "SELECT payload_json FROM run_document_views"
-                    " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?"
-                    " AND view_type = ? ORDER BY position",
-                    (run_id, tenant, doc, view_type),
-                ).fetchall()
-                views[view_type] = tuple(
-                    payload
-                    for row in rows
-                    if isinstance((payload := json.loads(row["payload_json"])), dict)
-                )
+            artifacts = self._read_run_artifacts(
+                conn,
+                parse_run_id=run_id,
+                tenant_id=tenant,
+                doc_id=doc,
+                view_types=requested_views,
+                include_content=record_query is None,
+            )
 
             result: dict[str, Any] = {
                 "record": record,
                 "publication": publication,
-                "artifacts": RunArtifacts(
-                    blocks=blocks,
-                    chunks=chunks,
-                    views=views,
-                ),
+                "artifacts": artifacts,
             }
             if record_query is not None:
                 result["records"] = _query_run_records(
@@ -1526,6 +1572,87 @@ class SQLiteRunStore:
                     record_query=record_query,
                 )
             return result
+
+    def read_preview_snapshot(
+        self,
+        *,
+        doc_id: str,
+        parse_run_id: str,
+        tenant_id: str | None = None,
+        view_types: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Read one explicitly selected, deliverable preview and its artifacts.
+
+        The run ownership check, preview qualification, and sealed artifact reads
+        share a SQLite read transaction.  A missing or mismatched run is kept
+        indistinguishable from a nonexistent resource; an owned run that is still
+        pending, unsealed, published, rejected, or otherwise not deliverable gets
+        a separate conflict error.
+        """
+
+        tenant = _normalize_tenant(tenant_id)
+        doc = str(doc_id)
+        run_id = str(parse_run_id or "").strip()
+        requested_views = self._normalize_run_view_types(view_types)
+
+        with self._read_transaction() as conn:
+            scoped = conn.execute(
+                "SELECT * FROM parse_runs"
+                " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ?",
+                (run_id, tenant, doc),
+            ).fetchone()
+            if scoped is None:
+                raise RunNotFoundError("Preview run not found")
+
+            eligible = conn.execute(
+                "SELECT * FROM parse_runs"
+                " WHERE parse_run_id = ? AND tenant_id = ? AND doc_id = ? AND "
+                + _PREVIEW_RUN_QUALIFICATION_SQL,
+                (run_id, tenant, doc, *_PREVIEW_RUN_QUALIFICATION_PARAMS),
+            ).fetchone()
+            if eligible is None:
+                raise PreviewRunNotAvailableError(
+                    f"run {run_id!r} is not an available preview"
+                )
+
+            record = self._row_to_run(eligible)
+            pointer = conn.execute(
+                "SELECT active_run_id, publication_generation"
+                " FROM document_publication WHERE tenant_id = ? AND doc_id = ?",
+                (tenant, doc),
+            ).fetchone()
+            if pointer is not None and str(pointer["active_run_id"] or "") == run_id:
+                raise PreviewRunNotAvailableError(
+                    f"run {run_id!r} is already the active publication"
+                )
+
+            publication = {
+                "schema_version": "2026-09-publication-read-context-v1",
+                "served_run_id": run_id,
+                "run_identity": run_id,
+                "pinned": False,
+                "is_formal_version": False,
+                "publication_status": PublicationStatus.UNPUBLISHED.value,
+                "publication_generation": int(pointer["publication_generation"] or 0)
+                if pointer is not None
+                else 0,
+                "consumer_signal": "preview_only",
+                "latest_job_used_as_formal_version": False,
+            }
+
+            artifacts = self._read_run_artifacts(
+                conn,
+                parse_run_id=run_id,
+                tenant_id=tenant,
+                doc_id=doc,
+                view_types=requested_views,
+            )
+
+            return {
+                "record": record,
+                "publication": publication,
+                "artifacts": artifacts,
+            }
 
     def restore_live_from_run(
         self, *, tenant_id: str | None = None, doc_id: str | None = None
@@ -1616,19 +1743,16 @@ class SQLiteRunStore:
                 # decision.  A superseded or withdrawn run is an older version, not
                 # a pending one: reporting it as a preview would offer a reader a
                 # decision that has already been made.
-                "SELECT * FROM parse_runs WHERE tenant_id = ? AND doc_id = ?"
-                " AND execution_status = ? AND publication_status = ?"
-                " AND validation_status NOT IN (?, ?, ?)"
-                " AND sealed_at IS NOT NULL"
-                " ORDER BY created_at DESC LIMIT 1",
+                (
+                    "SELECT * FROM parse_runs WHERE tenant_id = ? AND doc_id = ?"
+                    " AND "
+                    + _PREVIEW_RUN_QUALIFICATION_SQL
+                    + " ORDER BY created_at DESC LIMIT 1"
+                ),
                 (
                     tenant,
                     str(doc_id),
-                    ExecutionStatus.SUCCEEDED.value,
-                    PublicationStatus.UNPUBLISHED.value,
-                    ValidationStatus.REJECTED.value,
-                    ValidationStatus.ERROR.value,
-                    ValidationStatus.NOT_RUN.value,
+                    *_PREVIEW_RUN_QUALIFICATION_PARAMS,
                 ),
             ).fetchone()
         preview = self._row_to_run(preview_row) if preview_row is not None else None

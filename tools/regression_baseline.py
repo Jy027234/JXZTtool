@@ -482,7 +482,22 @@ def _run_one(
     quality = evaluate_blocks(outcome.blocks)
     layout_signals = evaluate_layout_signals(outcome.blocks)
     embedding_quality = evaluate_chunk_embeddings(outcome.chunks)
+    # A warning run can be sealed while the formal reader still serves OLD.
+    # Measure the run produced by this submit, never OLD or an empty live tier.
     snapshot = runtime.get_document(doc_id=doc_id, tenant_id=tenant_id)
+    if runtime.run_publication_ready:
+        runs = runtime.run_store.list_runs(doc_id=doc_id, tenant_id=tenant_id)
+        record = next((run for run in runs if run.job_id == outcome.job.job_id), None)
+        if record is None:
+            raise RuntimeError("Regression outcome has no matching run")
+        if snapshot.get("publication", {}).get("served_run_id") != record.parse_run_id:
+            snapshot = runtime.get_document_preview(
+                doc_id=doc_id,
+                tenant_id=tenant_id,
+                parse_run_id=record.parse_run_id,
+            )
+        if snapshot.get("publication", {}).get("served_run_id") != record.parse_run_id:
+            raise RuntimeError("Regression snapshot does not match the measured run")
     index_manifest = snapshot.get("index_manifest") or {}
     structure_quality = dict(index_manifest.get("structure_quality") or {})
     manual_anatomy = dict(index_manifest.get("manual_anatomy") or {})

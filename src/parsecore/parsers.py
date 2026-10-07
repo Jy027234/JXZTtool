@@ -49,6 +49,7 @@ _DEFAULT_OCR_PROVIDER_SETTINGS = OcrProviderSettings(
 
 _BUILTIN_PROVIDER_VERSION = "parsecore-builtin"
 _BUILTIN_ADAPTER_VERSION = "2026-06-local-provider-adapter"
+_PDF_OCR_OUTPUT_VERSION = "2026-10-symbolmap-numeric-garble-v3"
 
 
 def _pdf_ocr_cache_identity(
@@ -75,6 +76,7 @@ def _pdf_ocr_cache_identity(
     )
     pdf_options = repr(
         (
+            _PDF_OCR_OUTPUT_VERSION,
             provider_options,
             bool(provider_enabled),
             int(render_resolution),
@@ -172,6 +174,9 @@ _DOCX_HEADER_FOOTER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _OCR_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+_PDF_SYMBOL_PRIVATE_GLYPHS = frozenset("\uf02d\uf0ae\uf0a3")
+_PDF_SYMBOL_LINE_CHARACTERS = _PDF_SYMBOL_PRIVATE_GLYPHS | frozenset(" -\t")
+_PDF_SYMBOL_UNICODE_MAP = {"\uf02d": "-", "\uf0ae": "→", "\uf0a3": "≤"}
 
 # Pages with explicit table/figure markers are the most useful targets for
 # the expensive pdfplumber pass.  The adaptive route keeps those pages (and
@@ -2347,8 +2352,13 @@ class PdfTextParser(ParserAdapter):
         except (TypeError, ValueError):
             page_width = page_height = 0.0
         if not force_full_page:
+            ocr_detection_lines = [
+                line
+                for line in native_lines
+                if not _is_verified_pdf_symbol_line(page, line)
+            ]
             regions = _ocr_enhancement_regions(
-                lines=native_lines,
+                lines=ocr_detection_lines,
                 table_bboxes=table_bboxes,
                 min_cid_tokens=self._ocr_bad_page_min_cid_tokens,
                 min_cid_char_ratio=self._ocr_bad_page_min_cid_char_ratio,
@@ -2390,6 +2400,10 @@ class PdfTextParser(ParserAdapter):
             timings.total_elapsed_s = round(time.monotonic() - attempt_started, 6)
             if merged_lines is None:
                 return None, reason, region_failure or "empty_ocr_text", timings
+            merged_lines, _line_symbol_mappings = _normalize_pdf_symbol_line_records(
+                page,
+                merged_lines,
+            )
             timings.ocr_lines = merged_lines
             text = _text_from_merged_lines(
                 merged_lines,
@@ -5586,6 +5600,7 @@ class _PageLayout:
     ocr_rejection_reason: str | None = None
     ocr_error_reason: str | None = None
     ocr_lines: list[dict[str, Any]] = _dc_field(default_factory=list)
+    native_symbol_glyph_mappings: list[dict[str, Any]] = _dc_field(default_factory=list)
     native_text_token_count: int = 0
     final_text_token_count: int = 0
     ocr_engine_init_elapsed_s: float = 0.0
@@ -6133,12 +6148,18 @@ def _extract_pdfplumber_layout(
                     native_text = page.extract_text() or ""
                 except Exception:
                     native_text = None
+                native_symbol_mappings: list[dict[str, Any]] = []
+                if native_text is not None:
+                    native_text, native_symbol_mappings = _normalize_pdf_symbol_text(
+                        page, native_text
+                    )
                 layouts.append(
                     _PageLayout(
                         page_number=index,
                         width=float(page.width or 0.0),
                         height=float(page.height or 0.0),
                         text_without_tables=native_text,
+                        native_symbol_glyph_mappings=native_symbol_mappings,
                     )
                 )
                 continue
@@ -6174,6 +6195,16 @@ def _extract_pdfplumber_layout(
                     else None
                 )
                 if isinstance(cached_ocr_text, str) and isinstance(cached_ocr_lines, list) and cached_ocr_lines:
+                    cached_ocr_text, native_symbol_mappings = _normalize_pdf_symbol_text(
+                        page, cached_ocr_text
+                    )
+                    cached_ocr_lines, line_symbol_mappings = _normalize_pdf_symbol_line_records(
+                        page, cached_ocr_lines
+                    )
+                    native_symbol_mappings = _merge_symbol_mapping_evidence(
+                        native_symbol_mappings,
+                        line_symbol_mappings,
+                    )
                     token_count = _estimate_token_count(cached_ocr_text)
                     layouts.append(
                         _PageLayout(
@@ -6193,6 +6224,7 @@ def _extract_pdfplumber_layout(
                                 for line in cached_ocr_lines
                                 if isinstance(line, Mapping)
                             ],
+                            native_symbol_glyph_mappings=native_symbol_mappings,
                         )
                     )
                     continue
@@ -6280,6 +6312,13 @@ def _extract_pdfplumber_layout(
                     text_without_tables = page.extract_text() or ""
             except Exception:
                 text_without_tables = None
+            native_symbol_mappings: list[dict[str, Any]] = []
+            if text_without_tables is not None:
+                text_without_tables, native_symbol_mappings = _normalize_pdf_symbol_text(
+                    page,
+                    text_without_tables,
+                    excluded_bboxes=table_bboxes,
+                )
             layout_elapsed_s = round(time.monotonic() - page_started, 6)
             native_text_token_count = _estimate_token_count(text_without_tables)
             final_text_token_count = native_text_token_count
@@ -6306,6 +6345,19 @@ def _extract_pdfplumber_layout(
                                 if isinstance(line, Mapping)
                             ]
                 if _cache_hit_text is not None:
+                    _cache_hit_text, native_symbol_mappings = _normalize_pdf_symbol_text(
+                        page,
+                        _cache_hit_text,
+                        excluded_bboxes=table_bboxes,
+                    )
+                    _cache_hit_lines, line_symbol_mappings = _normalize_pdf_symbol_line_records(
+                        page,
+                        _cache_hit_lines,
+                    )
+                    native_symbol_mappings = _merge_symbol_mapping_evidence(
+                        native_symbol_mappings,
+                        line_symbol_mappings,
+                    )
                     text_without_tables = _cache_hit_text
                     ocr_lines = _cache_hit_lines
                     ocr_attempt_reason = "cid_dense"
@@ -6319,6 +6371,15 @@ def _extract_pdfplumber_layout(
                         text_without_tables,
                     )
                     if recovered_text:
+                        recovered_text, recovered_symbol_mappings = _normalize_pdf_symbol_text(
+                            page,
+                            recovered_text,
+                            excluded_bboxes=table_bboxes,
+                        )
+                        native_symbol_mappings = _merge_symbol_mapping_evidence(
+                            native_symbol_mappings,
+                            recovered_symbol_mappings,
+                        )
                         text_without_tables = recovered_text
                         ocr_fallback_reason = ocr_attempt_reason
                         regions_enhanced = int(getattr(ocr_timings, "regions_enhanced", 0) or 0)
@@ -6395,6 +6456,7 @@ def _extract_pdfplumber_layout(
                     ocr_provider_cls_rotate_high_count=ocr_timings.provider_cls_rotate_high_count,
                     ocr_postprocess_elapsed_s=ocr_timings.postprocess_elapsed_s,
                     ocr_total_elapsed_s=ocr_timings.total_elapsed_s,
+                    native_symbol_glyph_mappings=native_symbol_mappings,
                 )
             )
     _filter_repeated_pdf_figure_regions(layouts)
@@ -6434,6 +6496,11 @@ def _attach_page_layout_metadata(metadata: dict[str, Any], page_layout: _PageLay
         metadata["ocr_rejected"] = True
     metadata["native_text_token_count"] = int(getattr(page_layout, "native_text_token_count", 0))
     metadata["final_text_token_count"] = int(getattr(page_layout, "final_text_token_count", 0))
+    symbol_mappings = getattr(page_layout, "native_symbol_glyph_mappings", ()) or ()
+    if symbol_mappings:
+        metadata["native_symbol_glyph_mappings"] = [
+            dict(mapping) for mapping in symbol_mappings if isinstance(mapping, Mapping)
+        ]
     if page_layout.ocr_engine_init_elapsed_s > 0.0:
         metadata["ocr_engine_init_elapsed_s"] = page_layout.ocr_engine_init_elapsed_s
     if page_layout.ocr_render_elapsed_s > 0.0:
@@ -6934,6 +7001,181 @@ def _line_is_unusable(
         )
         is not None
     )
+
+
+def _normalize_pdf_symbol_text(
+    page: Any,
+    text: str,
+    *,
+    bbox: Sequence[float] | None = None,
+    excluded_bboxes: Sequence[Sequence[float]] = (),
+) -> tuple[str, list[dict[str, Any]]]:
+    """Map only source-proven SymbolMT private glyphs to readable Unicode.
+
+    A private-use codepoint is ambiguous without its PDF font.  Normalize it
+    only when the extracted text count exactly matches the page's character
+    records in the selected region and every matching record uses SymbolMT.
+    The returned evidence keeps the original codepoint, font names, and boxes
+    alongside the replacement so consumers can trace the native text.
+    """
+
+    required = {
+        glyph: text.count(glyph)
+        for glyph in _PDF_SYMBOL_PRIVATE_GLYPHS
+        if glyph in text
+    }
+    if not required:
+        return text, []
+    try:
+        chars = getattr(page, "chars", ()) or ()
+    except Exception:
+        return text, []
+
+    mappings: list[dict[str, Any]] = []
+    replacements: dict[str, str] = {}
+    for glyph, text_count in required.items():
+        source_chars: list[tuple[Mapping[str, Any], tuple[float, float, float, float]]] = []
+        incomplete_source_record = False
+        for char in chars:
+            if not isinstance(char, Mapping) or str(char.get("text") or "") != glyph:
+                continue
+            try:
+                char_bbox = tuple(float(char[key]) for key in ("x0", "top", "x1", "bottom"))
+            except (KeyError, TypeError, ValueError):
+                incomplete_source_record = True
+                continue
+            if not all(math.isfinite(value) for value in char_bbox) or char_bbox[2] <= char_bbox[0] or char_bbox[3] <= char_bbox[1]:
+                incomplete_source_record = True
+                continue
+            if bbox is not None and not _boxes_overlap(bbox, char_bbox):
+                continue
+            if any(_boxes_overlap(char_bbox, excluded) for excluded in excluded_bboxes):
+                continue
+            source_chars.append((char, char_bbox))
+
+        if incomplete_source_record or len(source_chars) != text_count:
+            continue
+        font_names = sorted({str(char.get("fontname") or "").strip() for char, _ in source_chars})
+        if not font_names or any(
+            font_name.rsplit("+", 1)[-1].strip().casefold() != "symbolmt"
+            for font_name in font_names
+        ):
+            continue
+
+        replacements[glyph] = _PDF_SYMBOL_UNICODE_MAP[glyph]
+        mappings.append(
+            {
+                "source_codepoint": f"U+{ord(glyph):04X}",
+                "source_font_names": font_names,
+                "unicode_text": replacements[glyph],
+                "count": text_count,
+                "source_char_bboxes": [list(char_bbox) for _, char_bbox in source_chars],
+            }
+        )
+
+    for source_glyph, unicode_text in replacements.items():
+        text = text.replace(source_glyph, unicode_text)
+    return text, mappings
+
+
+def _merge_symbol_mapping_evidence(
+    existing: Sequence[Mapping[str, Any]],
+    additional: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge repeated evidence without counting the same native glyph twice."""
+
+    merged: dict[str, dict[str, Any]] = {}
+    for mapping in (*existing, *additional):
+        if not isinstance(mapping, Mapping):
+            continue
+        key = str(mapping.get("source_codepoint") or "")
+        if not key:
+            continue
+        current = merged.get(key)
+        if current is None:
+            current = dict(mapping)
+            current["source_font_names"] = sorted(
+                {str(name) for name in mapping.get("source_font_names", ()) if str(name)}
+            )
+            current["source_char_bboxes"] = [
+                list(box) for box in mapping.get("source_char_bboxes", ()) if isinstance(box, (list, tuple))
+            ]
+            merged[key] = current
+            continue
+        current["count"] = max(int(current.get("count", 0)), int(mapping.get("count", 0)))
+        current["source_font_names"] = sorted(
+            {
+                *current.get("source_font_names", ()),
+                *(str(name) for name in mapping.get("source_font_names", ()) if str(name)),
+            }
+        )
+        boxes = current.setdefault("source_char_bboxes", [])
+        for box in mapping.get("source_char_bboxes", ()):
+            if isinstance(box, (list, tuple)) and list(box) not in boxes:
+                boxes.append(list(box))
+    return list(merged.values())
+
+
+def _normalize_pdf_symbol_line_records(
+    page: Any,
+    lines: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Normalize only located native lines, leaving OCR transcriptions intact."""
+
+    normalized_lines: list[dict[str, Any]] = []
+    mapping_evidence: list[dict[str, Any]] = []
+    for raw_line in lines:
+        if not isinstance(raw_line, Mapping):
+            continue
+        line = dict(raw_line)
+        if str(line.get("source_kind") or "") == "pdf_native_text":
+            bbox = line.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                try:
+                    x0, top, x1, bottom = (float(value) for value in bbox[:4])
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if all(math.isfinite(value) for value in (x0, top, x1, bottom)) and x1 > x0 and bottom > top:
+                        text, mappings = _normalize_pdf_symbol_text(
+                            page,
+                            str(line.get("text") or ""),
+                            bbox=(x0, top, x1, bottom),
+                        )
+                        if mappings:
+                            line["text"] = text
+                            line["native_symbol_glyph_mappings"] = mappings
+                            mapping_evidence = _merge_symbol_mapping_evidence(
+                                mapping_evidence,
+                                mappings,
+                            )
+        normalized_lines.append(line)
+    return normalized_lines, mapping_evidence
+
+
+def _is_verified_pdf_symbol_line(page: Any, line: _PageTextLine) -> bool:
+    """Whether an isolated suspicious line contains only source-proven glyphs."""
+
+    text = str(line.text or "").strip()
+    required: dict[str, int] = {}
+    for character in text:
+        if character in _PDF_SYMBOL_PRIVATE_GLYPHS:
+            required[character] = required.get(character, 0) + 1
+        elif character not in _PDF_SYMBOL_LINE_CHARACTERS:
+            return False
+    if not required:
+        return False
+
+    _normalized, mappings = _normalize_pdf_symbol_text(
+        page,
+        text,
+        bbox=(line.x0, line.top, line.x1, line.bottom),
+    )
+    mapped_counts = {
+        str(mapping.get("source_codepoint")): int(mapping.get("count", 0))
+        for mapping in mappings
+    }
+    return all(mapped_counts.get(f"U+{ord(glyph):04X}") == count for glyph, count in required.items())
 
 
 def _merge_line_bands(

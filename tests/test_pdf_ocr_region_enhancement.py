@@ -26,6 +26,8 @@ from parsecore.parsers import (
     _ocr_enhancement_regions,
     _OcrStageTimings,
     _PageLayout,
+    _normalize_pdf_symbol_line_records,
+    _normalize_pdf_symbol_text,
     _page_text_lines,
     _strip_pdf_page_furniture_lines,
 )
@@ -306,6 +308,95 @@ class MixedPageEnhancementTests(unittest.TestCase):
             ]
         )
 
+    def test_symbolmt_private_glyphs_map_to_unicode_with_font_and_bbox_evidence(self) -> None:
+        glyphs = "\uf02d \uf0ae \uf0a3"
+        page = _FakePage([])
+        page.chars = [
+            {
+                "text": glyph,
+                "fontname": "KKENPA+SymbolMT",
+                "x0": 50.0 + index * 20.0,
+                "top": 200.0,
+                "x1": 60.0 + index * 20.0,
+                "bottom": 212.0,
+            }
+            for index, glyph in enumerate(("\uf02d", "\uf0ae", "\uf0a3"))
+        ]
+
+        normalized, evidence = _normalize_pdf_symbol_text(page, glyphs)
+
+        self.assertEqual(normalized, "- → ≤")
+        self.assertEqual(
+            {item["source_codepoint"]: item["unicode_text"] for item in evidence},
+            {"U+F02D": "-", "U+F0AE": "→", "U+F0A3": "≤"},
+        )
+        self.assertTrue(all(item["source_font_names"] == ["KKENPA+SymbolMT"] for item in evidence))
+        self.assertTrue(all(item["source_char_bboxes"] for item in evidence))
+
+    def test_private_glyph_is_not_mapped_for_unknown_font_or_incomplete_source(self) -> None:
+        glyph = "\uf0a3"
+        unknown_font = _FakePage([])
+        unknown_font.chars = [
+            {
+                "text": glyph,
+                "fontname": "ABCDEF+Helvetica",
+                "x0": 50.0,
+                "top": 200.0,
+                "x1": 60.0,
+                "bottom": 212.0,
+            }
+        ]
+        normalized_unknown, unknown_evidence = _normalize_pdf_symbol_text(unknown_font, glyph)
+        self.assertEqual(normalized_unknown, glyph)
+        self.assertEqual(unknown_evidence, [])
+
+        incomplete_source = _FakePage([])
+        incomplete_source.chars = [
+            {
+                "text": glyph,
+                "fontname": "KKENPA+SymbolMT",
+                "x0": 50.0,
+                "top": 200.0,
+                "x1": 60.0,
+                "bottom": 212.0,
+            },
+            {"text": glyph, "fontname": "KKENPA+SymbolMT"},
+        ]
+        normalized_incomplete, incomplete_evidence = _normalize_pdf_symbol_text(
+            incomplete_source,
+            glyph,
+        )
+        self.assertEqual(normalized_incomplete, glyph)
+        self.assertEqual(incomplete_evidence, [])
+
+    def test_only_native_symbol_lines_are_normalized(self) -> None:
+        glyph = "\uf0a3"
+        bbox = [50.0, 200.0, 60.0, 212.0]
+        page = _FakePage([])
+        page.chars = [
+            {
+                "text": glyph,
+                "fontname": "KKENPA+SymbolMT",
+                "x0": bbox[0],
+                "top": bbox[1],
+                "x1": bbox[2],
+                "bottom": bbox[3],
+            }
+        ]
+
+        lines, evidence = _normalize_pdf_symbol_line_records(
+            page,
+            [
+                {"text": glyph, "bbox": bbox, "source_kind": "pdf_native_text"},
+                {"text": glyph, "bbox": bbox, "source_kind": "pdf_ocr_fallback"},
+            ],
+        )
+
+        self.assertEqual(lines[0]["text"], "≤")
+        self.assertEqual(lines[1]["text"], glyph)
+        self.assertEqual(lines[0]["native_symbol_glyph_mappings"], evidence)
+        self.assertEqual(evidence[0]["source_char_bboxes"], [bbox])
+
     def test_only_the_region_is_rendered_and_the_good_text_survives(self) -> None:
         page = self._page()
         engine = _RecordingEngine([(_box(2.0, 2.0, 60.0, 12.0), "Torque value", 0.95)])
@@ -350,6 +441,93 @@ class MixedPageEnhancementTests(unittest.TestCase):
         self.assertEqual(reason, "mixed_page_regions")
         self.assertIn("Torque value", text or "")
         self.assertIn(USABLE_ONE, text or "")
+
+    def test_known_native_symbol_glyphs_do_not_trigger_empty_ocr_review(self) -> None:
+        parser = _parser()
+        engine = _RecordingEngine([])
+
+        for symbol in ("\uf02d", "\uf0ae", "\uf0a3", "\uf02d -"):
+            with self.subTest(symbol=repr(symbol)):
+                page = _FakePage(
+                    [_line(USABLE_ONE, 100.0), _line(symbol, 200.0), _line(USABLE_TWO, 300.0)]
+                )
+                glyphs = [character for character in symbol if character in "\uf02d\uf0ae\uf0a3"]
+                page.chars = [
+                    {
+                        "text": character,
+                        "fontname": "KKENPA+SymbolMT",
+                        "x0": 50.0,
+                        "top": 200.0,
+                        "x1": 60.0,
+                        "bottom": 212.0,
+                    }
+                    for character in glyphs
+                ]
+                with patch.object(
+                    parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)
+                ):
+                    text, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                        page, [], 1, "\n".join([USABLE_ONE, symbol, USABLE_TWO])
+                    )
+
+                self.assertIsNone(text)
+                self.assertIsNone(reason)
+                self.assertIsNone(error)
+                self.assertEqual(engine.calls, 0)
+                self.assertEqual(page.cropped, [])
+
+    def test_same_private_use_glyph_from_unknown_font_still_requires_ocr_review(self) -> None:
+        page = _FakePage([_line(USABLE_ONE, 100.0), _line("\uf02d", 200.0)])
+        page.chars = [
+            {
+                "text": "\uf02d",
+                "fontname": "ABCDEF+Helvetica",
+                "x0": 50.0,
+                "top": 200.0,
+                "x1": 60.0,
+                "bottom": 212.0,
+            }
+        ]
+        engine = _RecordingEngine([])
+        parser = _parser()
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                page, [], 1, f"{USABLE_ONE}\n\uf02d"
+            )
+
+        self.assertIsNone(text)
+        self.assertEqual(reason, "mixed_page_regions")
+        self.assertEqual(error, "empty_ocr_text")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(len(page.cropped), 1)
+
+    def test_verified_symbol_glyph_mixed_with_body_garble_still_requires_ocr_review(self) -> None:
+        mixed_line = f"\uf02d {GARBLED}"
+        page = _FakePage([_line(USABLE_ONE, 100.0), _line(mixed_line, 200.0)])
+        page.chars = [
+            {
+                "text": "\uf02d",
+                "fontname": "KKENPA+SymbolMT",
+                "x0": 50.0,
+                "top": 200.0,
+                "x1": 60.0,
+                "bottom": 212.0,
+            }
+        ]
+        engine = _RecordingEngine([])
+        parser = _parser()
+
+        with patch.object(parser, "_ensure_pdf_ocr_engine", return_value=(engine, None, 0.0)):
+            text, reason, error, _timings = parser._maybe_recover_page_with_ocr(
+                page, [], 1, f"{USABLE_ONE}\n{mixed_line}"
+            )
+
+        self.assertIsNone(text)
+        self.assertEqual(reason, "cid_dense")
+        self.assertEqual(error, "empty_ocr_text")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(len(page.cropped), 1)
 
     def test_parse_drops_split_edge_furniture_and_keeps_page_content(self) -> None:
         running_identifier = "1234567890---"

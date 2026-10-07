@@ -61,7 +61,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 文档导航
 
-- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮开发入口；五项待办覆盖原生结构保真、区域与段落、表格、OCR/缓存和结果一致性，明确被替代逻辑的删除条件，以样本效果和耗时验收（文件名保留以兼容旧链接，MinerU 已移出本轮）
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮开发入口；保留五项原始目标与验收标准，列明 2026-10-07 完成状态，第 7 节以复核读取、样本质量和接入收口三项继续开发，沿用代码瘦身要求（文件名保留以兼容旧链接，MinerU 已移出本轮）
 - [docs/adr-p0-02-run-publication-contract.md](docs/adr-p0-02-run-publication-contract.md)：run / 状态 / 发布指针契约冻结（P0-02）；明确 `done` 不等于 `published`、三套状态机、存储能力与 SQLite/Postgres 迁移设计
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、25 项故障注入验证与未完成范围
@@ -82,7 +82,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - [docs/parsecore-productization-todo.md](docs/parsecore-productization-todo.md)：后续阶段产品化待办（历史快照，已被 spec 取代）
 - [docs/parsecore-data-quality-pipeline-plan.md](docs/parsecore-data-quality-pipeline-plan.md)：中等改动升级计划，覆盖异步解析、结构化表格、质量信号与未来深度改造承接
 - [docs/local-provider-ir-upgrade-plan.md](docs/local-provider-ir-upgrade-plan.md)：历史本地 Provider 与 IR 技术方案及验收记录；不代表本轮继续扩大解析引擎或重构范围
-- [docs/gray-deployment.md](docs/gray-deployment.md)：queue-worker + Postgres + pgvector 灰度推荐配置与回滚口径
+- [docs/gray-deployment.md](docs/gray-deployment.md)：SQLite 发布灰度与 Postgres/pgvector 联调的边界、启动和回滚口径
 
 ## 目录结构
 
@@ -137,46 +137,58 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 快速开始
 
-安装为开发模式：
+在仓库根目录使用 Python 3.13 或以上创建虚拟环境，安装本地常用解析能力：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e .
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[parsers]"
 ```
 
 如果要启动 API：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[api]"
+.\.venv\Scripts\python.exe -m pip install -e ".[api]"
 ```
 
 如果要运行完整单测：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
 ```
 
 查看当前骨架描述：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
 ```
 
-模拟提交一个解析任务：
+创建一个文本样本并提交真实解析任务：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli submit --config parsecore.toml --doc-id demo-doc --file-path samples/demo.docx --media-type application/vnd.openxmlformats-officedocument.wordprocessingml.document
+New-Item -ItemType Directory -Force .\samples | Out-Null
+Set-Content -LiteralPath .\samples\demo.txt -Value "ParseCore demo: native text parsing." -Encoding UTF8
+.\.venv\Scripts\python.exe -m parsecore.cli submit --config parsecore.toml --doc-id demo-doc --file-path samples/demo.txt --media-type text/plain
 ```
 
 启动本地 API：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
+.\.venv\Scripts\python.exe -m parsecore.cli serve --config parsecore.toml --host 127.0.0.1 --port 8090
 ```
+
+在另一个终端上传上面的样本并读取正式结果：
+
+```powershell
+curl.exe -sS -F "file=@samples/demo.txt;type=text/plain" -F "doc_id=demo-upload" -F "profile=auto" http://127.0.0.1:8090/v1/parse
+Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-upload?projection=structured"
+```
+
+解析完成不一定代表已经发布。若 `/publication` 返回 `preview_only`，先按明确的 `run_id` 读取 `/preview`，复核后调用 `/publication/publish`；完整 SDK、上传和复核示例见 [使用说明](docs/user-guide.md)。当前正式版本发布和待审内容读取由 SQLite 提供，Postgres/pgvector 示例用于存储与索引联调，尚未通过正式发布验收。
 
 启动本地 queue worker：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli worker --config parsecore.queue.toml
+.\.venv\Scripts\python.exe -m parsecore.cli worker --config parsecore.queue.toml
 ```
 
 用容器启动 API + worker：
@@ -233,25 +245,25 @@ docker compose --profile pgvector up -d --build
 运行测试：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 ```
 
 运行默认自检门禁：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check
+.\.venv\Scripts\python.exe -m parsecore.cli self-check
 ```
 
 运行 slow/full 专项自检：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile slow
+.\.venv\Scripts\python.exe -m parsecore.cli self-check --profile slow
 ```
 
 运行 perf 长尾性能跟踪：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --profile perf
+.\.venv\Scripts\python.exe -m parsecore.cli self-check --profile perf
 ```
 
 说明：
@@ -265,8 +277,8 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 运行大 PDF part 调度压测：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
+.\.venv\Scripts\python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --generate-pages 1000 --target-pages-per-part 200
+.\.venv\Scripts\python.exe -m parsecore.cli large-pdf-stress --config parsecore.toml --pdf D:/samples/large.pdf --target-pages-per-part 200 --execute-parts --max-parts 3
 ```
 
 说明：默认只做 plan-only，避免误跑超长任务；加 `--execute-parts` 后会 inline 执行 part，可用 `--max-parts` 先抽样压测。压测默认强制使用一次性临时 SQLite，报告生成后自动删除，不会把计划分片写入 `parsecore.toml` 或 `PARSECORE_DATABASE_URL` 指向的共享队列。只有确实需要跨命令保留压测任务时才可显式追加 `--use-configured-job-store`，并且应让配置指向专用测试库，禁止对生产或共享任务库使用该开关。
@@ -274,7 +286,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 运行 P1 契约冻结与宿主接入验收：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
+.\.venv\Scripts\python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
 ```
 
 该门禁覆盖 6 类 schema、最小/复杂/异常/part-rerun 四组样例（24 个 payload）、旧 projection 兼容、IR→Reader 可追溯、coverage 一致性和动作合同四阶段。
@@ -282,13 +294,13 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pars
 运行 OCR 长尾专项 benchmark：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/ocr_benchmark.py --config parsecore.toml --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
+.\.venv\Scripts\python.exe tools/ocr_benchmark.py --config parsecore.toml --pdf samples/heavy-ocr.pdf --out var/self-check/ocr-benchmark.json
 ```
 
 运行 Excel 真实样本质量报告：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/excel_sample_quality.py --config parsecore.toml --sample-dir D:/app/uploads --out-json var/self-check/excel-sample-quality.json --out-md var/self-check/excel-sample-quality.md
+.\.venv\Scripts\python.exe tools/excel_sample_quality.py --config parsecore.toml --sample-dir D:/app/uploads --out-json var/self-check/excel-sample-quality.json --out-md var/self-check/excel-sample-quality.md
 ```
 
 说明：该报告会扫描 `.xls/.xlsx/.xlsm` 样本，输出每个文件的 `tables / titled_tables / merged_cell_tables / empty_tables / truncated_tables / issues`，用于在真实表格文档上固定解析质量口径。
@@ -296,7 +308,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/e
 运行轻量解析性能基线：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
+.\.venv\Scripts\python.exe tools/parse_perf_baseline.py --config parsecore.toml --sample-dir D:/app/uploads --extensions .xls,.xlsx,.xlsm --out-json var/self-check/parse-perf-baseline.json --out-md var/self-check/parse-perf-baseline.md
 ```
 
 说明：该基线输出每个样本的 `elapsed_s / peak_kb / mb_per_s / blocks / chunks / tables`，并追加 `primary_provider_id / best_provider_id / best_provider_score / provider_report.comparison_report`，默认只扫表格扩展名；需要覆盖 PDF/DOCX 时可显式传 `--extensions .pdf,.docx,.xls,.xlsx,.xlsm`。为兼容历史内存基线，该工具默认启用 `tracemalloc`；只测量低干扰端到端延迟时追加 `--no-track-python-memory`，两种通道不得混作同一耗时序列。
@@ -304,9 +316,9 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 运行本地 Provider 离线对比：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample samples/manual.pdf --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.json --out-md var/self-check/provider-comparison.md
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/provider-suite.fast.json --fixture-root D:/app/uploads --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.suite.json --out-md var/self-check/provider-comparison.suite.md
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/provider_comparison_report.py --config parsecore.toml --sample samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --sample samples/manual.pdf --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.json --out-md var/self-check/provider-comparison.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --suite var/regression/provider-suite.fast.json --fixture-root D:/app/uploads --provider pdf-text --provider pymupdf4llm-local --out-json var/self-check/provider-comparison.suite.json --out-md var/self-check/provider-comparison.suite.md
+.\.venv\Scripts\python.exe tools/provider_comparison_report.py --config parsecore.toml --sample samples/manual.pdf --provider pdf-text --page-start 200 --page-end 230 --out-json var/self-check/provider-comparison.part.json --out-md var/self-check/provider-comparison.part.md
 ```
 
 说明：该报告对同一样本逐个运行已配置的本地 parser，输出每个 Provider 的 `ir_summary / coverage_summary / provider_report.comparison_report`；未配置或不支持的候选会标为 `skipped`，不会调用外部 OCR API。`--suite` 支持直接读取 `samples / fixtures / cases` 清单，也兼容现有 `entries -> baseline -> fixtures` 的回归套件格式；样本条目可单独配置 `providers / provider_ids / profile / fixture_relative_path / page_range`。对 PDF 可额外传 `--page-start / --page-end`，或在 suite 样本里声明 `page_range`，只评估指定页段并在报告中保留原始页码，适合大文档异常页、采样页和 part 模式灰度对比。
@@ -314,7 +326,7 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/p
 只重算 chunk / embedding（跳过重新解析源文件）：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli submit --config parsecore.toml --doc-id demo-doc --file-path samples/demo.docx --media-type application/vnd.openxmlformats-officedocument.wordprocessingml.document --mode rerun_chunks_only
+.\.venv\Scripts\python.exe -m parsecore.cli submit --config parsecore.toml --doc-id demo-doc --file-path samples/demo.docx --media-type application/vnd.openxmlformats-officedocument.wordprocessingml.document --mode rerun_chunks_only
 ```
 
 显式 API 路由：
@@ -500,7 +512,7 @@ options = { endpoint_path = "/ocr/v1", headers = { "X-OCR-Tenant" = "tenant-a" }
 
 ```powershell
 $env:PARSECORE_EMBEDDING_API_KEY = "..."
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/_embedding_smoke.py
+.\.venv\Scripts\python.exe tools/_embedding_smoke.py
 ```
 
 说明：
@@ -538,4 +550,6 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 
 `regression_baseline.py save` 写入 schema version 2 元数据，记录基线版本、源码 commit 和 tracked tree 状态；无 Git 环境仍可保存并标记来源未知。只有来源证据声明为 `exact_commit_run` 时，才要求源码 commit 已知且 tracked tree clean。
 
-`tools/regression_baseline_registry.py validate` 可离线校验登记工件的相对路径、SHA-256、元数据和指定投影，不解析 PDF。R4 对照登记在 `var/regression/baseline-registry.json`，独立项目609 suite 位于 `var/regression/suite.project609.json`；默认 suite 和旧冻结基线保持原样。
+`tools/regression_baseline_registry.py validate` 可离线校验登记工件的相对路径、SHA-256、元数据和指定投影，不解析 PDF。R4 对照登记在 `var/regression/baseline-registry.json`，独立项目609 suite 位于 `var/regression/suite.project609.json`；原冻结快照和项目609快照保留，历史登记缺失的证据不由新快照补认。
+
+日常 `suite.fast.json` 与 `provider-suite.fast.json` 使用 `baseline.native-preservation-20261007.*.json` 三种配置快照，来源核查在 `var/regression/evidence.native-preservation-20261007.json`。这组快照绑定样本 SHA-256、修改中源码文件哈希和原页抽查，供后续发现回归；不代表通用识别准确率金标。生成快照时，待审 run 的结构指标从指定 run 的封存预览读取，避免混入旧正式版本。跨机器执行需自行提供相同 PDF，并设置 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向其目录；原页核查、性能测量与验证边界见 [本轮结果](docs/parsecore-reliability-mineru-todo-20260920.md#8-本轮开发结果2026-10-07)。

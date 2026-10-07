@@ -152,6 +152,7 @@ class PublishedSnapshotTests(unittest.TestCase):
             "served_run_id": run_id,
             "run_identity": run_id,
             "pinned": True,
+            "is_formal_version": True,
             "publication_status": PublicationStatus.PUBLISHED.value,
             "publication_generation": 1,
             "consumer_signal": "published",

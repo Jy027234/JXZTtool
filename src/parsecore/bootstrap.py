@@ -11,6 +11,7 @@ from .capabilities import (
     index_backend_for,
     known_index_modes,
     validate_capability_configuration,
+    validate_run_artifact_profile,
 )
 from .config import load_settings
 from .embeddings import EmbeddingConfigurationError, build_embedding_provider
@@ -176,6 +177,15 @@ def build_runtime(
         # ``database_url_override`` may reintroduce a mismatch (for example a
         # SQLite test URL with ``index.mode = 'pgvector'``), so re-validate.
         validate_capability_configuration(settings)
+
+    index_type = (
+        PgVectorIndex
+        if index_backend_for(settings.database_url, settings.index_mode) == "pgvector"
+        else NullIndex
+    )
+    validate_run_artifact_profile(
+        settings, index_run_isolation=bool(index_type.supports_run_isolation)
+    )
 
     boundary_refiner = None
     if settings.providers.llm.enabled:

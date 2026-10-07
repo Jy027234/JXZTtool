@@ -1,0 +1,832 @@
+{
+  "schema": "parsecore-native-preservation-evidence/v1",
+  "evidence_id": "native-preservation-20261007",
+  "baseline_kind": "reviewed_candidate_regression_snapshot",
+  "accuracy_gold": false,
+  "source_context": {
+    "source_commit": "f3b80c421c45bb8aeb8dbae3a8e5aef07e26e7d7",
+    "source_tree_state": "dirty",
+    "source_files_sha256": {
+      "parsecore.toml": "7d37239671ae9af116bc521fee951c4566abc4393e0519333c2ce4b8e41f2174",
+      "src/parsecore/api_payloads.py": "51efb06176fbcdd86e5d4ceb9ea33bea613cefe2703917c8f0245c25a2ab71c1",
+      "src/parsecore/api_routes.py": "e3bdfa164028c1d8e5d6510c70954a7171423eaef3b686d19c882234cdc2f06a",
+      "src/parsecore/bootstrap.py": "411561024edb985fdda9bba95a4c526f40e39d9fbfbeaaca24b34218058b91df",
+      "src/parsecore/capabilities.py": "8ab74d083acdbd554ef3212169cef72723deeac703cd20f378b5f4929a3860ca",
+      "src/parsecore/garble.py": "43a01d49294ae14c77121d09343793342e213b9fc3fe4b52828e280afd1623d1",
+      "src/parsecore/parsers.py": "5405aa9ff3f765db5d40072aeb975a726a0f698790143db7315b4ea65bab4c26",
+      "src/parsecore/pipelines.py": "e8d477dd734b369f39b95d0620da408de7524d082d16924d719be17658972a30",
+      "src/parsecore/run_store.py": "d5af173d11032cc348ddb820c65b85a9bf9d865a56d5186e5607daa50dc0ba44",
+      "src/parsecore/runtime.py": "58efc3fc3871b621b22b2e91617feb1c7cbbbb5b8dcf471d15cedd97e1c62c41",
+      "tools/regression_baseline.py": "6fad357a1992fe1873cee2e576c6d8c4273006eab131509a200f07c900a43233"
+    },
+    "fixture_sha256": "aaa5f0a33f6bb716e407052842ab60f505b5e319cfb87b448a7249d28b678dcf"
+  },
+  "sample": {
+    "fixture_relative_path": "36d65cd6b61346e28e97dbaf829646de.pdf",
+    "sha256": "aaa5f0a33f6bb716e407052842ab60f505b5e319cfb87b448a7249d28b678dcf",
+    "pages": 297,
+    "size_bytes": 2634672
+  },
+  "preserved_historical_baselines_sha256": {
+    "baseline.json": "1dae539be21f65c763eeb0074d6d4f32fec786fedad413b5e11874e3c281af20",
+    "baseline.table-structure.primary.json": "c0a7b30735c8d4f4ce2a951edc844407f212746edeba32ccccc574fa40276310",
+    "baseline.strip_hf.json": "09976a56a70fa3b782f3de8d6a236f9485d578814297903029910fca213263d1",
+    "baseline.project609.609b25b.json": "2e26af88db0f920ceb7be19063ca94fe24a74e631d8a736147faeed12fe5a226"
+  },
+  "local_source_artifacts_sha256": {
+    "final/verified-result.json": "cdb071a59f8af21c63b296670d21452b6c805b20d28b5da78b1a1241bf42b8b4",
+    "reference609/result.json": "c88a2e914059bbff924dde4c5f0a26f7ba877fd8eb1cb57a578958bc05f0e94a",
+    "reference609-before-delta.json": "e206accc816a556dd13efede99a1c597de07ff76ced7c4b19424f06de8dadfae",
+    "paragraph-attribution/attribution.json": "c3e242c40b35e2eb1aca238c7d60d2c9ddc5376a1b3483470ff6481e4ec56268",
+    "regression-drift/drift_evidence_after_fix.json": "f7df60df9e7354b069060ad95a560a9b96ed411811247b1d2dd8ef27e0eb4bce"
+  },
+  "reviewed_ocr_pages": [
+    {
+      "page": 29,
+      "blocks": 3,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 17
+    },
+    {
+      "page": 51,
+      "blocks": 8,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 5
+    },
+    {
+      "page": 58,
+      "blocks": 1,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 6
+    },
+    {
+      "page": 142,
+      "blocks": 13,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 3
+    },
+    {
+      "page": 179,
+      "blocks": 10,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 5
+    },
+    {
+      "page": 185,
+      "blocks": 15,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 3
+    },
+    {
+      "page": 186,
+      "blocks": 3,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 2
+    },
+    {
+      "page": 195,
+      "blocks": 7,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 3
+    },
+    {
+      "page": 196,
+      "blocks": 4,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 2
+    },
+    {
+      "page": 215,
+      "blocks": 8,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 3
+    },
+    {
+      "page": 217,
+      "blocks": 13,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 3
+    },
+    {
+      "page": 218,
+      "blocks": 4,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 2
+    },
+    {
+      "page": 20,
+      "blocks": 33,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 21,
+      "blocks": 24,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 32,
+      "blocks": 11,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 143,
+      "blocks": 7,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 282,
+      "blocks": 4,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 286,
+      "blocks": 8,
+      "ocr_attempt_reasons": [
+        "repeated_short_tokens"
+      ],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    },
+    {
+      "page": 291,
+      "blocks": 4,
+      "ocr_attempt_reasons": [],
+      "ocr_error_reasons": [],
+      "private_symbol_codepoints_remaining": [],
+      "native_symbol_mapping_count": 0
+    }
+  ],
+  "source_symbol_mapping": {
+    "font": "SymbolMT (PDF subset prefixes allowed)",
+    "mapping": {
+      "U+F02D": "-",
+      "U+F0AE": "→",
+      "U+F0A3": "≤"
+    },
+    "conditions": "exact source character count, selected source region and valid bboxes, verified font; unknown or mixed fonts remain unresolved"
+  },
+  "untouched_spot_checks": [
+    {
+      "page": 32,
+      "kind": "ordinary_native_text",
+      "visual_reviewed": true,
+      "current_native_text_values_present": {
+        "no-connected cable": true,
+        "320-366-701-0": true,
+        "C135": true,
+        "C139": true,
+        "C140": true,
+        "C141": true
+      },
+      "all_present": true,
+      "ocr_attempt_reason": null,
+      "visual_observation": "正文关键连接器编号与线缆关系均可在原页和解析块中找到。"
+    },
+    {
+      "page": 282,
+      "kind": "illustrated_parts_table",
+      "visual_reviewed": true,
+      "current_table_shape": [
+        2,
+        5
+      ],
+      "expected_visual_columns": {
+        "0": [
+          "2 170",
+          "-170A",
+          "180",
+          "-180A",
+          "190",
+          "-190A"
+        ],
+        "1": [
+          "320-288-201-0",
+          "320-396-901-0",
+          "649-672-002-0",
+          "NAS1102E04-4",
+          "TFER1-8",
+          "TFER1-8X"
+        ],
+        "4": [
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "AR",
+          "AR"
+        ]
+      },
+      "current_parsed_columns": {
+        "0": [
+          "2 170",
+          "-170A",
+          "180",
+          "-180A",
+          "190",
+          "-190A"
+        ],
+        "1": [
+          "320-288-201-0",
+          "320-396-901-0",
+          "649-672-002-0",
+          "NAS1102E04-4",
+          "TFER1-8",
+          "TFER1-8X"
+        ],
+        "4": [
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "AR",
+          "AR"
+        ]
+      },
+      "columns_match": {
+        "0": true,
+        "1": true,
+        "4": true
+      },
+      "ocr_attempt_reason": null,
+      "visual_observation": "图号、零件号、用量列的顺序与原页一致；未见重复或缺项。"
+    },
+    {
+      "page": 286,
+      "kind": "illustrated_parts_table",
+      "visual_reviewed": true,
+      "current_table_shape": [
+        2,
+        5
+      ],
+      "expected_visual_columns": {
+        "0": [
+          "3 - 1",
+          "- 1A",
+          "- 1B",
+          "10",
+          "- 10A",
+          "- 10B",
+          "- 10C",
+          "20",
+          "- 20A",
+          "- 20B",
+          "- 20C",
+          "- 30"
+        ],
+        "1": [
+          "Deleted",
+          "320-366-701-0",
+          "320-401-201-0",
+          "602-8001-10",
+          "LPNF5200001",
+          "602-8001-10C07",
+          "LPNF5200002",
+          "1338T24-29-1",
+          "IC504-24-29R",
+          "D230-24-29-1",
+          "IC504-24-411",
+          "097-0104-16"
+        ],
+        "3": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "B",
+          "B",
+          "C"
+        ],
+        "4": [
+          "RF",
+          "RF",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1"
+        ]
+      },
+      "current_parsed_columns": {
+        "0": [
+          "3 - 1",
+          "- 1A",
+          "- 1B",
+          "10",
+          "- 10A",
+          "- 10B",
+          "- 10C",
+          "20",
+          "- 20A",
+          "- 20B",
+          "- 20C",
+          "- 30"
+        ],
+        "1": [
+          "Deleted",
+          "320-366-701-0",
+          "320-401-201-0",
+          "602-8001-10",
+          "LPNF5200001",
+          "602-8001-10C07",
+          "LPNF5200002",
+          "1338T24-29-1",
+          "IC504-24-29R",
+          "D230-24-29-1",
+          "IC504-24-411",
+          "097-0104-16"
+        ],
+        "3": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "B",
+          "B",
+          "C"
+        ],
+        "4": [
+          "RF",
+          "RF",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1",
+          "ALT",
+          "1"
+        ]
+      },
+      "columns_match": {
+        "0": true,
+        "1": true,
+        "3": true,
+        "4": true
+      },
+      "ocr_attempt_reason": "repeated_short_tokens",
+      "visual_observation": "图号、零件号、用量列的顺序与原页一致；未见重复或缺项。"
+    }
+  ],
+  "regression_drift_review": {
+    "total_blocks": {
+      "project609_reproduced": 2221,
+      "before_goal": 2275,
+      "candidate": 2047,
+      "changed_pages_after_fix": 38,
+      "finding": "609b25b re-executed with the identical source SHA. +54 before-goal growth localized to 7 net-growth pages; most were source-backed paragraph splitting. The current reduction chiefly removes false OCR fragmentation, including damaged LEP rows and incorrect 4-130/610C. Counts alone are not accuracy."
+    },
+    "numeric_and_header_footer": {
+      "before_goal_numeric": 85,
+      "before_goal_suspected_hf": 86,
+      "candidate_numeric": 52,
+      "candidate_suspected_hf": 53,
+      "finding": "The two heuristics overlap: short numeric text is also counted as suspected HF. Source part IDs, dates and repair values are legitimate; no deletion by these count labels and no tolerance relaxation."
+    },
+    "heading_body_binding": {
+      "before_goal_recomputed_same_blocks": 0.8966,
+      "after_rule_recomputed_same_blocks": 0.825,
+      "candidate": 0.766,
+      "source_pages": [
+        73,
+        82,
+        201,
+        247
+      ],
+      "finding": "Product number prefixes, unpunctuated operations and SB branch labels are not headings; inline heading plus prose is bound, but adjacent child headings are not body. The stricter denominator changes the metric definition; a lower value is not evidence of worse recognition."
+    },
+    "changed_page_diagnostics": [
+      {
+        "page": 9,
+        "before_blocks": 10,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 15,
+        "before_blocks": 13,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 17,
+        "before_blocks": 23,
+        "after_blocks": 4,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 18,
+        "before_blocks": 17,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 19,
+        "before_blocks": 16,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 20,
+        "before_blocks": 53,
+        "after_blocks": 33,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 21,
+        "before_blocks": 43,
+        "after_blocks": 24,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 22,
+        "before_blocks": 24,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "pdf_name_dense"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 29,
+        "before_blocks": 3,
+        "after_blocks": 3,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 30,
+        "before_blocks": 14,
+        "after_blocks": 14,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 31,
+        "before_blocks": 13,
+        "after_blocks": 13,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 33,
+        "before_blocks": 1,
+        "after_blocks": 1,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 34,
+        "before_blocks": 5,
+        "after_blocks": 5,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 35,
+        "before_blocks": 7,
+        "after_blocks": 7,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 50,
+        "before_blocks": 15,
+        "after_blocks": 15,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 51,
+        "before_blocks": 8,
+        "after_blocks": 8,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 52,
+        "before_blocks": 11,
+        "after_blocks": 11,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 58,
+        "before_blocks": 1,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 59,
+        "before_blocks": 13,
+        "after_blocks": 4,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 60,
+        "before_blocks": 40,
+        "after_blocks": 1,
+        "before_ocr_attempt": [
+          "repeated_short_tokens"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 62,
+        "before_blocks": 8,
+        "after_blocks": 3,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 82,
+        "before_blocks": 8,
+        "after_blocks": 8,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 111,
+        "before_blocks": 24,
+        "after_blocks": 12,
+        "before_ocr_attempt": [
+          "repeated_short_tokens"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 142,
+        "before_blocks": 13,
+        "after_blocks": 13,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 143,
+        "before_blocks": 18,
+        "after_blocks": 7,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 179,
+        "before_blocks": 10,
+        "after_blocks": 10,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 185,
+        "before_blocks": 15,
+        "after_blocks": 15,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 186,
+        "before_blocks": 3,
+        "after_blocks": 3,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 193,
+        "before_blocks": 13,
+        "after_blocks": 9,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 195,
+        "before_blocks": 7,
+        "after_blocks": 7,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 196,
+        "before_blocks": 4,
+        "after_blocks": 4,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 201,
+        "before_blocks": 15,
+        "after_blocks": 6,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 215,
+        "before_blocks": 8,
+        "after_blocks": 8,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 216,
+        "before_blocks": 7,
+        "after_blocks": 7,
+        "before_ocr_attempt": [],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 217,
+        "before_blocks": 13,
+        "after_blocks": 13,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 218,
+        "before_blocks": 4,
+        "after_blocks": 4,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 231,
+        "before_blocks": 7,
+        "after_blocks": 7,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      },
+      {
+        "page": 232,
+        "before_blocks": 15,
+        "after_blocks": 9,
+        "before_ocr_attempt": [
+          "mixed_page_regions"
+        ],
+        "after_ocr_attempt": []
+      }
+    ]
+  },
+  "candidate_quality": {
+    "total_blocks": 2004,
+    "page_count": 297,
+    "very_short_ratio": 0.045409181636726546,
+    "numeric_heavy_total": 52,
+    "suspected_header_footer_total": 53
+  },
+  "candidate_structure_quality": {
+    "chapter_coverage_rate": 0.2043,
+    "counts": {
+      "audit_artifact_items": 43,
+      "body_like_headings": 47,
+      "heading_items": 230,
+      "noise_items": 0,
+      "quality_denominator_items": 2004,
+      "toc_items": 370,
+      "total_items": 2047
+    },
+    "directory_recognition_rate": 0.2245,
+    "evidence_binding_strength": 1.0,
+    "heading_body_binding_rate": 0.766,
+    "noise_ratio": 0.0,
+    "structure_usability_score": 0.639,
+    "toc_recognition_rate": 0.2245
+  },
+  "preview_delivery": {
+    "run": {
+      "parse_run_id": "run-33aaaea98d4f442c",
+      "job_id": "job-f8f50e1ad8fc",
+      "doc_id": "perf-warmup-1",
+      "tenant_id": "perf-baseline",
+      "execution_status": "succeeded",
+      "validation_status": "warning",
+      "publication_status": "unpublished"
+    },
+    "publication": {
+      "schema_version": "2026-09-publication-read-context-v1",
+      "served_run_id": "run-33aaaea98d4f442c",
+      "run_identity": "run-33aaaea98d4f442c",
+      "pinned": false,
+      "is_formal_version": false,
+      "publication_status": "unpublished",
+      "publication_generation": 0,
+      "consumer_signal": "preview_only",
+      "latest_job_used_as_formal_version": false
+    },
+    "content_blocks": 2047,
+    "chunks": 2004,
+    "scope": "Local sealed run SDK preview. Synthetic OLD/NEW actual loopback HTTP review, records and export additionally passed; no production deployment or full-document human approval claimed."
+  },
+  "known_limits": [
+    "Page 5 suspect_signature_pages warning remains unpublished for review; the preview allows explicit assessment.",
+    "Page 51 figure labels are retained in image source regions, not indexed as body text.",
+    "Page 286 non-table repeated_short_tokens attempt remains; protected table columns and selected values match source.",
+    "Sampled illustrated-parts tables preserve ordered values within columns but may combine visual data rows in one multiline cell; this is not a complete cell geometry or general accuracy gold.",
+    "Page 264 indentation hierarchy and some interleaved margin R punctuation remain observed fidelity limits.",
+    "Real Chinese double-column material, remote models, Postgres/pgvector publication and production deployment were not validated.",
+    "Five historical registered evidence files remain missing; this new evidence does not restore or authenticate them."
+  ]
+}

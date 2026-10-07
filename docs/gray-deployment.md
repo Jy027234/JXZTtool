@@ -1,8 +1,10 @@
 # 灰度推荐配置
 
-## 默认灰度档
+## SQLite 发布灰度与 pgvector 联调
 
-推荐以 `parsecore.pgvector.toml.example` 作为灰度基线：
+需要待审读取和正式版本发布时，以 `parsecore.queue.toml` 的 SQLite 配置开始受控验证。当前 PostgresRunStore 不支持原子发布，pgvector 也未实现文档 run 隔离；这两项不在本轮新增后端范围内。
+
+`parsecore.pgvector.toml.example` 用于存储与索引联调，不能作为正式发布已验收的生产基线：
 
 - `execution_mode = "queue-worker"`
 - `database_url = "postgresql://parsecore:parsecore@parsecore-postgres:5432/parsecore"`
@@ -16,6 +18,15 @@
 已完成选型时可改用 `parsecore.pgvector.local-embedding.toml.example`（本地 384 维模型，镜像需安装 `.[local-embedding]`）或 `parsecore.pgvector.remote-embedding.toml.example`（远程网关，需通过环境变量注入凭证）。两者都不会修改默认配置；切换维度时必须迁移或重建 pgvector 表。
 
 ## 启动
+
+SQLite API + worker：
+
+```powershell
+$env:PARSECORE_RUNTIME_CONFIG = "./parsecore.queue.toml"
+docker compose up -d --build
+```
+
+Postgres/pgvector 联调：
 
 ```powershell
 $env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.toml.example"
@@ -32,17 +43,17 @@ docker compose --profile pgvector up -d --build
 ## 灰度前检查
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli self-check --skip-regression
+.\.venv\Scripts\python.exe -m parsecore.cli self-check --skip-regression
 ```
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.pgvector.toml.example
+.\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.pgvector.toml.example
 ```
 
 若有 Postgres 可用，设置 `PARSECORE_TEST_POSTGRES_URL` 后运行：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unittest tests.test_postgres_stores
+.\.venv\Scripts\python.exe -m unittest tests.test_postgres_stores
 ```
 
 ## 灰度中观察
@@ -82,13 +93,13 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m unit
 运行中的 API 可直接生成快照：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --since-hours 24 --sample-size 200 --out var/self-check/gray-baseline.json
+.\.venv\Scripts\python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --since-hours 24 --sample-size 200 --out var/self-check/gray-baseline.json
 ```
 
 如果开启了 `runtime.api_key_env`：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --api-key $env:PARSECORE_API_KEY --out var/self-check/gray-baseline.json
+.\.venv\Scripts\python.exe tools/gray_baseline_snapshot.py --base-url http://127.0.0.1:8090 --api-key $env:PARSECORE_API_KEY --out var/self-check/gray-baseline.json
 ```
 
 建议保存三个阶段的基线：
@@ -136,8 +147,8 @@ gate_status = "pending"
 若该 Provider 已被加入 `[[parsers]]` 执行列表，同时删除或注释对应 parser 块，避免 route fallback 仍命中它。调整后运行：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli payload-contract-check
+.\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
+.\.venv\Scripts\python.exe -m parsecore.cli payload-contract-check
 ```
 
 ### 专项回滚：Profile 灰度

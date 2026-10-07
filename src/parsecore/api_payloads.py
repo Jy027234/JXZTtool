@@ -283,6 +283,7 @@ def _publication_read_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "served_run_id": None,
         "run_identity": None,
         "pinned": False,
+        "is_formal_version": False,
         "publication_status": "unpublished",
         "publication_generation": 0,
         "consumer_signal": "not_ready",

@@ -47,6 +47,8 @@ from .quality import evaluate_parse_quality
 from .run_store import (
     PublicationPolicyError,
     PublishError,
+    RunNotFoundError,
+    RunPreviewUnavailableError,
     RunArtifacts,
     SealError,
     publication_ready,
@@ -895,6 +897,7 @@ class ParseRuntime:
             "served_run_id": active_run_id,
             "run_identity": active_run_id,
             "pinned": bool(active_run_id),
+            "is_formal_version": bool(state.get("formal_version_available")),
             "publication_status": str(state.get("publication_status") or "unpublished"),
             "publication_generation": int(state.get("publication_generation") or 0),
             "consumer_signal": str(state.get("consumer_signal") or "not_ready"),
@@ -1281,6 +1284,7 @@ class ParseRuntime:
             rerank_configured=rerank_configured,
             run_store=run_store_report,
             run_publication_ready=self.run_publication_ready,
+            index_run_isolation=self._index_supports_run_isolation(),
             degraded=self._capability_degradations,
         )
 
@@ -2355,6 +2359,71 @@ class ParseRuntime:
             "quality_gate": self.quality_gate_config(),
             # P0-03 batch 2: every projection of this snapshot reports which run
             # the read served, so a consumer can verify agreement.
+            "publication": publication,
+        }
+
+    def get_document_preview(
+        self,
+        *,
+        doc_id: str,
+        parse_run_id: str,
+        tenant_id: str | None = None,
+        document_view_types: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read a selected sealed preview run without changing formal reads."""
+
+        reader = getattr(self.run_store, "read_preview_snapshot", None)
+        if not self.run_publication_ready or not callable(reader):
+            raise RunPreviewUnavailableError(
+                "run-scoped preview reads are unavailable for this backend"
+            )
+
+        normalized_tenant = str(tenant_id or "default").strip() or "default"
+        preview = reader(
+            doc_id=doc_id,
+            parse_run_id=parse_run_id,
+            tenant_id=normalized_tenant,
+            view_types=(
+                *_normalized_document_view_types(document_view_types or ()),
+                "index_manifest",
+            ),
+        )
+        record = preview["record"]
+        publication = preview["publication"]
+        artifacts = preview["artifacts"]
+        document_views = dict(artifacts.views)
+        manifests = document_views.pop("index_manifest", ())
+        served_job = self._served_run_job(
+            publication=publication,
+            tenant_id=normalized_tenant,
+            record=record,
+        )
+        if served_job is None:
+            raise RunNotFoundError("Preview run not found")
+        return {
+            "doc_id": doc_id,
+            "job": served_job,
+            "blocks": artifacts.blocks,
+            "chunks": artifacts.chunks,
+            "document_views": document_views,
+            "index_manifest": dict(manifests[0])
+            if manifests
+            else self._derive_index_manifest_from_snapshot(
+                job=served_job,
+                blocks=artifacts.blocks,
+                chunks=artifacts.chunks,
+            ),
+            "partition_parts": self.partition_parts_for_document(
+                doc_id=doc_id,
+                tenant_id=normalized_tenant,
+                parent_job_id=(
+                    served_job.job_id
+                    if _job_kind(served_job) == _PDF_PARENT_JOB_KIND
+                    else None
+                ),
+            ),
+            "provider_registry": self.provider_registry(),
+            "quality_gate": self.quality_gate_config(),
             "publication": publication,
         }
 

@@ -43,6 +43,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .publication import artifact_profile
+
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a config import cycle
     from .config import ParseCoreSettings
 
@@ -71,6 +73,7 @@ ERROR_CODES: dict[str, str] = {
     "project.strictness": "invalid_strictness_mode",
     "project.allow_placeholder_parsers": "placeholder_parsers_not_allowed",
     "runtime.capability_optional": "unknown_capability_name",
+    "runtime.run_artifact_profile": "unknown_artifact_profile",
     "providers.mock": "mock_providers_not_allowed",
     "parsers.name": "unknown_parser_name",
     "index.mode": "unknown_index_mode",
@@ -430,6 +433,53 @@ def validate_capability_configuration(settings: ParseCoreSettings) -> None:
     _validate_parser_names(settings)
     _validate_index(settings)
     _validate_providers(settings)
+    validate_run_artifact_profile(settings)
+
+
+def validate_run_artifact_profile(
+    settings: ParseCoreSettings, *, index_run_isolation: bool | None = None
+) -> None:
+    """Reject a selected delivery profile before parsing unusable artifacts.
+
+    Only prerequisites independent of the input document belong here.  A table
+    or figure still has to be present in the actual document to satisfy its
+    artifact requirements when sealing the run.
+    """
+
+    name = str(settings.runtime.run_artifact_profile or "default").strip().lower()
+    try:
+        profile = artifact_profile(name)
+    except KeyError as exc:
+        raise _error(
+            field="runtime.run_artifact_profile",
+            message=f"Unknown runtime artifact profile: {name!r}",
+        ) from exc
+    if not _run_publication_enabled(settings):
+        return
+
+    required = set(profile.required_artifacts())
+    reason = ""
+    if "export" in required:
+        reason = "the automatic parse pipeline does not stage export artifacts"
+    elif "rag" in required:
+        if index_backend_for(settings.database_url, settings.index_mode) != "pgvector":
+            reason = "a durable index is required"
+        elif index_run_isolation is False:
+            reason = "the configured index does not isolate document runs"
+    elif "assets" in required:
+        if not settings.runtime.region_assets:
+            reason = "runtime.region_assets must be enabled"
+        elif not str(settings.object_store).startswith("local://"):
+            reason = "region assets require a local object store"
+    if reason:
+        raise CapabilityConfigurationError(
+            code="artifact_profile_unavailable",
+            field="runtime.run_artifact_profile",
+            message=(
+                f"Runtime artifact profile {name!r} cannot be delivered: {reason}. "
+                "Use the default artifact profile for ordinary parsing, records queries and exports."
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +644,7 @@ def build_capability_report(
     rerank_configured: bool | None = None,
     run_store: Mapping[str, Any] | None = None,
     run_publication_ready: bool | None = None,
+    index_run_isolation: bool | None = None,
     degraded: tuple[dict[str, str], ...] = (),
 ) -> dict[str, Any]:
     """Build the capability report exposed to health/readiness consumers.
@@ -753,6 +804,27 @@ def build_capability_report(
             )
         )
 
+    profile_issue = None
+    try:
+        validate_run_artifact_profile(settings, index_run_isolation=index_run_isolation)
+    except CapabilityConfigurationError as exc:
+        profile_issue = exc
+    profile_name = str(settings.runtime.run_artifact_profile or "default").strip().lower()
+    entries.append(
+        _entry(
+            name="run_artifact_profile",
+            kind="publication",
+            enabled=publication_enabled,
+            available=profile_issue is None,
+            requirement="required" if profile_name != "default" else "optional",
+            reason=profile_issue.code if profile_issue else "ok",
+            detail={
+                "artifact_profile": profile_name,
+                **({"message": str(profile_issue)} if profile_issue else {}),
+            },
+        )
+    )
+
     for item in degraded:
         capability = str(item.get("capability") or "").strip()
         if not capability:
@@ -861,7 +933,7 @@ def capability_fingerprint(report: dict[str, Any]) -> str:
                     str(entry.get("name") or ""),
                     str(entry.get("status") or ""),
                     str(detail.get("configured_provider") or detail.get("configured_name") or ""),
-                    str(detail.get("configured_mode") or ""),
+                    str(detail.get("configured_mode") or detail.get("artifact_profile") or ""),
                     str(detail.get("backend") or ""),
                 ]
             )
@@ -910,4 +982,5 @@ __all__ = [
     "known_index_modes",
     "known_parser_names",
     "validate_capability_configuration",
+    "validate_run_artifact_profile",
 ]

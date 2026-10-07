@@ -50,7 +50,14 @@ from .private_files import (
     write_private_bytes,
 )
 from .profiles import describe_parse_profiles, resolve_parse_profile
-from .run_store import PublicationPolicyError, PublishError, StalePublicationError
+from .run_store import (
+    PreviewRunNotAvailableError,
+    PublicationPolicyError,
+    PublishError,
+    RunNotFoundError,
+    RunPreviewUnavailableError,
+    StalePublicationError,
+)
 from .runtime import ParseRuntime, QuotaExceededError
 from .tenant_scope import (
     SOURCE_DEFAULT,
@@ -140,6 +147,11 @@ class ApiRoutes:
             Route("/v1/parse/jobs/{job_id}", self.get_job, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/quality", self.get_document_quality, methods=["GET"]),
             Route("/v1/parse/documents/{doc_id}/publication", self.get_document_publication, methods=["GET"]),
+            Route(
+                "/v1/parse/documents/{doc_id}/preview",
+                self.get_document_preview,
+                methods=["GET"],
+            ),
             Route(
                 "/v1/parse/documents/{doc_id}/publication/publish",
                 self.publish_document_publication,
@@ -993,6 +1005,62 @@ class ApiRoutes:
         snapshot = runtime_obj.get_document(doc_id=request.path_params["doc_id"], tenant_id=tenant_id)
         if snapshot["job"] is None:
             return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
+        try:
+            return JSONResponse(_document_projection(snapshot, projection=projection))
+        except ValueError as exc:
+            if str(exc) == "invalid_projection":
+                return _error_response(
+                    request,
+                    code="invalid_projection",
+                    message="Invalid projection",
+                    status_code=400,
+                    detail={"allowed": ["compat", "structured", "full", "ir", "coverage", "reader"]},
+                )
+            raise
+
+    async def get_document_preview(self, request: Request) -> JSONResponse:
+        """Read the body of one explicitly selected, deliverable preview run."""
+
+        runtime_obj: ParseRuntime = request.app.state.runtime
+        tenant_id = request_tenant_id(request, request.query_params.get("tenant_id"))
+        run_id = str(request.query_params.get("run_id") or "").strip()
+        if not run_id:
+            return _error_response(
+                request,
+                code="preview_run_id_required",
+                message="run_id is required",
+                status_code=400,
+            )
+
+        projection = str(request.query_params.get("projection") or "full").strip().lower()
+        try:
+            snapshot = runtime_obj.get_document_preview(
+                doc_id=request.path_params["doc_id"],
+                parse_run_id=run_id,
+                tenant_id=tenant_id,
+            )
+        except RunNotFoundError:
+            return _error_response(
+                request,
+                code="preview_run_not_found",
+                message="Preview run not found",
+                status_code=404,
+            )
+        except PreviewRunNotAvailableError as exc:
+            return _error_response(
+                request,
+                code=exc.code,
+                message="Preview run is not available",
+                status_code=409,
+            )
+        except RunPreviewUnavailableError as exc:
+            return _error_response(
+                request,
+                code="run_preview_unavailable",
+                message=str(exc),
+                status_code=503,
+            )
+
         try:
             return JSONResponse(_document_projection(snapshot, projection=projection))
         except ValueError as exc:

@@ -135,6 +135,9 @@ class PdfTextParserOptionsTests(unittest.TestCase):
             "min_cid_char_ratio": 0.12,
         }
         original = _pdf_ocr_cache_identity(settings, **defaults)
+        with patch("parsecore.parsers._PDF_OCR_OUTPUT_VERSION", "test-output-version"):
+            changed_algorithm = _pdf_ocr_cache_identity(settings, **defaults)
+        self.assertNotEqual(original, changed_algorithm)
         disabled = _pdf_ocr_cache_identity(
             OcrProviderSettings(enabled=False, provider="rapidocr"), **defaults
         )
