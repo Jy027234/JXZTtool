@@ -236,4 +236,6 @@ MinerU 或其他解析引擎接入、费用管理、完整视觉/公式能力、
 
 定向检查 41 项通过；完整 fast 验收结果为 `ok / verified`，原始单测结论为 `Ran 1116 tests / OK (skipped=6)`，即 1,110 项通过、6 项数据库集成跳过。三个真实样本配置回归、8 个 schema / 8 个载荷、Provider 检查及 corpus release 门禁通过，现有候选快照和阈值未改。证据保存在 [合并验收报告](../tmp/merge-main-20261007/self-check.json) 及其同目录日志。
 
-已有维护事项：main 的 `27caa74` 在 [Linux CI](https://github.com/Jy027234/JXZTtool/actions/runs/37542377171) 中因测试依赖缺失、Windows 路径断言等问题失败；自检汇总还会误读子测试输出的 `skipped=0`，本次按原始 unittest 结论统计跳过项。这些问题记录于此，不以本地验收代替 Linux CI 或生产验证。
+合并后 CI 收口：main 的 `27caa74` 在 [原 Linux CI](https://github.com/Jy027234/JXZTtool/actions/runs/37542377171) 中已有测试依赖缺失和 Windows 路径断言问题；`8185c62` 的 [合并后 CI](https://github.com/Jy027234/JXZTtool/actions/runs/37587174464) 进一步暴露异步 job 提交后立即断言未发布的竞态。四个执行自检的 job 补装已声明的 `test` extras；路径测试改用 Path；租户测试等待发布完成，再严格检查本租户正式指针与其他租户不可读，未修改业务代码或放宽门禁。相关自检 38 项、租户边界 23 项本地检查通过。Linux runner 缺少真实 PDF 时仍按既有规则标注 smoke / unverified，不以 CI smoke 代替本地真实样本门禁或生产验证。
+
+已有维护事项：自检汇总仍会误读子测试输出的 `skipped=0`，本次单测数量按原始 unittest 结论统计；该统计问题记录于此，未扩大本次合并修复范围。

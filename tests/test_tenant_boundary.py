@@ -14,6 +14,7 @@ finding, not a test bug.
 from __future__ import annotations
 
 import unittest
+import time
 
 from starlette.testclient import TestClient
 
@@ -351,12 +352,24 @@ class EnforcedBoundaryTests(TenantBoundaryTestCase):
         with TestClient(app) as client:
             self._seed(workspace, client)
             for tenant in ("tenant-a", "tenant-b"):
-                body = client.get(
-                    f"/v1/parse/documents/doc-{tenant}/publication",
-                    headers=self._headers(tenant),
-                ).json()
+                path = f"/v1/parse/documents/doc-{tenant}/publication"
+                deadline = time.monotonic() + 5
+                while True:
+                    response = client.get(path, headers=self._headers(tenant))
+                    self.assertEqual(response.status_code, 200, response.text)
+                    body = response.json()
+                    if body["consumer_signal"] == "published" or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.01)
                 self.assertEqual(body["tenant_id"], tenant)
-                self.assertEqual(body["consumer_signal"], "not_ready")
+                self.assertEqual(body["consumer_signal"], "published", body)
+                self.assertIsNotNone(body["active_run_id"])
+
+                other_tenant = "tenant-b" if tenant == "tenant-a" else "tenant-a"
+                foreign = client.get(path, headers=self._headers(other_tenant)).json()
+                self.assertEqual(foreign["tenant_id"], other_tenant)
+                self.assertEqual(foreign["consumer_signal"], "not_ready")
+                self.assertIsNone(foreign["active_run_id"])
 
 
 class TrustedBoundaryTests(TenantBoundaryTestCase):

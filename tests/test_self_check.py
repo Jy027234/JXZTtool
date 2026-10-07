@@ -34,30 +34,45 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIsNone(args.corpus_manifest_out)
 
     def test_default_out_for_profile_uses_separate_full_snapshot(self) -> None:
-        self.assertTrue(self_check._default_out_for_profile(self_check.FAST_PROFILE).endswith("var\\self-check\\latest.json"))
-        self.assertTrue(self_check._default_out_for_profile(self_check.FULL_PROFILE).endswith("var\\self-check\\latest.full.json"))
-        self.assertTrue(self_check._default_out_for_profile(self_check.PERF_PROFILE).endswith("var\\self-check\\latest.perf.json"))
+        self.assertEqual(
+            Path(self_check._default_out_for_profile(self_check.FAST_PROFILE)).parts[-3:],
+            ("var", "self-check", "latest.json"),
+        )
+        self.assertEqual(
+            Path(self_check._default_out_for_profile(self_check.FULL_PROFILE)).parts[-3:],
+            ("var", "self-check", "latest.full.json"),
+        )
+        self.assertEqual(
+            Path(self_check._default_out_for_profile(self_check.PERF_PROFILE)).parts[-3:],
+            ("var", "self-check", "latest.perf.json"),
+        )
 
     def test_default_suite_for_profile_uses_explicit_full_and_perf_suites(self) -> None:
-        self.assertTrue(self_check._default_suite_for_profile(self_check.FAST_PROFILE).endswith("var\\regression\\suite.fast.json"))
-        self.assertTrue(self_check._default_suite_for_profile(self_check.FULL_PROFILE).endswith("var\\regression\\suite.full.json"))
-        self.assertTrue(self_check._default_suite_for_profile(self_check.PERF_PROFILE).endswith("var\\regression\\suite.perf.json"))
+        self.assertEqual(
+            Path(self_check._default_suite_for_profile(self_check.FAST_PROFILE)).parts[-3:],
+            ("var", "regression", "suite.fast.json"),
+        )
+        self.assertEqual(
+            Path(self_check._default_suite_for_profile(self_check.FULL_PROFILE)).parts[-3:],
+            ("var", "regression", "suite.full.json"),
+        )
+        self.assertEqual(
+            Path(self_check._default_suite_for_profile(self_check.PERF_PROFILE)).parts[-3:],
+            ("var", "regression", "suite.perf.json"),
+        )
 
     def test_default_provider_suite_for_profile_supports_fast_full_and_perf_lanes(self) -> None:
-        self.assertTrue(
-            self_check._default_provider_suite_for_profile(self_check.FAST_PROFILE).endswith(
-                "var\\regression\\provider-suite.fast.json"
-            )
+        self.assertEqual(
+            Path(self_check._default_provider_suite_for_profile(self_check.FAST_PROFILE)).parts[-3:],
+            ("var", "regression", "provider-suite.fast.json"),
         )
-        self.assertTrue(
-            self_check._default_provider_suite_for_profile(self_check.FULL_PROFILE).endswith(
-                "var\\regression\\provider-suite.full.json"
-            )
+        self.assertEqual(
+            Path(self_check._default_provider_suite_for_profile(self_check.FULL_PROFILE)).parts[-3:],
+            ("var", "regression", "provider-suite.full.json"),
         )
-        self.assertTrue(
-            self_check._default_provider_suite_for_profile(self_check.PERF_PROFILE).endswith(
-                "var\\regression\\provider-suite.perf.json"
-            )
+        self.assertEqual(
+            Path(self_check._default_provider_suite_for_profile(self_check.PERF_PROFILE)).parts[-3:],
+            ("var", "regression", "provider-suite.perf.json"),
         )
 
     def test_resolve_regression_profile_maps_slow_alias_to_full(self) -> None:
@@ -899,7 +914,7 @@ class SelfCheckTests(unittest.TestCase):
             "samples": [],
         }
         with tempfile.TemporaryDirectory() as temp_dir:
-            out_path = f"{temp_dir}\\latest.full.json"
+            out_path = str(Path(temp_dir) / "latest.full.json")
             with patch(
                 "tools.self_check._run_unit_tests",
                 return_value=self_check.CheckResult(
@@ -969,8 +984,8 @@ class SelfCheckTests(unittest.TestCase):
                 exit_code = self_check.main(["--profile", "full", "--out", out_path])
 
             self.assertEqual(exit_code, 0)
-            provider_json = f"{temp_dir}\\provider-comparison.full.json"
-            provider_md = f"{temp_dir}\\provider-comparison.full.md"
+            provider_json = str(Path(temp_dir) / "provider-comparison.full.json")
+            provider_md = str(Path(temp_dir) / "provider-comparison.full.md")
             self.assertTrue(Path(provider_json).exists())
             self.assertTrue(Path(provider_md).exists())
             report_payload = json.loads(Path(provider_json).read_text(encoding="utf-8"))
