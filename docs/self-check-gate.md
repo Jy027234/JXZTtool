@@ -65,6 +65,8 @@ Provider comparison 工件不在 self-check 过程中自动删除。运维清理
 
 CI 说明：现有 GitHub Actions 已接到 `fast/full/perf` 三档入口。baseline 现在同时保留历史绝对路径、`fixture_relative_path` 元数据和样本 `fixture_sha256/fixture_size_bytes`；若在其他机器或 hosted runner 上提供 `PARSECORE_REGRESSION_FIXTURE_ROOT` 指向样本目录，workflow 会优先用相对路径恢复这批样本。三个 job 不再各自内嵌样本探测脚本，而是统一调用 `tools/corpus_manifest.py`；若仍缺样本，workflow 会把 fast 降级为 smoke-only、跳过 full/perf 专项门禁，**并在 job summary、notice/warning 以及 self-check JSON 的 `verification` 字段中明确标记该次运行为“未验证”**，不再让 smoke 成功看起来像质量通过。发版验收由独立的 `release` job 承担（见下节）。
 
+Fast 自检结束后会尝试上传已生成的自检 JSON 和样本清单，包括失败的运行。自检 JSON 中 `name` 为 `unit_tests` 的检查会在 `details.failed_tests` 记录失败的测试名称、消息和 traceback。
+
 ## 样本清单校验与发布验收状态（P0-06）
 
 ### `tools/corpus_manifest.py`
@@ -130,7 +132,7 @@ fixture 解析顺序：`fixture_relative_path` + `PARSECORE_REGRESSION_FIXTURE_R
 
 `parsecore self-check` 当前串联五类检查：
 
-1. 单测从仓库根目录运行 pytest，只收集 `tests/`。self-check 从 JUnit XML 读取通过、失败、错误和跳过数量，输出末尾保留 pytest 报告的跳过原因。如果同一测试的断言失败且清理也报错，报告分别记录失败与错误。
+1. 单测从仓库根目录运行 pytest，只收集 `tests/`。self-check 从 JUnit XML 读取通过、失败、错误和跳过数量，并记录每个失败或错误的诊断详情。输出末尾保留 pytest 报告的跳过原因。如果同一测试的断言失败且清理也报错，报告分别记录失败与错误。
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
 3. Payload contract 校验：`parsecore.cli payload-contract-check`
 4. 样本清单校验：`tools/corpus_manifest.py`（每次运行都执行，结果写入 `verification`）

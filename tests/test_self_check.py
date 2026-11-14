@@ -14,10 +14,11 @@ from tools import self_check
 
 
 class SelfCheckTests(unittest.TestCase):
-    def test_run_unit_tests_uses_junit_counts_and_preserves_failure_status(self) -> None:
+    def test_run_unit_tests_uses_junit_counts_and_retains_failures_outside_the_log_tail(self) -> None:
         junit_report = """<?xml version="1.0" encoding="utf-8"?>
-<testsuites><testsuite name="pytest" tests="3" failures="1" errors="1" skipped="1" time="0.42">
+<testsuites><testsuite name="pytest" tests="4" failures="2" errors="1" skipped="1" time="0.42">
   <testcase classname="test_sample" name="test_pass" />
+  <testcase classname="test_sample" name="test_first_failure"><failure message="first assertion">First traceback</failure></testcase>
   <testcase classname="test_sample" name="test_failure"><failure message="assertion" /></testcase>
   <testcase classname="test_sample" name="test_failure"><error message="fixture teardown" /></testcase>
   <testcase classname="test_sample" name="test_skip"><skipped message="not configured" /></testcase>
@@ -46,13 +47,21 @@ class SelfCheckTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.details["tests_ran"], 4)
+        self.assertEqual(result.details["tests_ran"], 5)
         self.assertEqual(result.details["tests_passed"], 1)
-        self.assertEqual(result.details["tests_failed"], 1)
+        self.assertEqual(result.details["tests_failed"], 2)
         self.assertEqual(result.details["tests_errors"], 1)
         self.assertEqual(result.details["skipped"], 1)
         self.assertEqual(result.details["reported_elapsed_s"], 0.42)
-        self.assertEqual(result.summary, "passed=1 failed=1 errors=1 skipped=1 total=4")
+        self.assertEqual(result.summary, "passed=1 failed=2 errors=1 skipped=1 total=5")
+        failed_tests = result.details["failed_tests"]
+        self.assertEqual(
+            [(case["name"], case["outcome"]) for case in failed_tests],
+            [("test_first_failure", "failure"), ("test_failure", "failure"), ("test_failure", "error")],
+        )
+        self.assertEqual(failed_tests[0]["classname"], "test_sample")
+        self.assertEqual(failed_tests[0]["traceback"], "First traceback")
+        self.assertEqual(failed_tests[2]["message"], "fixture teardown")
 
     def test_build_parser_defaults_to_fast_profile(self) -> None:
         args = self_check._build_parser().parse_args([])

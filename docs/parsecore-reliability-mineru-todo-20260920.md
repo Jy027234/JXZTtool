@@ -295,4 +295,8 @@ python tools/provider_gold_evaluation.py --gold-corpus fixtures/provider-evaluat
 
 README、发版说明、自检说明和上线清单均引用本次验收。生产上线仍须在目标宿主验证实际部署、权限、容量、持久化、备份及回滚。Postgres/pgvector 正式发布和 run 隔离继续按选型启动。[上线前清单](go-live-readiness.md#上线前必做项)
 
+结项提交 `2f1e0c3` 的 GitHub Actions fast 作业在 smoke 步骤中报告 1,210 项通过、2 项失败、8 项跳过。三种配置引用的回归样本在 runner 上均未找到，真实样本回归标为未验证。以上本地验收数字继续作为本机证据，生产状态仍须在目标环境验证。[GitHub Actions 记录](https://github.com/Jy027234/JXZTtool/actions/runs/43569917664)
+
+原日志确认上传测试漏列了合法的 `embedding` 状态。在匹配 CI 测试依赖的 Linux 环境中，用原提交复现了另一处失败。下载测试拦截了所有 `Path.read_bytes()`，触发了 pytest 读取延迟导入模块时的断言。修正两处测试后，同一 Linux 环境的 smoke 检查为 1,212 项通过、0 项失败、8 项跳过，语料回归仍为 `UNVERIFIED`。
+
 整体框架迁移、集中拆分大文件、多粒度向量与批处理、新视觉引擎继续留作候选。分别等到具体的接口维护问题、功能改动涉及的模块边界、检索评测或成本缺口、现有引擎处理不佳的真实样本出现再评估。

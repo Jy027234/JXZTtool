@@ -70,6 +70,15 @@ jobs:
           echo "::warning::Fast lane ran in smoke mode: the regression quality gate was NOT exercised (corpus reason=${{ steps.fast-corpus.outputs.reason }}). Release acceptance requires --require-verified-corpus."
       - name: Verify optional API boundary
         run: python -m unittest tests.test_package_imports
+      - name: Upload fast check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parsecore-self-check-fast
+          path: |
+            ${{ runner.temp }}/parsecore-self-check-fast.json
+            ${{ runner.temp }}/parsecore-corpus.fast.json
+          if-no-files-found: warn
 
   regression:
     name: Full self-check

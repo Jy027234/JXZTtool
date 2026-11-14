@@ -868,7 +868,16 @@ gate_status = "pending"
                 self.assertEqual(current.status_code, 200)
                 current_payload = current.json()
                 self.assertEqual(current_payload["doc_id"], "doc-bridge-002")
-                self.assertIn(current_payload["state"], {ParseJobState.PENDING.value, ParseJobState.PARSING.value, ParseJobState.STRUCTURING.value, ParseJobState.DONE.value})
+                self.assertIn(
+                    current_payload["state"],
+                    {
+                        ParseJobState.PENDING.value,
+                        ParseJobState.PARSING.value,
+                        ParseJobState.STRUCTURING.value,
+                        ParseJobState.EMBEDDING.value,
+                        ParseJobState.DONE.value,
+                    },
+                )
 
     def test_upload_bridge_uses_staged_limit_and_resolves_profile(self) -> None:
         with TemporaryWorkspace(LIMITED_UPLOAD_API_CONFIG) as workspace:
@@ -1418,7 +1427,8 @@ gate_status = "pending"
                 self.assertEqual(invalid_trend.json()["code"], "invalid_trend_window_hours")
 
     def test_document_projection_structured_exposes_v2_tables_and_quality(self) -> None:
-        with TemporaryWorkspace(SAMPLE_CONFIG) as workspace:
+        config = SAMPLE_CONFIG.replace("local://./var/uploads", "local://__OBJECT_STORE__")
+        with TemporaryWorkspace(config) as workspace:
             document_path = workspace.create_docx_with_body(
                 "table.docx",
                 build_docx_table([["Part"], ["Bolt", "2"]]),
@@ -1719,10 +1729,22 @@ gate_status = "pending"
                 self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
                 self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
 
-                with patch.object(Path, "read_bytes", side_effect=AssertionError("download must stream the file")):
+                filename = "quality_signals.jsonl"
+                download_file = (
+                    workspace.root / "object-store" / "_exports" / export_payload["export_id"] / filename
+                ).resolve()
+                self.assertTrue(download_file.is_file())
+                read_bytes = Path.read_bytes
+
+                def reject_buffered_download(path: Path) -> bytes:
+                    if path == download_file:
+                        raise AssertionError("download must stream the export file")
+                    return read_bytes(path)
+
+                with patch.object(Path, "read_bytes", reject_buffered_download):
                     export_download = client.get(
                         f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
-                        params={"file": "quality_signals.jsonl"},
+                        params={"file": filename},
                     )
                 self.assertEqual(export_download.status_code, 200)
                 self.assertEqual(

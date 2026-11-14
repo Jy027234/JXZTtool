@@ -653,8 +653,10 @@ def _run_subprocess(
         return result, output
 
 
-def _read_pytest_junit_counts(report_path: str | Path) -> dict[str, int | float]:
-    """Read pytest counts from its JUnit report, not from test-controlled output."""
+def _read_pytest_junit_report(
+    report_path: str | Path,
+) -> tuple[dict[str, int | float], list[dict[str, str]]]:
+    """Read pytest counts and failures from its JUnit report."""
     root = ET.parse(report_path).getroot()
     if root.tag == "testsuite":
         suites = [root]
@@ -673,6 +675,7 @@ def _read_pytest_junit_counts(report_path: str | Path) -> dict[str, int | float]
         "skipped": 0,
         "elapsed_s": 0.0,
     }
+    failed_tests: list[dict[str, str]] = []
     for suite in suites:
         try:
             reported_tests = int(suite.attrib["tests"])
@@ -685,7 +688,8 @@ def _read_pytest_junit_counts(report_path: str | Path) -> dict[str, int | float]
         # Pytest can emit separate testcase elements for a failed assertion and
         # a teardown error in the same test, while counting that test once in
         # the suite's tests attribute.
-        tests = len(suite.findall("testcase"))
+        cases = suite.findall("testcase")
+        tests = len(cases)
         passed = tests - failures - errors - skipped
         if min(reported_tests, failures, errors, skipped, passed) < 0 or reported_tests > tests:
             raise ValueError("JUnit suite counts are inconsistent")
@@ -695,7 +699,19 @@ def _read_pytest_junit_counts(report_path: str | Path) -> dict[str, int | float]
         counts["errors"] += errors
         counts["skipped"] += skipped
         counts["elapsed_s"] += elapsed_s
-    return counts
+        for case in cases:
+            for outcome in case:
+                if outcome.tag in {"failure", "error"}:
+                    failed_tests.append(
+                        {
+                            "classname": case.get("classname", ""),
+                            "name": case.get("name", ""),
+                            "outcome": outcome.tag,
+                            "message": outcome.get("message", ""),
+                            "traceback": outcome.text or "",
+                        }
+                    )
+    return counts, failed_tests
 
 
 def _run_unit_tests() -> CheckResult:
@@ -717,7 +733,7 @@ def _run_unit_tests() -> CheckResult:
         if result.status == "timeout":
             return result
         try:
-            counts = _read_pytest_junit_counts(report_path)
+            counts, failed_tests = _read_pytest_junit_report(report_path)
         except (OSError, ET.ParseError, ValueError) as exc:
             result.details["junit_report_error"] = str(exc)
             if result.status == "passed":
@@ -737,6 +753,8 @@ def _run_unit_tests() -> CheckResult:
                 "reported_elapsed_s": counts["elapsed_s"],
             }
         )
+        if failed_tests:
+            result.details["failed_tests"] = failed_tests
         result.summary = (
             f"passed={counts['passed']} failed={counts['failures']} "
             f"errors={counts['errors']} skipped={counts['skipped']} "
