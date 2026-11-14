@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from parsecore.models import BlockType, ParseRequest
 from parsecore.parsers import PdfTextParser, _pdf_source_region
+from tests.support import build_positioned_pdf_bytes
 
 
 class _FakePdfPage:
@@ -114,6 +115,42 @@ def _parse(rotation: int):
 
 
 class SourceRegionContractTests(unittest.TestCase):
+    def test_native_body_after_a_figure_remains_after_it(self) -> None:
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject
+
+        before = "Select the blank card with the plus sign in the centre to open the editor."
+        after = "Provide a title for the new card to make it easy to find on the screen."
+        parser = PdfTextParser(
+            media_types=["application/pdf"],
+            extensions=[".pdf"],
+            options={"post_process": {"layout_reading_order": True, "ocr_bad_pages": False}},
+        )
+        with TemporaryDirectory(prefix="parsecore-figure-order-") as directory:
+            path = Path(directory) / "card-editor.pdf"
+            path.write_bytes(build_positioned_pdf_bytes([[(70, 430, before), (70, 248, after)]]))
+            writer = PdfWriter(clone_from=path)
+            contents = DecodedStreamObject()
+            # A real inline image between two adjacent native text lines.
+            contents.set_data(
+                writer.pages[0].get_contents().get_data()
+                + b"\nq 280 0 0 150 70 260 cm BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x35\x75\xB0\nEI\nQ\n"
+            )
+            writer.pages[0].replace_contents(contents)
+            with path.open("wb") as stream:
+                writer.write(stream)
+            blocks = parser.parse(ParseRequest(
+                doc_id="card-editor",
+                file_path=str(path),
+                media_type="application/pdf",
+            ))
+
+        body = [block for block in blocks if block.type != BlockType.TITLE]
+        self.assertEqual([block.type for block in body],
+                         [BlockType.PARAGRAPH, BlockType.IMAGE, BlockType.PARAGRAPH])
+        self.assertEqual([body[0].content, body[2].content], [before, after])
+        self.assertEqual(body[1].metadata["source_region"]["page_number"], 1)
+
     def test_a_table_region_is_croppable(self) -> None:
         blocks = _parse(rotation=0)
         table = next(block for block in blocks if block.type == BlockType.TABLE)

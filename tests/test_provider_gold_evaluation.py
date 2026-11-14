@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from parsecore.tables import grid_from_rows
 from tools.provider_gold_evaluation import build_gold_evaluation, evaluate_report, load_gold_corpus, score_page
 from tools.provider_gold_review_queue import build_review_queue, evenly_spaced_pages
 
@@ -210,6 +211,97 @@ extensions = [".txt"]
         self.assertEqual(result["status"], "scored")
         self.assertEqual(result["vetoes"], [])
         self.assertGreater(result["score"], 95)
+        self.assertEqual(result["table_relationships"]["status"], "unverified")
+
+    def test_full_table_text_coverage_cannot_hide_incorrect_cell_positions(self) -> None:
+        page = {
+            "id": "parts-list",
+            "page_number": 1,
+            "expected": {
+                "tableAnchors": ["Part", "Units", "A-1", "A-2", "2", "9"],
+                "tableRelationships": {
+                    "tables": [{
+                        "page_number": 1,
+                        "row_count": 3,
+                        "cells": {"0": {"1": "Part", "2": "Units"}, "1": {"1": "A-1", "2": "2"},
+                                  "2": {"1": "A-2", "2": "9"}},
+                    }],
+                },
+            },
+        }
+        cases = {
+            "correct_grid": ([["10", "A-1", "2"], ["20", "A-2", "9"]], "verified"),
+            "swapped_quantities": ([["10", "A-1", "9"], ["20", "A-2", "2"]], "failed"),
+            "adjacent_column": ([["10", "2", "A-1"], ["20", "A-2", "9"]], "failed"),
+            "collapsed_rows": ([["10\n20", "A-1\nA-2", "2\n9"]], "unverified"),
+        }
+        for name, (data, status) in cases.items():
+            with self.subTest(name=name):
+                provider = _provider()
+                provider["gold_evidence"][-1]["text"] = "Item Part Units 10 A-1 2 20 A-2 9"
+                grid = grid_from_rows([["Item", "Part", "Units"], *data])
+                provider["table_evidence"] = {
+                    "tables": [{
+                        "table_id": "p1:t1",
+                        "page_number": 1,
+                        "cells": [cell.as_payload() for cell in grid.cells],
+                    }],
+                    "records": [],
+                }
+                result = score_page(page=page, provider=provider, baseline_elapsed_s=1.0, approved_provider_ids={"shadow"})
+                self.assertEqual(result["axes"]["table_text_coverage"], 100)
+                self.assertEqual(result["table_relationships"]["status"], status)
+                self.assertEqual(result["status"], "scored" if status == "verified" else "blocked")
+
+    def test_continued_record_requires_one_row_and_both_source_parts(self) -> None:
+        page = {
+            "id": "continued-table",
+            "page_number": 1,
+            "page_end": 2,
+            "expected": {
+                "tableAnchors": ["Item", "Type A", "Type B", "Bolt", "1", "3"],
+                "tableRelationships": {
+                    "tables": [
+                        {"page_number": 1, "row_count": 2, "cells": {"0": {"1": "Type A"}, "1": {"1": "1"}}},
+                        {"page_number": 2, "row_count": 2, "cells": {"0": {"1": "Type B"}, "1": {"1": "3"}}},
+                    ],
+                    "continuation": {
+                        "label_field": "Item", "row_labels": ["Bolt"], "fields": {"0": {"Type A": "1", "Type B": "3"}},
+                    },
+                },
+            },
+        }
+        provider = _provider()
+        first = provider["gold_evidence"][-1]
+        first["text"] = "Item Type A Bolt 1"
+        provider["gold_evidence"].append(dict(first, position=4, page_number=2, text="Item Type B Bolt 3"))
+        parts = [{"page_number": page_number, "table_id": f"p{page_number}:t1"} for page_number in (1, 2)]
+        tables = [
+            dict(part, cells=[cell.as_payload() for cell in grid_from_rows([["Item", header], ["Bolt", value]]).cells])
+            for part, header, value in zip(parts, ("Type A", "Type B"), ("1", "3"), strict=True)
+        ]
+        record = {
+            "table_id": "p1:t1",
+            "source": "table-row",
+            "fields": {"Item": "Bolt", "Type A": "1", "Type B": "3"},
+            "continuation": {"kind": "column_continuation", "part_count": 2, "parts": parts},
+        }
+        cases = {
+            "merged": ([record], None),
+            "duplicated_row": ([record, dict(record, table_id="p2:t1")], "continuation_rows_mismatch"),
+            "wrong_field": ([dict(record, fields=dict(record["fields"], **{"Type B": "1"}))],
+                            "continuation_field_mismatch"),
+            "missing_source_part": ([dict(record, continuation=dict(record["continuation"], parts=parts[:1]))],
+                                    "continuation_sources_mismatch"),
+        }
+        for name, (records, failure) in cases.items():
+            with self.subTest(name=name):
+                provider["table_evidence"] = {"tables": tables, "records": records}
+                result = score_page(page=page, provider=provider, baseline_elapsed_s=1.0, approved_provider_ids={"shadow"})
+                check = result["table_relationships"]
+                self.assertEqual(result["axes"]["table_text_coverage"], 100)
+                self.assertEqual(check["status"], "failed" if failure else "verified")
+                self.assertEqual([issue["reason"] for issue in check["issues"]], [failure] if failure else [])
 
     def test_table_loss_and_unapproved_license_are_hard_vetoes(self) -> None:
         result = score_page(

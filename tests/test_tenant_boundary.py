@@ -328,9 +328,23 @@ class EnforcedBoundaryTests(TenantBoundaryTestCase):
             own = client.get(
                 f"/v1/parse/export-jobs/{export_id}", headers=self._headers("tenant-a")
             )
+            foreign_download = client.get(
+                f"/v1/parse/export-jobs/{export_id}/download",
+                headers=self._headers("tenant-b"),
+            )
+            own_download = client.get(
+                f"/v1/parse/export-jobs/{export_id}/download",
+                headers=self._headers("tenant-a"),
+            )
 
         self.assertEqual(own.status_code, 200)
         self.assertEqual(foreign.status_code, 404, foreign.text)
+        self.assertEqual(own_download.status_code, 200)
+        self.assertEqual(
+            own_download.headers["content-disposition"],
+            'attachment; filename="manifest.json"',
+        )
+        self.assertEqual(foreign_download.status_code, 404, foreign_download.text)
 
     def test_metrics_are_scoped_to_the_resolved_tenant(self) -> None:
         workspace, app = self._app()

@@ -14,6 +14,46 @@ from tools import self_check
 
 
 class SelfCheckTests(unittest.TestCase):
+    def test_run_unit_tests_uses_junit_counts_and_preserves_failure_status(self) -> None:
+        junit_report = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="3" failures="1" errors="1" skipped="1" time="0.42">
+  <testcase classname="test_sample" name="test_pass" />
+  <testcase classname="test_sample" name="test_failure"><failure message="assertion" /></testcase>
+  <testcase classname="test_sample" name="test_failure"><error message="fixture teardown" /></testcase>
+  <testcase classname="test_sample" name="test_skip"><skipped message="not configured" /></testcase>
+</testsuite></testsuites>"""
+
+        def fake_run_subprocess(name: str, args: list[str], **_kwargs):
+            self.assertEqual(name, "unit_tests")
+            self.assertEqual(args[:4], [sys.executable, "-m", "pytest", "-q"])
+            junit_arg = next(arg for arg in args if arg.startswith("--junitxml="))
+            Path(junit_arg.split("=", 1)[1]).write_text(junit_report, encoding="utf-8")
+            return (
+                self_check.CheckResult(
+                    name=name,
+                    status="failed",
+                    exit_code=1,
+                    elapsed_s=0.5,
+                    summary="command completed",
+                    details={},
+                    tail=["999 passed, 888 skipped in 0.1s"],
+                ),
+                "test log says 999 passed, 888 skipped",
+            )
+
+        with patch("tools.self_check._run_subprocess", side_effect=fake_run_subprocess):
+            result = self_check._run_unit_tests()
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.details["tests_ran"], 4)
+        self.assertEqual(result.details["tests_passed"], 1)
+        self.assertEqual(result.details["tests_failed"], 1)
+        self.assertEqual(result.details["tests_errors"], 1)
+        self.assertEqual(result.details["skipped"], 1)
+        self.assertEqual(result.details["reported_elapsed_s"], 0.42)
+        self.assertEqual(result.summary, "passed=1 failed=1 errors=1 skipped=1 total=4")
+
     def test_build_parser_defaults_to_fast_profile(self) -> None:
         args = self_check._build_parser().parse_args([])
 
@@ -1303,7 +1343,19 @@ class SelfCheckVerificationGateTests(unittest.TestCase):
             out_path = root / "fast.json"
             manifest_out = root / "corpus.json"
             patches = (
-                patch("tools.self_check._run_unit_tests", return_value=_passed_result("unit_tests", {"tests_ran": 702, "skipped": 6})),
+                patch(
+                    "tools.self_check._run_unit_tests",
+                    return_value=_passed_result(
+                        "unit_tests",
+                        {
+                            "tests_ran": 702,
+                            "tests_passed": 696,
+                            "tests_failed": 0,
+                            "tests_errors": 0,
+                            "skipped": 6,
+                        },
+                    ),
+                ),
                 patch("tools.self_check._run_runtime_describe", return_value=_passed_result("runtime_describe")),
                 patch("tools.self_check._run_payload_contract_check", return_value=_passed_result("payload_contracts")),
                 patch(
@@ -1338,6 +1390,10 @@ class SelfCheckVerificationGateTests(unittest.TestCase):
         self.assertEqual(verification["counts"]["regression_ok_count"], 2)
         self.assertEqual(verification["counts"]["regression_skip_count"], 0)
         self.assertEqual(verification["counts"]["unit_tests_ran"], 702)
+        self.assertEqual(verification["counts"]["unit_tests_passed"], 696)
+        self.assertEqual(verification["counts"]["unit_tests_failed"], 0)
+        self.assertEqual(verification["counts"]["unit_tests_errors"], 0)
+        self.assertEqual(verification["counts"]["unit_tests_skipped"], 6)
         self.assertEqual(verification["counts"]["verified_entries"], 1)
         self.assertEqual(verification["commit"], self_check._git_commit())
         self.assertTrue(verification["config_sha256"])

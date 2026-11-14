@@ -164,7 +164,7 @@ allow_mock_providers = false
 | `staged_upload_max_bytes` | `0` | 字节数 | `/parse/uploads` 与 `/v1/parse/uploads` 桥接暂存上限；`0` 表示不限制，用于承接同步入口拒绝的大文件。 |
 | `staged_upload_retention_seconds` | `86400` | 秒数 | 桥接暂存文件保留期，过期上传会在上传入口触发清理。 |
 | `part_artifact_retention_seconds` | `604800` | 秒数 | part PDF 等局部解析工件建议保留期，配合 `cleanup_artifacts()` 或运维任务清理。 |
-| `export_artifact_retention_seconds` | `2592000` | 秒数 | 异步导出包建议保留期，生产可按容量和审计要求调整。 |
+| `export_artifact_retention_seconds` | `2592000` | 秒数 | 导出包建议保留期，生产可按容量和审计要求调整。 |
 | `provider_comparison_artifact_retention_seconds` | `2592000` | 秒数；`0` 表示关闭 | self-check 生成的 Provider comparison JSON/Markdown 保留期；仅由 `cleanup-provider-comparison-artifacts` 运维命令消费，默认 dry-run，不会在解析或 self-check 时自动删除。 |
 | `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
@@ -176,7 +176,7 @@ allow_mock_providers = false
 
 调度内部会为每次 claim 写入 `claim_token / claimed_at / lease_expires_at / next_attempt_at`。这些字段会出现在 job 查询 payload 中，宿主通常只需要透传或忽略；中台会用 `claim_token` 拒绝超时回收后的旧 worker 写回，避免旧 attempt 把新 attempt 的状态或产物覆盖掉。
 
-`/health` 与 `/v1/runtime` 的 `capabilities.capabilities` 列表同时报告 `run_publication` 和 `run_artifact_profile`。当前发布后端只有 SQLite；Postgres/pgvector 示例不提供正式版本的原子发布与待审 run 读取。启动配置检查只验证可提前确定的前提，实际文档产物和质量仍在 seal/publish 时校验。
+`/health` 与 `/v1/runtime` 的 `capabilities.capabilities` 列表同时报告 `run_publication` 和 `run_artifact_profile`。当前只有 SQLite 实现本地正式版本发布与待审 run 读取；Postgres/pgvector 示例仅供存储和索引联调，不提供正式版本原子发布、待审 run 读取或文档 run 隔离，生产也未验证。启用发布时，内置索引不支持 `rag` 产物 profile。启动配置检查只验证可提前确定的前提，实际文档产物和质量仍在 seal/publish 时校验。
 
 生产建议：
 
@@ -318,7 +318,7 @@ embedding_dimension = 1536
 | 字段 | 支持值 | 说明 |
 | --- | --- | --- |
 | `storage.database_url` | `sqlite:///...` | 本地单机持久化，适合 SDK、本地 API、小规模试用。 |
-| `storage.database_url` | `postgresql://...` / `postgres://...` | Postgres 持久化，适合 API + Worker、灰度、生产。 |
+| `storage.database_url` | `postgresql://...` / `postgres://...` | 可用于 API + Worker 共享存储与 pgvector 联调；本仓库未验证其正式版本发布或生产部署。 |
 | `storage.database_url` | `memory://` / `memory` | 进程内临时存储，只适合测试。 |
 | `storage.object_store` | `local://...` | 当前保留为本地对象目录配置，建议指向可持久化目录。 |
 | `index.mode` | `hybrid` | 默认值；Postgres 下会启用 pgvector 索引，非 Postgres 下自动退化。 |
@@ -330,7 +330,7 @@ embedding_dimension = 1536
 
 - `index.mode = "hybrid"` 搭配 SQLite 时不会启用 pgvector，搜索会走可用的关键词/本地回退路径。
 - pgvector 已建表后不能只靠改配置切换维度：切换模型维度前必须使用新数据库/schema，或执行受控迁移并重建全部向量；运行时会在不匹配时拒绝写入，避免静默混用向量空间。
-- API 与 Worker 分进程部署时，生产应使用 Postgres，否则多进程之间无法共享内存态数据。
+- API 与 Worker 分进程需要共享持久化存储；Postgres 示例可用于联调，但不能据此认定生产就绪。Postgres 的正式发布/待审 run 读取与 pgvector run 隔离尚未实现或验收。
 - Docker Compose 的 pgvector profile 已提供 `parsecore-postgres` 服务。
 
 ## Translation 与产品适配
@@ -509,9 +509,9 @@ candidate_limit = 30
 
 排序生效时，搜索响应的 `retrieval_mode` 会显示为 `hybrid+rerank` 或 `keyword-fallback+rerank`，每个命中保留 `retrieval_score` 并给出 `rerank_score`。若网关超时、不可用或返回不安全的索引，运行时保留初检结果、不阻断查询，并记录不含查询文本和密钥的 `rerank_skipped` 事件；同时写入固定 `failure_category` 的 `provider_failure` 运维事件和 Prometheus 终态失败计数。
 
-#### Production RAG 配置模板
+#### RAG / pgvector 联调配置模板
 
-默认 `parsecore.toml` 继续保持 embedding 与 rerank 关闭。需要生产 RAG 时，从以下完整模板选择一条，复制为部署专用配置后替换数据库、模型或网关地址；不得把密钥写入 TOML。只有需要二阶段排序的 profile 才开启 `[providers.rerank]`。
+默认 `parsecore.toml` 继续保持 embedding 与 rerank 关闭。以下模板用于本地技术联调，不是已验证的生产基线；正式版本发布、目标生产部署和 RAG 业务效果均未验证。启用发布时，内置索引不支持 `rag` 产物 profile。若用于联调，复制为专用配置后替换数据库、模型或网关地址；不得把密钥写入 TOML。只有需要二阶段排序的 profile 才开启 `[providers.rerank]`。
 
 - [本地 Transformer + pgvector](../parsecore.pgvector.local-embedding.toml.example)：已按 `all-MiniLM-L6-v2` 的 `384` 维配置，模型目录必须提前放到每个 API/worker 节点，且镜像或虚拟环境需要安装 `.[local-embedding]`。
 - [远程 OpenAI-compatible 网关 + pgvector](../parsecore.pgvector.remote-embedding.toml.example)：采用不可路由的示例 URL 和 `PARSECORE_EMBEDDING_API_KEY` 环境变量；部署前由密钥管理系统注入真实 endpoint、模型和凭证。若网关不支持 `dimensions` 请求，删除该 option，并把 `index.embedding_dimension` 改为它实际返回的维度。
@@ -557,7 +557,7 @@ Remove-Item Env:PARSECORE_DATABASE_URL, Env:PARSECORE_ALIYUN_API_KEY
 
 `_embedding_smoke.py` 使用受控的临时 DOCX，执行解析、embedding、pgvector 写入、hybrid 检索和可选 rerank；它可以证明技术链路及维度配置正确，但不能替代经批准的典型业务文档相关性验收。独立 `_rerank_smoke.py` 只验证排序 transport，不连接数据库。
 
-对真实外部文档或受控 PDF 页段执行可复现的 production profile 验收：
+若要在本地联调中使用真实文档或受控 PDF 页段检查候选 profile，可运行下列验收工具。它的结果只覆盖本次本地配置和样本，不等于生产验收：
 
 ```powershell
 & '.\.venv\Scripts\python.exe' tools/production_rag_acceptance.py `
@@ -920,7 +920,7 @@ P0-03～P0-05 引入的运维命令（均使用同一个 `--config`）：
 .\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
 .\.venv\Scripts\python.exe -m parsecore.cli payload-contract-check
 .\.venv\Scripts\python.exe -m parsecore.cli p1-contract-acceptance --out var/self-check/p1-contract-acceptance-20260715.json
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+python -m pytest -q
 .\.venv\Scripts\python.exe -m parsecore.cli self-check --config parsecore.toml
 ```
 
@@ -1162,7 +1162,7 @@ GET /v1/parse/schemas/document-reader
 
 `/v1/parse/schemas` 会列出当前已经冻结的 payload contract；当前已提供 `document-coverage / document-ir / document-parts / document-providers / document-quality / document-reader` 六份 JSON Schema，对应覆盖审计、统一 IR、part 诊断、Provider 诊断、质量诊断和阅读页主链。宿主可以直接用这些 schema 做联调、自测或版本门禁；`/v1/runtime` 的 `payload_schemas` 字段也会返回同一份摘要列表，便于启动后自动发现。
 
-同步导出已把 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records` 都纳入正式 dataset。`coverage` 对应页级 RAG 覆盖报告，默认 JSONL 文件名可作为 `coverage_report.jsonl` 保存；`reader` 对应 `projection=reader` 的 reader blocks，可直接用于阅读页联调、排版质量抽检和结构化表格/图示回归。同步 records 导出也可带相同的 `query / page_start / page_end / quality_signal / field.*` 参数，用于直接下载筛选后的 records。CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields/table/figure/knowledge_units` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供异步导出包 MVP：
+同步导出已把 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records` 都纳入正式 dataset。`coverage` 对应页级 RAG 覆盖报告，默认 JSONL 文件名可作为 `coverage_report.jsonl` 保存；`reader` 对应 `projection=reader` 的 reader blocks，可直接用于阅读页联调、排版质量抽检和结构化表格/图示回归。同步 records 导出也可带相同的 `query / page_start / page_end / quality_signal / field.*` 参数，用于直接下载筛选后的 records。CSV/TSV/XLSX/SQLite 会把嵌套字段如 `cells/detail/warnings/fields/table/figure/knowledge_units` 稳定序列化成 JSON 字符串。SQLite 导出会生成一个与 dataset 同名的数据表，适合大结果集的离线查询；XLSX 更适合给业务人员抽检 compact records。当前也已提供导出包 MVP：
 
 ```text
 POST /v1/parse/documents/{doc_id}/export-jobs
@@ -1170,7 +1170,9 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-异步包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / coverage.jsonl / reader.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records`，`quality_signal` 也可筛选 coverage/reader 的 `quality_signal_codes`。异步包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
+`POST /v1/parse/documents/{doc_id}/export-jobs` 在请求内生成并写出文件后返回 `202`，records 导出可能全量读取。随后 `/download` 分块传输已生成的文件。
+
+导出包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / coverage.jsonl / reader.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records`，`quality_signal` 也可筛选 coverage/reader 的 `quality_signal_codes`。导出包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
 
 当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
 
@@ -1238,14 +1240,16 @@ $headers = @{ "x-api-key" = $env:PARSECORE_API_KEY }
 Invoke-RestMethod -Headers $headers http://127.0.0.1:8090/v1/runtime
 ```
 
-## 生产检查清单
+## 生产检查清单（目标环境前置项）
+
+以下是上线检查项，不表示当前环境已通过生产验收。还须确认 Postgres/pgvector 正式发布和 run 隔离缺口已解决或不在所选用法范围内；启用发布时不得把内置索引的 `rag` profile 视为可用。
 
 上线前确认：
 
 - 已选择正确配置文件，并通过 `describe` 确认 `execution_mode / database_url / index_mode / parsers / providers`。
 - 对外 API 已配置 `runtime.api_key_env`，密钥只存在环境变量或密钥管理系统中。
 - `max_upload_bytes` 与业务文件上限一致。
-- 生产使用 API + Worker 时，`database_url` 指向 Postgres，而不是本地 SQLite。
+- 目标环境若使用 API + Worker，需选择可共享的持久化存储；Postgres 示例当前仅覆盖存储/索引联调，正式发布和生产能力尚未验证。
 - OCR、embedding、LLM provider 的 `base_url / api_key_env / timeout_seconds / max_retries` 已按真实网关设置。
 - `providers.embedding.enabled = true` 时已明确是 fake 还是真实 provider。
 - Excel 大表场景已设置 `max_rows_per_sheet / max_cols_per_sheet / max_metadata_cells` 或完成性能基线。

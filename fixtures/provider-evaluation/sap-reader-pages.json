@@ -1,0 +1,90 @@
+{
+  "schema_version": "2026-07-provider-gold-corpus-v1",
+  "description": "Source-reviewed windows for the SAP Web Client guide. These diagnostic labels check native text order and available block kinds. See the delivery notes for full-document Reader screenshot placement checks.",
+  "approved_provider_ids": ["pdf-text"],
+  "pages": [
+    {
+      "id": "sap-relationship-map-p48",
+      "document_id": "sap-web-client",
+      "page_number": 48,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "SAP操作指南.pdf",
+        "sha256": "6a41a97cb6bd785c71e6b13126b079bd029c2185c80c02fc704caeb8b8653573",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages"
+      },
+      "expected": {
+        "blockKinds": ["paragraph", "image"],
+        "orderedAnchors": ["工具栏", "首先处理"]
+      }
+    },
+    {
+      "id": "sap-quotation-steps-p64",
+      "document_id": "sap-web-client",
+      "page_number": 64,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "SAP操作指南.pdf",
+        "sha256": "6a41a97cb6bd785c71e6b13126b079bd029c2185c80c02fc704caeb8b8653573",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages"
+      },
+      "expected": {
+        "blockKinds": ["paragraph"],
+        "orderedAnchors": [
+          "要创建销售报价单，请点击",
+          "“常规”选项卡上",
+          "“内容”选项卡上",
+          "“物流”选项卡上",
+          "“会计”选项卡上",
+          "“附件”选项卡上",
+          "“用户定义字段”选项卡上",
+          "“添加并查看”、“添加并新建”、“添加并返回”",
+          "相关信息"
+        ]
+      }
+    },
+    {
+      "id": "sap-production-receipt-steps-p246",
+      "document_id": "sap-web-client",
+      "page_number": 246,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "SAP操作指南.pdf",
+        "sha256": "6a41a97cb6bd785c71e6b13126b079bd029c2185c80c02fc704caeb8b8653573",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages"
+      },
+      "expected": {
+        "blockKinds": ["paragraph"],
+        "orderedAnchors": [
+          "通过以下方式之一进入“生产收货”屏幕",
+          "“序列/编号”字段",
+          "“日记账备注”字段",
+          "“生产订单编号”字段",
+          "“完成”",
+          "“拒绝”",
+          "添加并查看”：添加并查看物料清单",
+          "指定数量的产品或分拆组件将添加到库存"
+        ]
+      }
+    },
+    {
+      "id": "sap-add-card-p286",
+      "document_id": "sap-web-client",
+      "page_number": 286,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "SAP操作指南.pdf",
+        "sha256": "6a41a97cb6bd785c71e6b13126b079bd029c2185c80c02fc704caeb8b8653573",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages"
+      },
+      "expected": {
+        "blockKinds": ["paragraph", "image"],
+        "orderedAnchors": ["概览屏幕设计器", "添加卡", "标题和副标题"]
+      }
+    }
+  ]
+}

@@ -1,10 +1,10 @@
 # 灰度推荐配置
 
-## SQLite 发布灰度与 pgvector 联调
+## SQLite 本地发布验证与 pgvector 存储/索引联调
 
-需要待审读取和正式版本发布时，以 `parsecore.queue.toml` 的 SQLite 配置开始受控验证。当前 PostgresRunStore 不支持原子发布，pgvector 也未实现文档 run 隔离；这两项不在本轮新增后端范围内。
+本文件中的命令是本地联调与验证操作说明，不是已执行的灰度或生产部署记录。SQLite 已实现并有本地正式发布链路验收；生产部署仍未验证。需要待审读取和正式版本发布时，以 `parsecore.queue.toml` 的 SQLite 配置开始本地受控验证。当前 PostgresRunStore 不支持原子发布或待审 run 读取，pgvector 也未实现文档 run 隔离。启用发布时，内置索引不支持 `rag` 产物 profile。
 
-`parsecore.pgvector.toml.example` 用于存储与索引联调，不能作为正式发布已验收的生产基线：
+`parsecore.pgvector.toml.example` 仅用于存储与索引联调，不能作为正式发布或生产基线：
 
 - `execution_mode = "queue-worker"`
 - `database_url = "postgresql://parsecore:parsecore@parsecore-postgres:5432/parsecore"`
@@ -40,7 +40,7 @@ $env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.fake-embedding.toml.exampl
 docker compose --profile pgvector up -d --build
 ```
 
-## 灰度前检查
+## 本地联调前检查
 
 ```powershell
 .\.venv\Scripts\python.exe -m parsecore.cli self-check --skip-regression
@@ -50,7 +50,7 @@ docker compose --profile pgvector up -d --build
 .\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.pgvector.toml.example
 ```
 
-若有 Postgres 可用，设置 `PARSECORE_TEST_POSTGRES_URL` 后运行：
+若有 Postgres 可用，设置 `PARSECORE_TEST_POSTGRES_URL` 后可运行以下集成 smoke；它不验证正式发布或生产部署：
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_postgres_stores

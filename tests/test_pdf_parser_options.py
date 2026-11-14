@@ -22,7 +22,7 @@ from parsecore.parsers import (
     _ocr_line_records,
     _ocr_line_records_for_page,
     _pdf_ocr_cache_identity,
-    _pdf_page_image_count_hint,
+    _pdf_page_image_hints,
     _select_pdf_layout_pages,
     _select_pdf_layout_work,
     build_parser,
@@ -294,7 +294,28 @@ class PdfTextParserOptionsTests(unittest.TestCase):
             def images(self):
                 raise AssertionError("image objects should not be materialized")
 
-        self.assertEqual(_pdf_page_image_count_hint(_RawPage()), 1)
+        self.assertEqual(_pdf_page_image_hints(_RawPage()), (1, False))
+
+    def test_adaptive_layout_selector_checks_single_large_raster_but_skips_inline_icons(self) -> None:
+        class RasterPage:
+            def __init__(self, width: int, height: int) -> None:
+                self.resources = {"img": {"/Subtype": "/Image", "/Width": width, "/Height": height}}
+
+            def get(self, key: str):
+                return {"/XObject": self.resources} if key == "/Resources" else None
+
+        native_text = ["Instructions with native text."] * 8
+        pages = [SimpleNamespace(images=[])] * 6 + [RasterPage(1000, 687), RasterPage(16, 16)]
+        work = _select_pdf_layout_work(
+            native_text,
+            pages,
+            min_cid_tokens=5,
+            min_cid_char_ratio=0.12,
+            max_page_ratio=0.85,
+            min_pages=8,
+        )
+
+        self.assertEqual(work, ({7}, set(), {7}))
 
     def test_ocr_fallback_reason_supports_pdf_name_dense_tokens(self) -> None:
         text = " /0 /1 /2 /3 /i255 /i128 /9 /8 " * 6

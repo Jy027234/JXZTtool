@@ -24,13 +24,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.provider_comparison_report import build_report  # noqa: E402
+from parsecore.tables import resolve_table_grid  # noqa: E402
 
 
-SCHEMA_VERSION = "2026-07-provider-gold-evaluation"
+SCHEMA_VERSION = "2026-11-provider-gold-evaluation"
 WEIGHTS = {
     "completeness": 25,
     "reading_order": 20,
-    "table_structure": 25,
+    "table_text_coverage": 25,
     "heading_hierarchy": 15,
     "key_tokens": 10,
     "runtime_cost": 5,
@@ -274,6 +275,7 @@ def _resolve_imported_pages(payload: Mapping[str, Any], corpus_path: Path) -> li
                 "id": str(sample.get("id") or ""),
                 "document_id": document_id,
                 "page_number": page_number,
+                "page_end": int(sample.get("page_end") or page_number),
                 "title": str(sample.get("title") or ""),
                 "expected": dict(sample.get("expected") or {}),
                 "review": dict(sample.get("review") or {}),
@@ -318,6 +320,128 @@ def _find_anchor_positions(text: str, anchors: Sequence[str]) -> list[int]:
     return [normalized.find(_compact(anchor)) for anchor in anchors if _compact(anchor)]
 
 
+def _cell_text(value: Any) -> str:
+    return " ".join(str(value if value is not None else "").split())
+
+
+def _check_table_relationships(labels: Any, evidence: Any) -> dict[str, Any]:
+    """Compare reviewed grid positions and continuation records against the projected data."""
+    if labels is None or not isinstance(evidence, Mapping) or "tables" not in evidence:
+        return {
+            "status": "unverified",
+            "issues": [{"reason": "no_reviewed_positions" if labels is None else "no_table_evidence"}],
+        }
+    if not isinstance(labels, Mapping) or not labels.get("tables"):
+        raise ValueError("table_relationships_require_table_labels")
+
+    issues: list[dict[str, Any]] = []
+    tables = evidence.get("tables") or []
+    matched_tables: dict[int, str] = {}
+    checked_cells = 0
+    for expected in labels["tables"]:
+        page_number = int(expected["page_number"])
+        if not any(int(row) > 0 and cells for row, cells in expected["cells"].items()):
+            issues.append({"reason": "no_reviewed_data_cells", "page_number": page_number})
+        matches = [table for table in tables if table["page_number"] == page_number]
+        if len(matches) != 1:
+            issues.append({"reason": "table_count_mismatch", "page_number": page_number, "actual": len(matches)})
+            continue
+        table = matches[0]
+        matched_tables[page_number] = table["table_id"]
+        rows = resolve_table_grid(table).rows()
+        row_count = int(expected["row_count"])
+        # A source column with several item labels in one cell has no observed
+        # row boundaries. Matching the nth line of each column would pair values
+        # incorrectly when a source row has an empty or wrapped cell.
+        unresolved_rows = not rows or (
+            len(rows) < row_count and any(row and len(row[0].splitlines()) > 1 for row in rows[1:])
+        )
+        if unresolved_rows:
+            issues.append({
+                "reason": "row_boundaries_unverified",
+                "page_number": page_number,
+                "expected_rows": row_count,
+                "actual_rows": len(rows),
+            })
+        elif len(rows) != row_count:
+            issues.append({
+                "reason": "table_row_count_mismatch",
+                "page_number": page_number,
+                "expected_rows": row_count,
+                "actual_rows": len(rows),
+            })
+        for row_key, cells in expected["cells"].items():
+            row_index = int(row_key)
+            if unresolved_rows and (row_index > 0 or not rows):
+                continue
+            for col_key, value in cells.items():
+                col_index = int(col_key)
+                actual = (
+                    rows[row_index][col_index]
+                    if 0 <= row_index < len(rows) and 0 <= col_index < len(rows[row_index])
+                    else None
+                )
+                checked_cells += 1
+                if actual is None or _cell_text(actual) != _cell_text(value):
+                    issues.append({
+                        "reason": "table_cell_mismatch",
+                        "page_number": page_number,
+                        "row": row_index,
+                        "column": col_index,
+                        "expected": value,
+                        "actual": actual,
+                    })
+
+    checked_records = 0
+    if continuation := labels.get("continuation"):
+        records = [
+            record for record in evidence.get("records") or []
+            if record.get("source") == "table-row" and record.get("table_id") in matched_tables.values()
+        ]
+        expected_parts = sorted(matched_tables.items())
+        label_field = continuation["label_field"]
+        expected_labels = [_cell_text(value) for value in continuation["row_labels"]]
+        actual_labels = [_cell_text(record["fields"].get(label_field)) for record in records]
+        if actual_labels != expected_labels:
+            issues.append({
+                "reason": "continuation_rows_mismatch",
+                "expected": expected_labels,
+                "actual": actual_labels,
+            })
+        else:
+            for position, record in enumerate(records):
+                relationship = record.get("continuation") or {}
+                parts = [(part["page_number"], part["table_id"]) for part in relationship.get("parts", [])]
+                if (
+                    len(matched_tables) != len(labels["tables"])
+                    or len(expected_parts) < 2
+                    or relationship.get("kind") != "column_continuation"
+                    or relationship.get("part_count") != len(expected_parts)
+                    or parts != expected_parts
+                ):
+                    issues.append({"reason": "continuation_sources_mismatch", "row": position})
+                fields = {_cell_text(name): _cell_text(value) for name, value in record["fields"].items()}
+                for name, value in continuation.get("fields", {}).get(str(position), {}).items():
+                    actual = fields.get(_cell_text(name))
+                    if actual != _cell_text(value):
+                        issues.append({
+                            "reason": "continuation_field_mismatch",
+                            "row": position,
+                            "field": name,
+                            "expected": value,
+                            "actual": actual,
+                        })
+                checked_records += 1
+
+    if any(issue["reason"] not in {"row_boundaries_unverified", "no_reviewed_data_cells"} for issue in issues):
+        status = "failed"
+    elif issues:
+        status = "unverified"
+    else:
+        status = "verified"
+    return {"status": status, "checked_cells": checked_cells, "checked_records": checked_records, "issues": issues}
+
+
 def score_page(
     *,
     page: Mapping[str, Any],
@@ -328,7 +452,10 @@ def score_page(
     expected = page.get("expected") if isinstance(page.get("expected"), Mapping) else {}
     evidence = [entry for entry in provider.get("gold_evidence", []) or [] if isinstance(entry, Mapping)]
     target_page = int(page.get("page_number") or 0)
-    evidence = [entry for entry in evidence if int(entry.get("page_number") or 0) == target_page]
+    last_page = int(page.get("page_end") or target_page)
+    evidence = [
+        entry for entry in evidence if target_page <= int(entry.get("page_number") or 0) <= last_page
+    ]
     provider_id = str(provider.get("provider_id") or "")
     vetoes: list[str] = []
     if str(provider.get("status") or "") != "done":
@@ -364,6 +491,10 @@ def score_page(
     critical_hits = sum(position >= 0 for position in _find_anchor_positions(all_text, critical_tokens))
     if critical_tokens and critical_hits < len(critical_tokens):
         vetoes.append("critical_token_missing")
+    relationship_labels = expected.get("tableRelationships")
+    relationships = _check_table_relationships(relationship_labels, provider.get("table_evidence"))
+    if relationship_labels is not None and relationships["status"] != "verified":
+        vetoes.append(f"table_relationships_{relationships['status']}")
 
     elapsed_s = float(provider.get("elapsed_s") or 0)
     runtime_score = (
@@ -374,7 +505,7 @@ def score_page(
     axes = {
         "completeness": _ratio(anchor_hits, len(anchors)),
         "reading_order": 1.0 if not expected_order else (1.0 if order_ok else 0.0),
-        "table_structure": _ratio(table_hits, len(table_anchors)),
+        "table_text_coverage": _ratio(table_hits, len(table_anchors)),
         "heading_hierarchy": min(
             _ratio(kind_hits, len(expected_kinds)),
             1.0 - _ratio(forbidden_heading_hits, len(must_not_be_heading), empty=0.0),
@@ -389,6 +520,7 @@ def score_page(
         "status": "blocked" if vetoes else "scored",
         "score": round(score, 3),
         "axes": {axis: round(value * 100, 3) for axis, value in axes.items()},
+        "table_relationships": relationships,
         "vetoes": list(dict.fromkeys(vetoes)),
         "evidence_block_count": len(evidence),
         "elapsed_s": elapsed_s,
@@ -457,7 +589,7 @@ def evaluate_report(
         else:
             if summary["average_score"] < baseline_summary["average_score"] + float(corpus["minimum_score_improvement"]):
                 blockers.append("score_improvement_below_threshold")
-            for axis in ("reading_order", "table_structure"):
+            for axis in ("reading_order", "table_text_coverage"):
                 if (summary["average_axes"].get(axis) or 0) < (baseline_summary.get("average_axes", {}).get(axis) or 0):
                     blockers.append(f"{axis}_regressed")
         promotions[provider_id] = {
@@ -541,7 +673,7 @@ def build_gold_evaluation(
                 {
                     "name": page["id"],
                     "path": resolved_sources[page["document_id"]],
-                    "page_range": {"start": page["page_number"], "end": page["page_number"]},
+                    "page_range": {"start": page["page_number"], "end": page.get("page_end") or page["page_number"]},
                     "providers": list(dict.fromkeys([baseline_provider_id, *providers])),
                 }
                 for page in selected_pages
@@ -553,6 +685,7 @@ def build_gold_evaluation(
             providers=list(dict.fromkeys([baseline_provider_id, *providers])),
             progress=progress,
             track_python_memory=track_python_memory,
+            include_table_evidence=any((page.get("expected") or {}).get("tableRelationships") for page in selected_pages),
         )
     evaluation = evaluate_report(comparison=comparison, corpus=corpus, baseline_provider_id=baseline_provider_id)
     return {"comparison": comparison, "gold_evaluation": evaluation}

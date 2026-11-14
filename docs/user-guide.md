@@ -12,10 +12,10 @@ ParseCore 当前支持四种使用形态：
 | --- | --- | --- |
 | 嵌入式 SDK | Python 产品内直接调用解析能力 | `parsecore.bootstrap.build_runtime` |
 | HTTP API | 多产品共享解析服务 | `parsecore.cli serve` / ASGI `create_app` |
-| Queue Worker | 大文件、长任务、生产灰度 | `parsecore.cli worker` |
+| Queue Worker | 大文件、长任务；生产使用前需完成目标环境验证 | `parsecore.cli worker` |
 | CLI 工具 | 本地自检、压测、运维任务 | `python -m parsecore.cli ...` |
 
-本地开发先使用默认 SQLite/inline 配置；需要独立 worker 时使用 `parsecore.queue.toml`。当前正式版本发布与待审内容读取仅支持 SQLite。Postgres/pgvector 可用于存储和索引联调，其正式版本发布仍未实现，不能据此认定生产发布链路可用。
+本地开发先使用默认 SQLite/inline 配置；需要独立 worker 时使用 `parsecore.queue.toml`。当前正式版本发布与待审内容读取仅支持 SQLite。Postgres/pgvector 可用于存储和索引联调，但正式版本原子发布、待审 run 读取和文档 run 隔离仍未实现/未验证；启用发布时，内置索引不支持 `rag` 产物 profile，不能据此认定生产发布链路可用。
 
 ## 快速启动
 
@@ -206,7 +206,7 @@ Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dat
 Invoke-WebRequest "http://127.0.0.1:8090/v1/parse/documents/demo-doc/exports?dataset=records&format=xlsx" -OutFile records.xlsx
 ```
 
-大结果集推荐异步导出包：
+大结果集可使用导出包接口。`POST /v1/parse/documents/{doc_id}/export-jobs` 在请求内生成文件并落盘后返回 `202`，records 数据集可能全量读取。生成完成后可通过 `/download` 分块下载文件。
 
 ```powershell
 $body = @{
@@ -266,7 +266,7 @@ jsonl | csv | tsv | sqlite | xlsx
 交付给宿主产品前，建议完成：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+python -m pytest -q
 git diff --check
 .\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
 Invoke-RestMethod http://127.0.0.1:8090/health
@@ -280,7 +280,7 @@ Invoke-RestMethod http://127.0.0.1:8090/health
 4. 一个大 PDF part 解析样本。
 5. 一次 records SQLite 或 JSONL 导出。
 
-验收通过后，本版可按"受控生产灰度"交付。
+这些本地/集成检查通过后，可评估宿主侧试运行。生产灰度还需通过目标环境的配置、持久化、权限、备份与回滚验证；本地 SQLite 正式发布验收不代表 Postgres/pgvector 或生产部署已验证。
 
 ---
 

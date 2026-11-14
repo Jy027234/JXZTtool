@@ -1719,11 +1719,20 @@ gate_status = "pending"
                 self.assertEqual(export_manifest.json()["request"]["filters"], {"severity": ["warning"]})
                 self.assertEqual(export_manifest.json()["files"][0]["records"], 1)
 
-                export_download = client.get(
-                    f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
-                    params={"file": "quality_signals.jsonl"},
-                )
+                with patch.object(Path, "read_bytes", side_effect=AssertionError("download must stream the file")):
+                    export_download = client.get(
+                        f"/v1/parse/export-jobs/{export_payload['export_id']}/download",
+                        params={"file": "quality_signals.jsonl"},
+                    )
                 self.assertEqual(export_download.status_code, 200)
+                self.assertEqual(
+                    export_download.headers["content-type"],
+                    "application/x-ndjson; charset=utf-8",
+                )
+                self.assertEqual(
+                    export_download.headers["content-disposition"],
+                    'attachment; filename="quality_signals.jsonl"',
+                )
                 self.assertIn("table_ragged_rows", export_download.text)
 
                 coverage_download = client.get(

@@ -34,6 +34,8 @@ from .ocr_cache import (
     get_default_cache,
     ocr_cache_identity,
 )
+from .pdf_page_order import build_page_content_sequence as _build_page_content_sequence
+from .pdf_page_order import figure_text_breaks as _find_figure_text_breaks
 from .tables import (
     GridCell,
     TableGrid,
@@ -2501,6 +2503,40 @@ class PdfTextParser(ParserAdapter):
             return begin()
         return self._boundary_refiner
 
+    def _page_paragraphs(self, text: str, *, boundary_refiner: Any) -> list[str]:
+        paragraphs = _split_pdf_page_text(text)
+        if self._split_structural_enabled:
+            paragraphs = _split_structural_items(paragraphs, min_lines_trigger=self._structural_min_lines)
+        if self._split_inline_structural_enabled:
+            paragraphs = _split_inline_structural_items(
+                paragraphs, min_length_trigger=self._inline_structural_min_length
+            )
+        if self._split_toc_enabled:
+            paragraphs = _split_toc_entries(paragraphs, min_entries_trigger=self._toc_min_entries)
+        if self._merge_figure_caption_enabled:
+            paragraphs = _merge_figure_caption_paragraphs(paragraphs)
+        if self._merge_short_enabled:
+            paragraphs = _merge_short_blocks(paragraphs, min_length=self._short_block_min_length)
+        if self._merge_table_enabled:
+            paragraphs = _merge_table_continuations(paragraphs)
+        if self._merge_highlights_enabled:
+            paragraphs = _merge_highlights_entries(paragraphs)
+        if self._semantic_refiner is not None:
+            paragraphs = _refine_with_semantic_similarity(
+                paragraphs,
+                refiner=self._semantic_refiner,
+                merge_threshold=self._semantic_merge_threshold,
+                split_threshold=self._semantic_split_threshold,
+            )
+        if boundary_refiner is not None:
+            paragraphs = _refine_low_confidence_paragraphs(
+                paragraphs,
+                refiner=boundary_refiner,
+                min_length=self._llm_min_length,
+                min_markers=self._llm_min_markers,
+            )
+        return paragraphs
+
     def _parse_uncached(self, request: ParseRequest) -> Sequence[Block]:
         PdfReader = _load_pdf_reader()
         request_enable_ocr = _resolve_request_enable_ocr(request)
@@ -2720,44 +2756,36 @@ class PdfTextParser(ParserAdapter):
                 if effective_dual_channel_enabled and page_number - 1 < len(layout_pages)
                 else None
             )
-            paragraphs = _split_pdf_page_text(page_text)
-            if self._split_structural_enabled:
-                paragraphs = _split_structural_items(
-                    paragraphs, min_lines_trigger=self._structural_min_lines
-                )
-            if self._split_inline_structural_enabled:
-                paragraphs = _split_inline_structural_items(
-                    paragraphs,
-                    min_length_trigger=self._inline_structural_min_length,
-                )
-            if self._split_toc_enabled:
-                paragraphs = _split_toc_entries(
-                    paragraphs, min_entries_trigger=self._toc_min_entries
-                )
-            if self._merge_figure_caption_enabled:
-                paragraphs = _merge_figure_caption_paragraphs(paragraphs)
-            if self._merge_short_enabled:
-                paragraphs = _merge_short_blocks(
-                    paragraphs, min_length=self._short_block_min_length
-                )
-            if self._merge_table_enabled:
-                paragraphs = _merge_table_continuations(paragraphs)
-            if self._merge_highlights_enabled:
-                paragraphs = _merge_highlights_entries(paragraphs)
-            if self._semantic_refiner is not None:
-                paragraphs = _refine_with_semantic_similarity(
-                    paragraphs,
-                    refiner=self._semantic_refiner,
-                    merge_threshold=self._semantic_merge_threshold,
-                    split_threshold=self._semantic_split_threshold,
-                )
-            if boundary_refiner is not None:
-                paragraphs = _refine_low_confidence_paragraphs(
-                    paragraphs,
-                    refiner=boundary_refiner,
-                    min_length=self._llm_min_length,
-                    min_markers=self._llm_min_markers,
-                )
+            figure_breaks = (
+                {
+                    index: page_layout.figure_text_breaks[figure.bbox]
+                    for index, figure in enumerate(page_layout.figure_regions)
+                    if figure.bbox in page_layout.figure_text_breaks
+                }
+                if page_layout is not None and page_text == page_layout.text_without_tables
+                and getattr(page_layout, "figure_text_breaks", None)
+                else {}
+            )
+            figure_anchors: dict[int, int] = {}
+            if figure_breaks:
+                # Keep the usual paragraph processing within each text region.
+                # Running it across the whole page could rejoin text across a figure.
+                paragraphs: list[str] = []
+                anchors_by_break: dict[int, int] = {}
+                source_lines = page_text.split("\n")
+                first_line = 0
+                for next_line in sorted(set(figure_breaks.values()) | {len(source_lines)}):
+                    paragraphs.extend(self._page_paragraphs(
+                        "\n".join(source_lines[first_line:next_line]),
+                        boundary_refiner=boundary_refiner,
+                    ))
+                    anchors_by_break[next_line] = len(paragraphs)
+                    first_line = next_line
+                figure_anchors = {
+                    index: anchors_by_break[break_at] for index, break_at in figure_breaks.items()
+                }
+            else:
+                paragraphs = self._page_paragraphs(page_text, boundary_refiner=boundary_refiner)
             is_highlights_page = _is_highlights_page(paragraphs)
             paragraph_headings = [
                 _infer_pdf_structural_heading(paragraph)
@@ -2780,7 +2808,11 @@ class PdfTextParser(ParserAdapter):
                     SemanticRole.TOC_ENTRY.value if heading is not None else role
                     for role, heading in zip(paragraph_roles, paragraph_headings, strict=False)
                 ]
-            sequence = _build_page_content_sequence(paragraphs, page_layout=page_layout)
+            sequence = _build_page_content_sequence(
+                paragraphs,
+                page_layout=page_layout,
+                figure_anchors=figure_anchors,
+            )
             if not sequence:
                 # Keep an explicit, non-indexable page artifact for every
                 # page that has no usable text.  OCR failures use a dedicated
@@ -3289,75 +3321,6 @@ def _looks_like_pdf_heading(text: str) -> bool:
             compact,
             re.IGNORECASE,
         )
-    )
-
-
-def _build_page_content_sequence(
-    paragraphs: Sequence[str],
-    *,
-    page_layout: _PageLayout | None,
-) -> list[tuple[str, int]]:
-    paragraph_count = len(paragraphs)
-    tables = list(getattr(page_layout, "tables", []) or [])
-    figure_regions = list(getattr(page_layout, "figure_regions", []) or [])
-    if page_layout is None or (not tables and not figure_regions):
-        return [("paragraph", index) for index in range(paragraph_count)]
-    if paragraph_count == 0:
-        items = [
-            ("image", index, float(region.bbox[1]) if len(region.bbox) >= 2 else 0.0)
-            for index, region in enumerate(figure_regions)
-        ] + [
-            ("table", index, float(table.bbox[1]) if len(table.bbox) >= 2 else 0.0)
-            for index, table in enumerate(tables)
-        ]
-        items.sort(key=lambda item: (item[2], item[0], item[1]))
-        return [(kind, index) for kind, index, _top in items]
-
-    height = float(page_layout.height or 0.0)
-    anchored_items: list[tuple[int, float, str, int]] = []
-    for table_index, table in enumerate(tables):
-        top = float(table.bbox[1]) if len(table.bbox) >= 2 else 0.0
-        anchor = _estimate_table_anchor_index(
-            top=top,
-            page_height=height,
-            paragraph_count=paragraph_count,
-        )
-        anchored_items.append((anchor, top, "table", table_index))
-    for figure_index, figure in enumerate(figure_regions):
-        top = float(figure.bbox[1]) if len(figure.bbox) >= 2 else 0.0
-        anchor = _estimate_table_anchor_index(
-            top=top,
-            page_height=height,
-            paragraph_count=paragraph_count,
-        )
-        anchored_items.append((anchor, top, "image", figure_index))
-    anchored_items.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-
-    sequence: list[tuple[str, int]] = []
-    item_cursor = 0
-    for paragraph_index in range(paragraph_count + 1):
-        while item_cursor < len(anchored_items) and anchored_items[item_cursor][0] == paragraph_index:
-            sequence.append((anchored_items[item_cursor][2], anchored_items[item_cursor][3]))
-            item_cursor += 1
-        if paragraph_index < paragraph_count:
-            sequence.append(("paragraph", paragraph_index))
-    return sequence
-
-
-def _estimate_table_anchor_index(
-    *,
-    top: float,
-    page_height: float,
-    paragraph_count: int,
-) -> int:
-    if paragraph_count <= 0:
-        return 0
-    if page_height <= 0.0:
-        return paragraph_count
-    clamped_top = min(max(top, 0.0), page_height)
-    return min(
-        paragraph_count,
-        max(0, int(round((clamped_top / page_height) * paragraph_count))),
     )
 
 
@@ -5589,6 +5552,7 @@ class _PageLayout:
     text_without_tables: str | None = None
     tables: list[_PdfTable] = _dc_field(default_factory=list)
     figure_regions: list[_FigureRegion] = _dc_field(default_factory=list)
+    figure_text_breaks: dict[tuple[float, float, float, float], int] = _dc_field(default_factory=dict)
     column_count_hint: int = 1
     layout_reading_order_applied: bool = False
     layout_reading_order_strategy: str | None = None
@@ -5733,7 +5697,7 @@ def _select_pdf_layout_work(
     has evidence of tables, figures, columns, or OCR-worthy text.
 
     The detector intentionally uses only the native text already extracted by
-    pypdf plus a cheap image-count hint.  It is conservative around common
+    pypdf plus cheap image resource hints. It is conservative around common
     aviation/manual markers (tables, part numbers, FIG-ITEM) and retains all
     pages with OCR/empty-text signals.  Product profiles that require strict
     fidelity bypass this helper before it is called.
@@ -5751,10 +5715,11 @@ def _select_pdf_layout_work(
         stripped = raw_text.strip()
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         image_count = 0
+        has_large_image = False
         if page_number - 1 < len(pages):
             page = pages[page_number - 1]
             try:
-                image_count = _pdf_page_image_count_hint(page)
+                image_count, has_large_image = _pdf_page_image_hints(page)
             except Exception:
                 image_count = 0
 
@@ -5807,6 +5772,7 @@ def _select_pdf_layout_work(
             or (ocr_reason is not None and ocr_reason != "empty_text")
             or has_layout_marker
             or image_count >= 5
+            or has_large_image
             or column_like_lines >= 2
             or fragmented_native
         ):
@@ -5819,7 +5785,7 @@ def _select_pdf_layout_work(
         # tables whose native text has weak marker vocabulary.
         if has_strong_table_marker or table_like_lines >= 4:
             table_pages.add(page_number)
-        if has_figure_marker or image_count >= 5 or (not stripped and image_count > 0):
+        if has_figure_marker or has_large_image or image_count >= 5 or (not stripped and image_count > 0):
             figure_pages.add(page_number)
 
     ratio = len(selected) / total_pages
@@ -5829,25 +5795,25 @@ def _select_pdf_layout_work(
     return selected, table_pages & selected, figure_pages & selected
 
 
-def _pdf_page_image_count_hint(page: Any) -> int:
-    """Count top-level PDF image XObjects without materializing image bytes.
+def _pdf_page_image_hints(page: Any) -> tuple[int, bool]:
+    """Read image count and bitmap size hints without decoding image bytes.
 
     ``pypdf.PageObject.images`` resolves and decodes every image, which is
-    unnecessary for the adaptive selector that only needs a count.  Resource
-    dictionaries are cheap to inspect.  Form XObjects and pages without an
-    inspectable XObject dictionary fall back to the historical property so
-    nested/inline images remain conservative rather than being skipped.
+    unnecessary for direct XObjects. The size hint brings a lone substantial
+    bitmap onto the layout route; validation of its displayed size and position
+    still belongs to the figure extractor.
     """
 
+    has_large_image = False
     try:
         resources = page.get("/Resources")
         if resources is None:
-            return len(getattr(page, "images", ()) or ())
+            return len(getattr(page, "images", ()) or ()), False
         if hasattr(resources, "get_object"):
             resources = resources.get_object()
         xobjects = resources.get("/XObject") if hasattr(resources, "get") else None
         if xobjects is None:
-            return len(getattr(page, "images", ()) or ())
+            return len(getattr(page, "images", ()) or ()), False
         if hasattr(xobjects, "get_object"):
             xobjects = xobjects.get_object()
         count = 0
@@ -5857,16 +5823,20 @@ def _pdf_page_image_count_hint(page: Any) -> int:
                 image_object = reference.get_object() if hasattr(reference, "get_object") else reference
                 subtype = str(image_object.get("/Subtype") or "")
             except Exception:
-                return len(getattr(page, "images", ()) or ())
+                return len(getattr(page, "images", ()) or ()), has_large_image
             if subtype == "/Image":
                 count += 1
+                if not has_large_image:
+                    width = _coerce_float(image_object.get("/Width")) or 0
+                    height = _coerce_float(image_object.get("/Height")) or 0
+                    has_large_image = min(width, height) >= 128
             elif subtype == "/Form":
                 has_form = True
         if has_form:
-            return len(getattr(page, "images", ()) or ())
-        return count
+            return len(getattr(page, "images", ()) or ()), has_large_image
+        return count, has_large_image
     except Exception:
-        return len(getattr(page, "images", ()) or ())
+        return len(getattr(page, "images", ()) or ()), has_large_image
 
 
 def _select_pdf_layout_pages(
@@ -6413,6 +6383,31 @@ def _extract_pdfplumber_layout(
 
             final_text_token_count = _estimate_token_count(text_without_tables)
 
+            figure_breaks: dict[tuple[float, float, float, float], int] = {}
+            extract_lines = getattr(page, "extract_text_lines", None)
+            if (
+                layout_reading_order_enabled
+                and column_count_hint == 1
+                and figure_regions
+                and not tables
+                and ocr_fallback_reason is None
+                and text_without_tables
+                and callable(extract_lines)
+            ):
+                try:
+                    lines = extract_lines(return_chars=False) or []
+                except (TypeError, ValueError):
+                    # Older backends may not support the coordinate-aware line API.
+                    lines = []
+                if lines:
+                    figure_breaks = _find_figure_text_breaks(
+                        text_without_tables,
+                        lines=lines,
+                        figure_bboxes=[figure.bbox for figure in figure_regions],
+                        page_width=float(page.width or 0.0),
+                        page_height=float(page.height or 0.0),
+                    )
+
             layouts.append(
                 _PageLayout(
                     page_number=index,
@@ -6422,6 +6417,7 @@ def _extract_pdfplumber_layout(
                     text_without_tables=text_without_tables,
                     tables=tables,
                     figure_regions=figure_regions,
+                    figure_text_breaks=figure_breaks,
                     column_count_hint=column_count_hint,
                     layout_reading_order_applied=layout_reading_order_applied,
                     layout_reading_order_strategy=layout_reading_order_strategy,

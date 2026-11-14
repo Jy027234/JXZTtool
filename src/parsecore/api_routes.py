@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .api_payloads import (
@@ -1642,10 +1642,10 @@ class ApiRoutes:
             if isinstance(entry, dict) and entry.get("path") == filename:
                 content_type = str(entry.get("content_type") or content_type)
                 break
-        return Response(
-            content=path.read_bytes(),
+        return FileResponse(
+            path,
             media_type=content_type,
-            headers={"content-disposition": f"attachment; filename=\"{Path(filename).name}\""},
+            filename=Path(filename).name,
         )
 
     async def search_document(self, request: Request) -> JSONResponse:

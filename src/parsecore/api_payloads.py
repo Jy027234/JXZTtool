@@ -389,7 +389,7 @@ def _document_projection(snapshot: dict[str, Any], *, projection: str = "full") 
             pages=pages,
         )
         if normalized_projection == "reader":
-            reader_payload = _document_reader_projection(ir_payload)
+            reader_payload = _document_reader_projection(ir_payload, source_blocks=blocks)
             reader_payload["publication"] = _publication_read_context(snapshot)
             return reader_payload
         ir_payload["publication"] = _publication_read_context(snapshot)
@@ -1455,7 +1455,11 @@ def _contract_fingerprint(value: Any) -> Any:
     return value
 
 
-def _document_reader_projection(ir: Mapping[str, Any]) -> dict[str, Any]:
+def _document_reader_projection(
+    ir: Mapping[str, Any],
+    *,
+    source_blocks: Sequence[Block] = (),
+) -> dict[str, Any]:
     ir_blocks = [dict(block) for block in ir.get("blocks", []) if isinstance(block, Mapping)]
     ir_tables = [dict(table) for table in ir.get("tables", []) if isinstance(table, Mapping)]
     ir_figures = [dict(figure) for figure in ir.get("figures", []) if isinstance(figure, Mapping)]
@@ -1478,6 +1482,14 @@ def _document_reader_projection(ir: Mapping[str, Any]) -> dict[str, Any]:
     used_figure_ids: set[str] = set()
     hidden_counts_by_page: Counter[int] = Counter()
     reader_blocks: list[dict[str, Any]] = []
+
+    source_positions = _reader_pdf_text_mixed_positions(source_blocks)
+    for block in ir_blocks:
+        source_position = source_positions.get(str(block.get("block_id") or ""))
+        if source_position is not None:
+            # Keep IR's reading_order unchanged because it is part of the
+            # public IR identity; this override exists only in the Reader view.
+            block["reading_order"] = source_position
 
     sorted_blocks = sorted(
         ir_blocks,
@@ -1640,6 +1652,54 @@ def _document_reader_projection(ir: Mapping[str, Any]) -> dict[str, Any]:
         "rag_coverage_quality": ir.get("rag_coverage_quality"),
         "index_manifest": ir.get("index_manifest"),
     }
+
+
+def _reader_pdf_text_mixed_positions(source_blocks: Sequence[Block]) -> dict[str, int]:
+    blocks_by_page: dict[int, list[Block]] = {}
+    for block in source_blocks:
+        metadata = block.metadata or {}
+        page_number = _safe_int(metadata.get("page", metadata.get("page_number")), default=1)
+        blocks_by_page.setdefault(page_number, []).append(block)
+
+    positions: dict[str, int] = {}
+    for page_blocks in blocks_by_page.values():
+        content_blocks = [
+            block
+            for block in page_blocks
+            if block.type in {BlockType.PARAGRAPH, BlockType.TABLE, BlockType.IMAGE}
+        ]
+        content_types = {block.type for block in content_blocks}
+        if not {BlockType.PARAGRAPH, BlockType.IMAGE} <= content_types:
+            continue
+        # Only reconcile the known pdf-text mixed-page case when every content
+        # block uses the same provider and has a source position. An explicit
+        # reading_order anywhere on the page keeps its existing coordinate
+        # system for the whole page.
+        if any("reading_order" in (block.metadata or {}) for block in content_blocks):
+            continue
+        if any(
+            str((block.metadata or {}).get("provider_id") or (block.metadata or {}).get("parser") or "")
+            .strip()
+            .lower()
+            != "pdf-text"
+            for block in content_blocks
+        ):
+            continue
+        page_positions = [
+            (block, (block.metadata or {}).get("position"))
+            for block in content_blocks
+        ]
+        if any(
+            not isinstance(position, int) or isinstance(position, bool) or position < 1
+            for _, position in page_positions
+        ):
+            continue
+        positions.update(
+            (str(block.block_id), position)
+            for block, position in page_positions
+            if block.block_id
+        )
+    return positions
 
 
 def _reader_text_block(

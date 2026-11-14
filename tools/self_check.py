@@ -41,7 +41,9 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -651,25 +653,96 @@ def _run_subprocess(
         return result, output
 
 
-def _run_unit_tests() -> CheckResult:
-    result, output = _run_subprocess(
-        "unit_tests",
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
-    )
-    ran_match = re.search(r"Ran\s+(\d+)\s+tests\s+in\s+([0-9.]+)s", output)
-    skipped_match = re.search(r"skipped=(\d+)", output)
-    if ran_match:
-        result.details["tests_ran"] = int(ran_match.group(1))
-        result.details["reported_elapsed_s"] = float(ran_match.group(2))
-    if skipped_match:
-        result.details["skipped"] = int(skipped_match.group(1))
-    if result.status == "passed":
-        tests_ran = result.details.get("tests_ran", "?")
-        skipped = result.details.get("skipped", 0)
-        result.summary = f"{tests_ran} tests passed, skipped={skipped}"
+def _read_pytest_junit_counts(report_path: str | Path) -> dict[str, int | float]:
+    """Read pytest counts from its JUnit report, not from test-controlled output."""
+    root = ET.parse(report_path).getroot()
+    if root.tag == "testsuite":
+        suites = [root]
+    elif root.tag == "testsuites":
+        suites = [child for child in root if child.tag == "testsuite"]
     else:
-        result.summary = result.tail[-1] if result.tail else "unit tests failed"
-    return result
+        raise ValueError(f"unexpected JUnit root element: {root.tag}")
+    if not suites:
+        raise ValueError("JUnit report contains no testsuite entries")
+
+    counts: dict[str, int | float] = {
+        "tests": 0,
+        "passed": 0,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "elapsed_s": 0.0,
+    }
+    for suite in suites:
+        try:
+            reported_tests = int(suite.attrib["tests"])
+            failures = int(suite.attrib.get("failures", "0"))
+            errors = int(suite.attrib.get("errors", "0"))
+            skipped = int(suite.attrib.get("skipped", "0"))
+            elapsed_s = float(suite.attrib.get("time", "0"))
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"JUnit suite has invalid count attributes: {exc}") from exc
+        # Pytest can emit separate testcase elements for a failed assertion and
+        # a teardown error in the same test, while counting that test once in
+        # the suite's tests attribute.
+        tests = len(suite.findall("testcase"))
+        passed = tests - failures - errors - skipped
+        if min(reported_tests, failures, errors, skipped, passed) < 0 or reported_tests > tests:
+            raise ValueError("JUnit suite counts are inconsistent")
+        counts["tests"] += tests
+        counts["passed"] += passed
+        counts["failures"] += failures
+        counts["errors"] += errors
+        counts["skipped"] += skipped
+        counts["elapsed_s"] += elapsed_s
+    return counts
+
+
+def _run_unit_tests() -> CheckResult:
+    # The pytest config limits this root invocation to tests/. JUnit XML keeps
+    # counts separate from stdout, where a test is free to print arbitrary text.
+    with tempfile.TemporaryDirectory(prefix="parsecore-self-check-tests-") as temp_dir:
+        report_path = Path(temp_dir) / "pytest-junit.xml"
+        result, _output = _run_subprocess(
+            "unit_tests",
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-rs",
+                f"--junitxml={report_path}",
+            ],
+        )
+        if result.status == "timeout":
+            return result
+        try:
+            counts = _read_pytest_junit_counts(report_path)
+        except (OSError, ET.ParseError, ValueError) as exc:
+            result.details["junit_report_error"] = str(exc)
+            if result.status == "passed":
+                result.status = "failed"
+                result.exit_code = 1
+            if not result.details.get("start_error"):
+                result.summary = "pytest did not produce a valid JUnit report"
+            return result
+
+        result.details.update(
+            {
+                "tests_ran": counts["tests"],
+                "tests_passed": counts["passed"],
+                "tests_failed": counts["failures"],
+                "tests_errors": counts["errors"],
+                "skipped": counts["skipped"],
+                "reported_elapsed_s": counts["elapsed_s"],
+            }
+        )
+        result.summary = (
+            f"passed={counts['passed']} failed={counts['failures']} "
+            f"errors={counts['errors']} skipped={counts['skipped']} "
+            f"total={counts['tests']}"
+        )
+        return result
 
 
 def _run_runtime_describe(config: str) -> CheckResult:
@@ -1414,7 +1487,15 @@ def _build_verification_payload(
     }
     if unit_tests_details:
         counts["unit_tests_ran"] = unit_tests_details.get("tests_ran")
-        counts["unit_tests_skipped"] = unit_tests_details.get("skipped")
+        count_fields = {
+            "unit_tests_passed": "tests_passed",
+            "unit_tests_failed": "tests_failed",
+            "unit_tests_errors": "tests_errors",
+            "unit_tests_skipped": "skipped",
+        }
+        for report_field, detail_field in count_fields.items():
+            if detail_field in unit_tests_details:
+                counts[report_field] = unit_tests_details[detail_field]
     return {
         "status": "verified" if verified else "unverified",
         "verified": verified,

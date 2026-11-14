@@ -22,7 +22,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from parsecore.api_payloads import _document_projection, _document_providers_projection  # noqa: E402
+from parsecore.api_payloads import (  # noqa: E402
+    _document_projection,
+    _document_providers_projection,
+    _records_from_snapshot,
+)
 from parsecore.config import (  # noqa: E402
     OcrProviderSettings,
     load_settings,
@@ -758,6 +762,7 @@ def _run_provider(
     sample_index: int,
     page_range: tuple[int, int] | None,
     track_python_memory: bool,
+    include_table_evidence: bool = False,
     parser_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parser_config = parser_settings.get(provider_id)
@@ -864,7 +869,7 @@ def _run_provider(
     rankings = (provider_report.get("comparison_report") or {}).get("rankings") or []
     ranking = rankings[0] if rankings else {}
     table_blocks = [block for block in blocks if block.type == BlockType.TABLE]
-    return {
+    result = {
         "provider_id": provider_id,
         "provider_version": provider_identity.get("provider_version"),
         "adapter_version": provider_identity.get("adapter_version"),
@@ -888,6 +893,9 @@ def _run_provider(
         "provider_score": ranking.get("score"),
         "recommendation": ranking.get("recommendation"),
     }
+    if include_table_evidence:
+        result["table_evidence"] = {"tables": ir["tables"], "records": _records_from_snapshot(snapshot)}
+    return result
 
 
 def _sample_report(
@@ -903,6 +911,7 @@ def _sample_report(
     page_range: tuple[int, int] | None,
     temp_dir: Path,
     track_python_memory: bool,
+    include_table_evidence: bool = False,
     parser_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     selection_mode = "explicit" if providers else "route_plan"
@@ -939,6 +948,7 @@ def _sample_report(
             sample_index=sample_index,
             page_range=page_range,
             track_python_memory=track_python_memory,
+            include_table_evidence=include_table_evidence,
             parser_cache=parser_cache,
         )
         for provider_id in provider_ids
@@ -1909,6 +1919,7 @@ def build_report(
     progress: bool = False,
     track_python_memory: bool = False,
     reuse_parser_instances: bool = False,
+    include_table_evidence: bool = False,
 ) -> dict[str, Any]:
     settings = load_settings(config)
     parser_settings = _parser_settings_by_name(settings)
@@ -1984,6 +1995,7 @@ def build_report(
                 ),
                 temp_dir=temp_dir,
                 track_python_memory=track_python_memory,
+                include_table_evidence=include_table_evidence,
                 parser_cache=parser_cache,
             )
             sample_reports.append(sample_report)

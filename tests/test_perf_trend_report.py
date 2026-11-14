@@ -21,7 +21,7 @@ class PerfTrendReportTests(unittest.TestCase):
                     "name": "unit_tests",
                     "status": "passed",
                     "elapsed_s": 10.2,
-                    "summary": "202 tests passed, skipped=5",
+                    "summary": "passed=197 failed=0 errors=0 skipped=5 total=202",
                     "details": {},
                     "tail": [],
                 },
@@ -170,7 +170,10 @@ class PerfTrendReportTests(unittest.TestCase):
         self.assertIn("# ParseCore Perf Gate", markdown)
         self.assertIn("| sample-a.pdf | 44.2 | 40.000 | 38.500 | 37.000 | 31.000 | 5.000 |", markdown)
         self.assertIn("| sample-a.pdf | 3.2 | 5.000 | 1.000 |", markdown)
-        self.assertIn("| unit_tests | passed | 10.2 | 202 tests passed, skipped=5 |", markdown)
+        self.assertIn(
+            "| unit_tests | passed | 10.2 | passed=197 failed=0 errors=0 skipped=5 total=202 |",
+            markdown,
+        )
         self.assertIn("| toc_recog | 1.0000 |", markdown)
 
     def test_perf_columns_extended_with_three_new_metrics(self) -> None:

@@ -6,7 +6,7 @@
 
 发布日期口径：`2026-05-10`
 
-交付结论：可以交付给宿主产品试运行，并可进入受控生产灰度。中小文档和 Excel/Word/PDF 常规解析可直接使用；1 万页以上大 PDF 建议使用异步 job、part 拆分、records 查询与 SQLite/JSONL 导出链路。
+交付口径：本版可用于宿主产品的本地或集成试运行；这不表示已完成受控生产灰度验收。SQLite 本地正式发布已有实现和验证，Postgres/pgvector 示例限存储与索引联调，正式发布及生产部署仍未验证。中小文档可按接入方流程试运行；1 万页以上大 PDF 建议使用异步 job、part 拆分、records 查询与导出包链路。
 
 ## 本版能力范围
 
@@ -18,7 +18,7 @@
 - `projection=compat|structured|full` 文档结果读取。
 - `pages / lines / records` document views 持久化。
 - records 分页查询，支持 `limit / offset / query / page_start / page_end / quality_signal / field.*`。
-- 同步导出与异步导出包，支持 `jsonl / csv / tsv / sqlite / xlsx`。
+- 同步数据集导出与导出包文件，支持 `jsonl / csv / tsv / sqlite / xlsx`。
 - 大 PDF 页段规划、part 子 job、父文档 partial 读模型、单 part/批量复跑、尚未运行 part 取消。
 - 质量信号、parse units、metrics、events、Prometheus、索引指标和灰度基线快照。
 - API key 鉴权、同步上传大小保护、异步上传桥接、quota、worker 失败退避、软超时和 claim token 写回保护。
@@ -29,21 +29,16 @@
 
 - PDF part 文件批量生成，避免每个 part 反复打开同一大 PDF。
 - `large-pdf-catalog` / `large-pdf-ledger` 默认 fast text path，适合目录、清单、台账型超大 PDF。
-- 异步导出直接写文件，避免先把大结果集整体序列化为 bytes。
+- 导出包文件写入磁盘；`POST /export-jobs` 当前仍在请求内生成并落盘，不能视作后台任务已经异步执行。
 - records API 查询从主文档快照中拆出，默认不再全量加载 `pages / lines / records` views。
 - SQLite/Postgres/InMemory store 均支持 records 分页查询和游标式过滤扫描。
 - OCR adapter 诊断输出、API 可选依赖、重复 helper、ASGI monolith 等早期质量问题已完成主要收口或规划隔离。
 
-## 验证结果
+## 最近记录的本地验证结果
 
-最近一次仓库级验证：
+2026-11-14 最终本地 fast 发版门禁为 `ok / verified`。pytest 8.4.2 下有 1,214 项通过、6 项跳过。8 个 schema、8 个 payload、真实样本的 3 种配置回归与 6 次局部 Provider 执行通过。[验收范围与报告](parsecore-reliability-mineru-todo-20260920.md#12-p1-至-p3-总验收)
 
-```text
-pytest: 322 passed, 5 skipped
-git diff --check: passed
-```
-
-真实大 PDF 样本只读抽检：
+2026-05-10 历史大 PDF 样本只读抽检：
 
 ```text
 pages=17,101
@@ -53,20 +48,22 @@ catalog.sqlite=约 615 MB
 records 关键字查询样例：PMA0013，返回 2 条，约 0.36s
 ```
 
+CI 的 Postgres/pgvector 集成 smoke 仅在定时或手动触发的 workflow 中运行。生产与 Postgres/pgvector 正式发布验收待开展。
+
 ## 交付建议
 
 推荐交付分级：
 
-- 中小 Word/PDF/Excel：可直接生产试运行。
-- Excel 与表格类文档：可交付使用，建议保留业务抽检。
+- 中小 Word/PDF/Excel：可用于本地或宿主集成试运行；生产试运行须另行完成目标环境验证。
+- Excel 与表格类文档：可用于本地或宿主集成试运行，并保留业务抽检。
 - 超大 PDF：必须优先走异步 job、part 拆分和导出包，不建议同步 HTTP 直跑。
-- 扫描件和复杂跨页表格：可用，但应依赖 `quality_signals` 做异常定位和局部复跑。
+- 扫描件和复杂跨页表格：可在本地/集成试运行中使用，但应依赖 `quality_signals` 做异常定位和局部复跑。
 
 ## 已知限制
 
 以下内容不阻塞本版交付，但应进入后续版本：
 
-- records 同步 HTTP 导出仍会在响应阶段形成完整内容，后续可进一步改为真正 streaming response。
+- `POST /v1/parse/documents/{doc_id}/export-jobs` 在请求内生成并写入导出文件后返回 `202`，records 导出可能全量读取。生成完成后，`/download` 分块传输文件。传输验证范围见[当前开发与证据入口](parsecore-reliability-mineru-todo-20260920.md)。
 - 复杂 PDF 表格的 profile 自动切换仍需更多真实样本训练规则。
 - Parquet、异常页截图包、raw cells trace 包尚未作为正式导出能力落地。
 - OCR 重样本仍需要独立性能基线和专项优化，不应混入普通文档 SLA。
@@ -77,12 +74,14 @@ records 关键字查询样例：PMA0013，返回 2 条，约 0.36s
 发版前建议执行：
 
 ```powershell
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m pytest -q
+python -m pytest -q
 git diff --check
-d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m parsecore.cli describe --config parsecore.toml
+python -m parsecore.cli describe --config parsecore.toml
 ```
 
-灰度/生产配置还应执行：
+仓库根目录的 fast release acceptance 沿用 [自检门禁](self-check-gate.md) 中的默认 fast suite 与 `--require-verified-corpus` 标志，可运行 `python -m parsecore.cli self-check --require-verified-corpus`。Postgres/pgvector 示例启动命令只用于存储与索引联调，不作为生产验收。
+
+Postgres/pgvector 存储与索引联调可执行以下命令。
 
 ```powershell
 $env:PARSECORE_RUNTIME_CONFIG = "./parsecore.pgvector.toml.example"
@@ -90,6 +89,8 @@ docker compose --profile pgvector up -d --build
 Invoke-RestMethod http://127.0.0.1:8090/health
 Invoke-RestMethod http://127.0.0.1:8090/v1/runtime
 ```
+
+上面是 Postgres/pgvector 本地联调示例。该后端缺少正式版本原子发布和 run 隔离，尚未验证生产部署；启用发布时，内置索引也不支持 `rag` 产物 profile。
 
 ## 回滚口径
 

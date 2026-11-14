@@ -1,0 +1,203 @@
+{
+  "schema_version": "2026-07-provider-gold-corpus-v1",
+  "description": "Source-reviewed positions for two illustrated parts-list pages and one two-part table. Labels were transcribed from the original rendered PDF pages. These seed samples are for diagnostics and remain outside provider promotion.",
+  "approved_provider_ids": [
+    "pdf-text"
+  ],
+  "pages": [
+    {
+      "id": "cmm-297-ipl-282",
+      "document_id": "cmm-297",
+      "page_number": 282,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "36d65cd6b61346e28e97dbaf829646de.pdf",
+        "sha256": "aaa5f0a33f6bb716e407052842ab60f505b5e319cfb87b448a7249d28b678dcf",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages",
+        "printed_pages": [
+          "1018"
+        ]
+      },
+      "expected": {
+        "tableAnchors": [
+          "FIG-ITEM",
+          "PART NUMBER",
+          "UNITS PER ASSY",
+          "320-288-201-0",
+          "320-396-901-0",
+          "649-672-002-0",
+          "NAS1102E04-4",
+          "TFER1-8",
+          "TFER1-8X"
+        ],
+        "tableRelationships": {
+          "tables": [
+            {
+              "page_number": 282,
+              "row_count": 7,
+              "cells": {
+                "0": { "0": "FIG-ITEM", "1": "PART NUMBER", "2": "NOMENCLATURE 1234567", "3": "USAGE CODE", "4": "UNITS PER ASSY" },
+                "1": { "0": "2 170", "1": "320-288-201-0", "3": "", "4": "1" },
+                "2": { "0": "-170A", "1": "320-396-901-0", "3": "", "4": "ALT" },
+                "3": { "0": "180", "1": "649-672-002-0", "3": "", "4": "1" },
+                "4": { "0": "-180A", "1": "NAS1102E04-4", "3": "", "4": "ALT" },
+                "5": { "0": "190", "1": "TFER1-8", "3": "", "4": "AR" },
+                "6": { "0": "-190A", "1": "TFER1-8X", "3": "", "4": "AR" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cmm-297-ipl-286",
+      "document_id": "cmm-297",
+      "page_number": 286,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "36d65cd6b61346e28e97dbaf829646de.pdf",
+        "sha256": "aaa5f0a33f6bb716e407052842ab60f505b5e319cfb87b448a7249d28b678dcf",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages",
+        "printed_pages": [
+          "1021"
+        ]
+      },
+      "expected": {
+        "tableAnchors": [
+          "FIG-ITEM",
+          "PART NUMBER",
+          "UNITS PER ASSY",
+          "Deleted",
+          "320-366-701-0",
+          "320-401-201-0",
+          "602-8001-10",
+          "LPNF5200001",
+          "602-8001-10C07",
+          "LPNF5200002",
+          "1338T24-29-1",
+          "IC504-24-29R",
+          "D230-24-29-1",
+          "IC504-24-411",
+          "097-0104-16"
+        ],
+        "tableRelationships": {
+          "tables": [
+            {
+              "page_number": 286,
+              "row_count": 13,
+              "cells": {
+                "0": { "0": "FIG-ITEM", "1": "PART NUMBER", "2": "NOMENCLATURE 1234567", "3": "USAGE CODE", "4": "UNITS PER ASSY" },
+                "1": { "0": "3 - 1", "1": "Deleted", "3": "", "4": "" },
+                "2": { "0": "- 1A", "1": "320-366-701-0", "3": "A", "4": "RF" },
+                "3": { "0": "- 1B", "1": "320-401-201-0", "3": "B", "4": "RF" },
+                "4": { "0": "10", "1": "602-8001-10", "3": "C", "4": "1" },
+                "5": { "0": "- 10A", "1": "LPNF5200001", "3": "D", "4": "ALT" },
+                "6": { "0": "- 10B", "1": "602-8001-10C07", "3": "", "4": "1" },
+                "7": { "0": "- 10C", "1": "LPNF5200002", "3": "", "4": "ALT" },
+                "8": { "0": "20", "1": "1338T24-29-1", "3": "", "4": "1" },
+                "9": { "0": "- 20A", "1": "IC504-24-29R", "3": "B", "4": "ALT" },
+                "10": { "0": "- 20B", "1": "D230-24-29-1", "3": "", "4": "1" },
+                "11": { "0": "- 20C", "1": "IC504-24-411", "3": "B", "4": "ALT" },
+                "12": { "0": "- 30", "1": "097-0104-16", "3": "C", "4": "1" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cmm-297-removal-table-603",
+      "document_id": "cmm-297",
+      "page_number": 85,
+      "page_end": 87,
+      "review_status": "seed",
+      "review": {
+        "fixture_relative_path": "36d65cd6b61346e28e97dbaf829646de.pdf",
+        "sha256": "aaa5f0a33f6bb716e407052842ab60f505b5e319cfb87b448a7249d28b678dcf",
+        "reviewed_at": "2026-11-14",
+        "method": "ai_visual_review_of_original_pages",
+        "printed_pages": [
+          "621/622",
+          "623/624"
+        ],
+        "table_labels": [
+          "603A",
+          "603B"
+        ]
+      },
+      "expected": {
+        "tableAnchors": [
+          "IDENT. PLATE",
+          "LOCKING RING",
+          "PLUG CONNECTOR \"C140\"",
+          "PLUG CONNECTOR \"C141\""
+        ],
+        "tableRelationships": {
+          "tables": [
+            {
+              "page_number": 85,
+              "row_count": 20,
+              "cells": {
+                "0": { "0": "REMOVAL", "3": "LOCKING RING \"C135\" 6.A.(2)", "15": "IDENT. PLATE 6.A.(12)" },
+                "1": { "0": "IDENT,PLATE (1-10) and (3-340)", "15": "X" },
+                "4": { "0": "LOCKING RING (2-10)", "3": "X" },
+                "5": { "0": "ADAPTER ASSY (2-20)", "3": "1", "4": "2" }
+              }
+            },
+            {
+              "page_number": 87,
+              "row_count": 20,
+              "cells": {
+                "0": { "0": "REMOVAL", "5": "PLUG CONNECTOR \"C140\" 6.A.(29)", "15": "PLUG CONNECTOR \"C141\" 6.A.(39)" },
+                "2": { "0": "IDENT. SLEEVE T3-B (1-40)", "5": "1", "10": "2", "11": "3", "12": "4", "15": "" },
+                "3": { "0": "IDENT. SLEEVE T3-A (1-50)", "5": "", "15": "1", "20": "2", "21": "3", "22": "4" }
+              }
+            }
+          ],
+          "continuation": {
+            "label_field": "REMOVAL",
+            "row_labels": [
+              "IDENT,PLATE (1-10) and (3-340)",
+              "IDENT. SLEEVE T3-B (1-40)",
+              "IDENT. SLEEVE T3-A (1-50)",
+              "LOCKING RING (2-10)",
+              "ADAPTER ASSY (2-20)",
+              "RECEPTACLE CONNECTOR (2-60)",
+              "ELEC. CHROMEL CONTACT (2-80)",
+              "ELEC. CHROMEL CONTACT (2-85)",
+              "ELEC. ALUMEL CONTACT (2-90)",
+              "ELEC. ALUMEL CONTACT (2-92)",
+              "ELEC. CONTACT (CONN.) (2-95)",
+              "ELEC. CONTACT (CONN.) (2-97)",
+              "ELEC. CONTACT (NOT CONN.) (2-97)",
+              "PLUG FOR CONTACT (2-98)",
+              "ELEC. CONTACT (2-105)",
+              "H-S. SLEEVE (2-110)",
+              "H-S. SLEEVE (2-120)",
+              "H-S. SLEEVE (2-125)",
+              "CLAMP (2-130)"
+            ],
+            "fields": {
+              "0": {
+                "IDENT. PLATE 6.A.(12)": "X"
+              },
+              "1": {
+                "PLUG CONNECTOR \"C140\" 6.A.(29)": "1",
+                "PLUG CONNECTOR \"C141\" 6.A.(39)": ""
+              },
+              "2": {
+                "PLUG CONNECTOR \"C140\" 6.A.(29)": "",
+                "PLUG CONNECTOR \"C141\" 6.A.(39)": "1"
+              },
+              "3": {
+                "LOCKING RING \"C135\" 6.A.(2)": "X"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

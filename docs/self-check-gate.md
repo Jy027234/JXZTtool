@@ -13,6 +13,10 @@
 
 ## 默认入口
 
+2026-11-14 最终本地 fast 发版门禁通过。pytest 8.4.2 下有 1,214 项通过、6 项跳过。[样本回归和验证范围](parsecore-reliability-mineru-todo-20260920.md#12-p1-至-p3-总验收)
+
+CI 中的 Postgres/pgvector smoke job 仅由定时或手动 `workflow_dispatch` 触发，不属于默认 PR 门禁；它验证存储/索引集成，不验证正式版本发布或生产部署。
+
 极快 smoke：
 
 ```powershell
@@ -118,15 +122,15 @@ fixture 解析顺序：`fixture_relative_path` + `PARSECORE_REGRESSION_FIXTURE_R
 
 `tools/regression_baseline.py check-suite` 复用同一校验：默认会把不可用条目打印为 `[suite][corpus] UNVERIFIED: ...` 并以 `corpus NOT verified` 结尾（仍按历史语义返回 0），传入 `--require-verified-corpus` 时改为返回 1。fixture 哈希漂移也会打印 `[suite][corpus] HASH DRIFT: ...`。
 
-### 已知未通过项（真实样本，禁止靠删样本通过）
+### 297 页样本漂移（历史问题，已由后续验收更新）
 
-`var/regression/suite.fast.json` 的 297 页样本 `36d65cd6b61346e28e97dbaf829646de.pdf`（sha256 `aaa5f0a3…78dcf`，2634672 字节）样本本身**校验通过**，但指标相对 baseline 已漂移：`numeric_heavy_total` 与 `suspected_header_footer_total` 超出预算（详见 [docs/p0-01-capability-truthfulness-20260920.md](p0-01-capability-truthfulness-20260920.md) 第 5 节）。因此当前 `check-suite --require-verified-corpus` 与 `self-check --require-verified-corpus` 都会**失败**：这是真实回归，必须修复解析行为或按证据更新 baseline，不能通过删除样本、放宽阈值或把该样本标成 `disabled` 来让门禁变绿。
+2026-10-07 开发前评估记录中的 297 页样本 `36d65cd6b61346e28e97dbaf829646de.pdf`（sha256 `aaa5f0a3…78dcf`，2634672 字节）曾有 `numeric_heavy_total` 与 `suspected_header_footer_total` 漂移。该旧记录描述修复前状态，不能作为当前失败结论。后续按原页核查并修复误触发/内容关联问题，在未放宽阈值的情况下，三个配置的版本化快照回归与 fast/corpus release 验收通过；详情见[当前证据入口第 8 节](parsecore-reliability-mineru-todo-20260920.md#8-本轮开发结果2026-10-07)及保留的[原 P0-01 评估记录](p0-01-capability-truthfulness-20260920.md)。这仍只是当时的本地验收，不代表当前改动后的结果、整份 PDF 已获业务批准、生产部署或 Postgres/pgvector 正式发布已验证。
 
 ## 覆盖范围
 
 `parsecore self-check` 当前串联五类检查：
 
-1. 单测：`unittest discover -s tests -p "test_*.py"`
+1. 单测从仓库根目录运行 pytest，只收集 `tests/`。self-check 从 JUnit XML 读取通过、失败、错误和跳过数量，输出末尾保留 pytest 报告的跳过原因。如果同一测试的断言失败且清理也报错，报告分别记录失败与错误。
 2. 运行时 smoke：`parsecore.cli describe --config parsecore.toml`
 3. Payload contract 校验：`parsecore.cli payload-contract-check`
 4. 样本清单校验：`tools/corpus_manifest.py`（每次运行都执行，结果写入 `verification`）
@@ -216,15 +220,17 @@ d:/个人文件/个人开发/解析管理中台/.venv/Scripts/python.exe -m tool
 - `status=degraded`：有样本超时或降级
 - `status=failed`：有样本硬失败或 gate policy 不通过
 
-## 2026-05-10 当前结论
+## 2026-05-10 历史结论（旧快照，不代表当前状态）
 
 ### 可靠性
 
-- 本轮交付前全量回归通过：`322 passed, 5 skipped`。
+本节保留 2026-05-10 的历史发布记录。它早于当前开发证据入口中的 SQLite run publication、297 页样本修复及 corpus/release 验收结果；其中的旧测试数字与生产灰度结论不应作为当前判断。
+
+- 当时记录的全量回归结果：`322 passed, 5 skipped`（历史快照，不是最近一次验证）。
 - `git diff --check` 通过。
 - records/document views/导出/大 PDF part 相关主链路已补充定向测试。
 - 真实 17,101 页 PDF 样本已完成产物抽检：`pages=17,101`、`lines=1,249,000`、`records=454,985`，SQLite 查询可用。
-- 当前版本可作为 `0.1.0 可交付灰度版` 进入受控生产灰度。
+- 当时给出的“可进入受控生产灰度”结论已被后续边界更新取代；生产部署未验证。
 
 ### 继续观察
 

@@ -47,11 +47,11 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 - 配置模板
 - 基础单元测试
 
-当前交付状态：`0.1.0 可交付灰度版`。中小文档可直接试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版结论见 [docs/release-notes.md](docs/release-notes.md)。
+当前版本定位为 `0.1.0 可交付灰度版`，该版本标签不代表已经完成生产验收。中小文档可用于本地或宿主集成试运行；1 万页以上大 PDF 建议走异步 job、part 拆分、records 查询和导出包链路。发版口径见 [docs/release-notes.md](docs/release-notes.md)。
 
-可靠性交付进展（见 [本轮待办入口](docs/parsecore-reliability-mineru-todo-20260920.md)）：配置真实性、run 契约、SQLite 发布事务、共享质量校验、租户边界、迁移与 corpus/release 门禁已有实现。正式正文读取已固定到封存 run，并覆盖发布切换时的一致性回归；素材覆盖、跨租户清理与复核发布的问题已修复。生产与 Postgres/pgvector 验收仍有待办，当前证据见 [R4 复评记录](docs/r4-closing-review-20260922.md#8-2026-09-22-复评与按需修复)。
+配置真实性、run 契约、SQLite 本地正式发布、共享质量校验、租户边界、迁移和样本验收门禁已有实现。2026-11-14 本地 fast 发版门禁通过。生产部署及 Postgres/pgvector 正式发布仍待验证。启用发布时，内置索引不支持 `rag` 产物 profile。[本轮总验收](docs/parsecore-reliability-mineru-todo-20260920.md#12-p1-至-p3-总验收) · [R4 复评记录](docs/r4-closing-review-20260922.md#8-2026-09-22-复评与按需修复)
 
-本轮围绕解析效果与性能，已实施原生结构保留、段落与版面改进、选定 PDF 表格处理、局部 OCR/缓存及发布读取一致性修复，并合并被替代的重复逻辑。验收采用同样本结果与耗时对比；真实样本门禁和未验证部分见复评记录，不能将代码已实现等同于全部验收通过。MinerU 接入、成本管理和完整领域包平台不在本轮范围内。
+本轮围绕解析效果与性能，已实施原生结构保留、段落与版面改进、选定 PDF 表格处理、局部 OCR/缓存及发布读取一致性修复，并合并被替代的重复逻辑。验收采用同样本结果与耗时对比；真实样本门禁和未验证边界见[当前证据入口第 8 节](docs/parsecore-reliability-mineru-todo-20260920.md#8-本轮开发结果2026-10-07)，不能将代码已实现等同于全部验收通过。MinerU 接入、成本管理和完整领域包平台不在本轮范围内。
 
 ## 本轮改进路径
 
@@ -61,7 +61,7 @@ ParseCore 以文档解析为核心，并内置把解析结果投入 RAG 所需�
 
 ## 文档导航
 
-- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md)：本轮开发入口；保留五项原始目标与验收标准，列明 2026-10-07 完成状态，第 7 节以复核读取、样本质量和接入收口三项继续开发，沿用代码瘦身要求（文件名保留以兼容旧链接，MinerU 已移出本轮）
+- [docs/parsecore-reliability-mineru-todo-20260920.md](docs/parsecore-reliability-mineru-todo-20260920.md) 汇总开发范围和证据。第 7、8 节记录 2026-10-07 交付，第 9 节记录 2026-11-14 改进与验收。
 - [docs/adr-p0-02-run-publication-contract.md](docs/adr-p0-02-run-publication-contract.md)：run / 状态 / 发布指针契约冻结（P0-02）；明确 `done` 不等于 `published`、三套状态机、存储能力与 SQLite/Postgres 迁移设计
 - [docs/p0-01-capability-truthfulness-20260920.md](docs/p0-01-capability-truthfulness-20260920.md)：P0-01 配置与能力真实性的交付报告、验证结果与回滚说明
 - [docs/p0-03-run-store-batch1-20260920.md](docs/p0-03-run-store-batch1-20260920.md)：P0-03 第 1 批交付报告，含发布事务校验项、25 项故障注入验证与未完成范围
@@ -238,14 +238,14 @@ docker compose --profile pgvector up -d --build
 - 同步入口返回 `413 document_too_large_for_sync` 时，按响应里的推荐端点切换到 `/v1/parse/uploads + /v1/parse/jobs`，不要对同一个大文件反复重试同步接口。
 - 结果读取优先用 `projection=structured`；旧 parser-service 兼容方继续用 `compat`，调试或复核才用 `full`。
 - `quality_signals` 先用于提示、日志和运营面板，未知 signal code 按追加字段兼容处理，避免后续扩展时需要改宿主表结构。
-- 导出中心已支持同步数据集导出和异步导出包：`/exports` 直接返回 `jsonl/csv/tsv`，`/export-jobs` 生成 manifest 与可下载文件。
+- 导出中心支持同步数据集导出和导出包。`/exports` 返回 `jsonl/csv/tsv`。`POST /v1/parse/documents/{doc_id}/export-jobs` 在请求内生成并落盘后返回 `202`，records 可能全量读取。随后可通过 `/download` 分块下载已生成的文件。
 - PDF part 第一版已落地：`/parts/plan` 会轻量探测页数、生成子 part PDF/job、把父文档置为 `partial`，子 part 完成后自动刷新父文档 structured 结果。
 - 异常 part 复跑第一版已落地：`POST /v1/parse/documents/{doc_id}/parts/{part_id}/rerun` 只重跑该页段，并保留其他 part 的结果。
 
 运行测试：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+python -m pytest -q
 ```
 
 运行默认自检门禁：
@@ -362,7 +362,7 @@ docker compose --profile pgvector up -d --build
 - `quality_gate.observed.reading_order_confidence` 已开始消费本地 layout 元数据；当阅读顺序置信度低于门禁阈值时，会触发 `reading_order_confidence_below_threshold`，并把本地 Provider 重跑建议路由到 `required_capabilities=["layout"]`
 - `index_manifest.rag_coverage`：运行期 index manifest 和 `structured / ir / coverage` 中都会输出 KnowledgeUnit 到 chunk 的覆盖摘要和 unit 映射，便于审计 RAG 入库缺口
 - `GET /v1/parse/documents/{doc_id}/exports?dataset=pages|lines|tables|quality_signals|coverage|reader|parse_units|records&format=jsonl|csv|tsv|sqlite|xlsx`：结构化同步导出，基于 structured/coverage/reader/records 投影输出可审计数据集
-- `POST /v1/parse/documents/{doc_id}/export-jobs`、`GET /v1/parse/export-jobs/{export_id}`、`GET /v1/parse/export-jobs/{export_id}/download?file=...`：异步导出包 MVP，生成 manifest 和 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / coverage.jsonl / reader.jsonl / parse_units.tsv / records.jsonl`
+- `POST /v1/parse/documents/{doc_id}/export-jobs`、`GET /v1/parse/export-jobs/{export_id}`、`GET /v1/parse/export-jobs/{export_id}/download?file=...` 分别用于生成导出包、查看清单和分块下载文件。
 - `POST /v1/parse/documents/{doc_id}/parts/plan`：PDF 页段调度第一版，创建父 `partial` job、子 part job，并用独立 part doc_id 防止覆盖父文档
 - `GET /v1/parse/documents/{doc_id}/parts?state=warning|failed`：part 视图，返回页段、状态、质量信号 code、job_id、coverage 摘要和复跑能力；若 part 已执行过本地 Provider 路由，还会带 `provider_route_plan / local_provider_routing / provider_ids`，并补 `coverage_summary / coverage_gap_pages / rag_coverage_quality / previous_part_observation / rerun_comparison / diagnostics`。`part_summary` 也会额外汇总 `rerun_compared_parts / rerun_statuses / provider_changed_parts / selected_provider_ids`，方便宿主直接做大文件排障面板
 - `part.action_suggestions` 会结合 `rerun_comparison` 调整建议顺序：若同一页段已经 rerun 过但效果 `unchanged / regressed / mixed`，建议会优先转向 `review_parse_ir` 或 `inspect_provider_route_plan`，避免重复无效重跑
@@ -538,7 +538,7 @@ docker compose --profile pgvector up -d parsecore-postgres parsecore-api parseco
 
 1. projection、profile 自动路由、413 异步分流、基础 `tables/cells/quality_signals/parse_units` 已完成；优先让宿主 parser client 在异步 job 创建阶段接入 `profile=auto`，并继续用 `projection=structured` 读取结构化结果。
 2. 对两类样本先做灰度：表格密集文件使用 `profile=table-heavy`，超大或长页数 PDF 使用 `profile=large-pdf`，观察耗时、质量信号和结果双写稳定性。
-3. 异步导出包、PDF 页段调度、父文档 partial 合并和单 part 复跑第一版已完成；下一步重点压测大 PDF 样本和 queue-worker 部署。
+3. 导出包 MVP、PDF 页段调度、父文档 partial 合并和单 part 复跑第一版已完成；`POST /export-jobs` 当前在请求内同步生成并落盘，records 可能全量读取。下一步重点压测大 PDF 样本和 queue-worker 部署。
 4. part 调度已补生产级限流、尚未运行 part 取消、批量复跑、失败重试、软 timeout、claim_token 防旧 worker 写回、父文档 part 前缀增量索引和指标面板：`parts_total / parts_done / parts_failed / parts_active / parts_queued / parts_cancelled / parts_retry_pending`。
 5. `index_manifest.part_index.parts[]` 已记录每个 part 的 `chunk_ids / page_range / index_version`，可用于后续跨版本迁移、增量同步和审计。
 6. `parsecore self-check` 和 `parsecore large-pdf-stress` 已作为默认运维入口落地；下一步继续收敛 OCR 长尾样本性能。
