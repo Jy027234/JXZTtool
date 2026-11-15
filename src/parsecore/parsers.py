@@ -5483,35 +5483,201 @@ def _page_has_rotated_text(chars: Sequence[Mapping[str, Any]]) -> bool:
 
 
 def _pdf_table_cells(page: Any, table: Any, *, rotated_text: bool) -> list[list[str]]:
-    """Read a pdfplumber table, honouring cells whose text is rotated.
+    """Read a pdfplumber table and correct known extraction cases.
 
     ``Table.extract()`` reads every cell left to right.  A wide catalogue table
     rotates its column headers 90° so they fit, and those cells then come back
     reversed ("REVOC EHT FO WERCS" for "SCREW OF THE COVER").  The base extraction
     is kept as it is -- it costs one pass per row -- and each cell is re-read only
-    when its own characters run in another direction.  ``rotated_text`` comes from
-    :func:`_page_has_rotated_text`, so a page without rotated text returns the base
-    extraction untouched.
+    when its own characters run in another direction.  On upright pages, recover
+    rows when an IPL table has been extracted as a single tall body row.
     """
 
     cells = table.extract() or []
     chars = getattr(page, "chars", None) or []
-    if not rotated_text or not chars:
-        return cells
     rows = getattr(table, "rows", ()) or ()
-    for row_index, row in enumerate(rows):
-        if row_index >= len(cells):
-            break
-        row_chars = _chars_in_bbox(chars, getattr(row, "bbox", None))
-        if not row_chars:
-            continue
-        for col_index, cell_bbox in enumerate(getattr(row, "cells", ()) or ()):
-            if col_index >= len(cells[row_index]):
+    if rotated_text and chars:
+        for row_index, row in enumerate(rows):
+            if row_index >= len(cells):
                 break
-            text = _text_along_char_direction(_chars_in_bbox(row_chars, cell_bbox))
-            if text is not None:
-                cells[row_index][col_index] = text
-    return cells
+            row_chars = _chars_in_bbox(chars, getattr(row, "bbox", None))
+            if not row_chars:
+                continue
+            for col_index, cell_bbox in enumerate(getattr(row, "cells", ()) or ()):
+                if col_index >= len(cells[row_index]):
+                    break
+                text = _text_along_char_direction(_chars_in_bbox(row_chars, cell_bbox))
+                if text is not None:
+                    cells[row_index][col_index] = text
+    if rotated_text:
+        return cells
+    return _recover_pdf_ipl_table_rows(page, table, cells) or cells
+
+
+_PDF_IPL_TABLE_HEADER = (
+    "FIG-ITEM",
+    "PART NUMBER",
+    "NOMENCLATURE",
+    "USAGE CODE",
+    "UNITS PER ASSY",
+)
+_PDF_IPL_ROW_ALIGNMENT_TOLERANCE = 2.0
+
+
+def _recover_pdf_ipl_table_rows(
+    page: Any,
+    table: Any,
+    cells: list[list[str]],
+) -> list[list[str]] | None:
+    """Recover IPL item rows when an unruled table is extracted as one tall row.
+
+    The row labels and part numbers are the two structural anchors: in a valid
+    parts-list row they occupy the same horizontal band.  The description may
+    wrap for many lines, so it is assigned from one anchor down to (but not
+    including) the next.  Empty usage/quantity cells stay empty.  Any uncertain
+    geometry or alignment leaves the original ``Table.extract()`` result intact.
+    """
+
+    if (
+        len(cells) != 2
+        or len(cells[0]) != len(_PDF_IPL_TABLE_HEADER)
+        or len(cells[1]) != len(_PDF_IPL_TABLE_HEADER)
+    ):
+        return None
+    normalized_header = [" ".join(str(value or "").split()).upper() for value in cells[0]]
+    if (
+        normalized_header[0] != _PDF_IPL_TABLE_HEADER[0]
+        or normalized_header[1] != _PDF_IPL_TABLE_HEADER[1]
+        or re.fullmatch(r"NOMENCLATURE(?:\s+\d+)*", normalized_header[2]) is None
+        or normalized_header[3] != _PDF_IPL_TABLE_HEADER[3]
+        or normalized_header[4] != _PDF_IPL_TABLE_HEADER[4]
+    ):
+        return None
+
+    table_rows = getattr(table, "rows", ()) or ()
+    if len(table_rows) != 2:
+        return None
+    header_cells = tuple(getattr(table_rows[0], "cells", ()) or ())
+    data_cells = tuple(getattr(table_rows[1], "cells", ()) or ())
+    if (
+        len(header_cells) != 5
+        or len(data_cells) != 5
+        or any(bbox is None for bbox in (*header_cells, *data_cells))
+    ):
+        return None
+
+    data_row_bbox = getattr(table_rows[1], "bbox", None)
+    if not isinstance(data_row_bbox, Sequence) or len(data_row_bbox) != 4:
+        return None
+    data_top = _coerce_float(data_row_bbox[1])
+    data_bottom = _coerce_float(data_row_bbox[3])
+    if data_top is None or data_bottom is None or data_bottom <= data_top:
+        return None
+
+    line_columns: list[list[tuple[float, str]]] = []
+    for column_index, bbox in enumerate(data_cells):
+        if not isinstance(bbox, Sequence) or len(bbox) != 4:
+            return None
+        normalized = tuple(_coerce_float(value) for value in bbox)
+        if any(value is None for value in normalized):
+            return None
+        x0, top, x1, bottom = normalized
+        if (
+            x1 <= x0
+            or abs(top - data_top) > _PDF_IPL_ROW_ALIGNMENT_TOLERANCE
+            or abs(bottom - data_bottom) > _PDF_IPL_ROW_ALIGNMENT_TOLERANCE
+        ):
+            return None
+        try:
+            extracted = page.crop(bbox).extract_text_lines(layout=False, strip=True)
+        except ValueError:
+            return None
+        column_lines: list[tuple[float, str]] = []
+        for line in extracted or ():
+            if not isinstance(line, Mapping):
+                return None
+            text = str(line.get("text") or "").strip()
+            if not text:
+                continue
+            line_top = _coerce_float(line.get("top"))
+            line_bottom = _coerce_float(line.get("bottom"))
+            if line_top is None or line_bottom is None or line_bottom < line_top:
+                return None
+            column_lines.append(((line_top + line_bottom) / 2.0, text))
+        column_lines.sort(key=lambda item: item[0])
+        source_text = "".join(str(cells[1][column_index] or "").split())
+        recovered_text = "".join("".join(text for _center, text in column_lines).split())
+        if source_text != recovered_text:
+            return None
+        line_columns.append(column_lines)
+
+    item_lines = line_columns[0]
+    part_lines = line_columns[1]
+    if len(item_lines) < 2 or len(item_lines) != len(part_lines):
+        return None
+
+    anchor_centers: list[float] = []
+    for item_center, _item_text in item_lines:
+        matches = [
+            (index, part_center)
+            for index, (part_center, _part_text) in enumerate(part_lines)
+            if abs(part_center - item_center) <= _PDF_IPL_ROW_ALIGNMENT_TOLERANCE
+        ]
+        if len(matches) != 1:
+            return None
+        part_index, part_center = matches[0]
+        if part_index != len(anchor_centers):
+            return None
+        anchor_centers.append((item_center + part_center) / 2.0)
+    if len(anchor_centers) != len(part_lines) or any(
+        right - left <= 2 * _PDF_IPL_ROW_ALIGNMENT_TOLERANCE
+        for left, right in zip(anchor_centers, anchor_centers[1:])
+    ):
+        return None
+
+    recovered = [[*cells[0]]]
+    row_cells: list[list[str]] = [
+        [item_lines[index][1], part_lines[index][1], "", "", ""]
+        for index in range(len(anchor_centers))
+    ]
+
+    # Usage and quantity values only attach to an anchor at the same baseline.
+    # A displaced or repeated value is ambiguous, so let the original extraction
+    # stand instead of shifting it into a neighboring record.
+    for column_index in (3, 4):
+        assigned_rows: set[int] = set()
+        for center, text in line_columns[column_index]:
+            matches = [
+                row_index
+                for row_index, anchor in enumerate(anchor_centers)
+                if abs(center - anchor) <= _PDF_IPL_ROW_ALIGNMENT_TOLERANCE
+            ]
+            if len(matches) != 1 or matches[0] in assigned_rows:
+                return None
+            row_index = matches[0]
+            row_cells[row_index][column_index] = text
+            assigned_rows.add(row_index)
+
+    # Descriptions and section markers retain their source order and stay in the
+    # NOMENCLATURE column.  Text between two item anchors belongs to the prior
+    # row until the next anchor begins; it never creates an inferred record.
+    description_lines = line_columns[2]
+    if description_lines and description_lines[0][0] < anchor_centers[0] - _PDF_IPL_ROW_ALIGNMENT_TOLERANCE:
+        return None
+    description_rows: list[list[str]] = [[] for _ in anchor_centers]
+    for center, text in description_lines:
+        row_index = 0
+        for candidate_index, anchor in enumerate(anchor_centers):
+            if center >= anchor - _PDF_IPL_ROW_ALIGNMENT_TOLERANCE:
+                row_index = candidate_index
+            else:
+                break
+        description_rows[row_index].append(text)
+    for row_index, text_lines in enumerate(description_rows):
+        row_cells[row_index][2] = "\n".join(text_lines)
+
+    recovered.extend(row_cells)
+    return recovered
 
 
 def _extract_pdfplumber_layout(

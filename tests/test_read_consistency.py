@@ -309,6 +309,150 @@ class PublishedResultSurvivesFailedRerunTests(unittest.TestCase):
         self.assertIsNone(context["served_run_id"])
         self.assertEqual(context["consumer_signal"], "not_ready")
 
+    def test_combined_reader_and_records_export_uses_one_published_run(self) -> None:
+        from starlette.testclient import TestClient
+
+        from parsecore.asgi import create_app
+
+        isolated_config = CONFIG.replace(
+            'object_store = "local://./var/uploads"',
+            'object_store = "local://__OBJECT_STORE__"',
+        )
+        with TemporaryWorkspace(isolated_config) as workspace:
+            app = create_app(workspace.config_path)
+            with TestClient(app) as client:
+                runtime = client.app.state.runtime
+
+                def publish_run(*, job_id: str, marker: str) -> None:
+                    result = runtime.publish_run(
+                        doc_id="doc-1",
+                        artifacts=RunArtifacts(
+                            blocks=(
+                                Block(
+                                    block_id=f"{marker.lower()}-block",
+                                    doc_id="doc-1",
+                                    type=BlockType.PARAGRAPH,
+                                    content=f"{marker} reader marker",
+                                    metadata={"page": 1},
+                                ),
+                            ),
+                            views={
+                                "pages": [
+                                    {"page_number": 1, "text": f"{marker} reader marker"}
+                                ],
+                                "records": [
+                                    {
+                                        "record_id": f"{marker.lower()}-record-page-two",
+                                        "doc_id": "doc-1",
+                                        "page_start": 2,
+                                        "fields": {"text": f"{marker} record marker"},
+                                    },
+                                    {
+                                        "record_id": f"{marker.lower()}-record-invalid-page",
+                                        "doc_id": "doc-1",
+                                        "page_start": "unknown",
+                                        "fields": {"text": f"{marker} record marker"},
+                                    },
+                                    {
+                                        "record_id": f"{marker.lower()}-record-page-one",
+                                        "doc_id": "doc-1",
+                                        "page": 1,
+                                        "fields": {"text": f"{marker} record marker"},
+                                    },
+                                ]
+                            },
+                        ),
+                        job_id=job_id,
+                        source_version=f"sha256:{marker.lower()}",
+                        validation_status="passed",
+                    )
+                    assert result["published"]
+
+                publish_run(job_id="job-old", marker="OLD")
+                original_get_document = runtime.get_document
+                publication_switched = False
+
+                def read_old_then_publish_new(**kwargs):
+                    nonlocal publication_switched
+                    snapshot = original_get_document(**kwargs)
+                    if not publication_switched:
+                        publication_switched = True
+                        publish_run(job_id="job-new", marker="NEW")
+                    return snapshot
+
+                with patch.object(runtime, "get_document", side_effect=read_old_then_publish_new):
+                    first_response = client.post(
+                        "/v1/parse/documents/doc-1/export-jobs",
+                        json={
+                            "include": ["reader", "records"],
+                            "formats": {"reader": "jsonl", "records": "jsonl"},
+                        },
+                    )
+
+                self.assertTrue(publication_switched)
+                first_job = first_response.json()
+                first_download_manifest = client.get(first_job["download_endpoint"])
+                first_reader = client.get(
+                    first_job["download_endpoint"], params={"file": "reader.jsonl"}
+                )
+                first_records = client.get(
+                    first_job["download_endpoint"], params={"file": "records.jsonl"}
+                )
+
+                second_response = client.post(
+                    "/v1/parse/documents/doc-1/export-jobs",
+                    json={
+                        "include": ["reader", "records"],
+                        "formats": {"reader": "jsonl", "records": "jsonl"},
+                    },
+                )
+                second_job = second_response.json()
+                second_download_manifest = client.get(second_job["download_endpoint"])
+                second_reader = client.get(
+                    second_job["download_endpoint"], params={"file": "reader.jsonl"}
+                )
+                second_records = client.get(
+                    second_job["download_endpoint"], params={"file": "records.jsonl"}
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_download_manifest.status_code, 200)
+        self.assertEqual(first_download_manifest.json()["parse_run_id"], "job-old")
+        self.assertEqual(first_job["parse_run_id"], "job-old")
+        self.assertEqual(first_reader.status_code, 200)
+        self.assertEqual(first_records.status_code, 200)
+        self.assertIn("OLD reader marker", first_reader.text)
+        self.assertNotIn("NEW reader marker", first_reader.text)
+        self.assertIn("old-record", first_records.text)
+        self.assertNotIn("new-record", first_records.text)
+        self.assertEqual(
+            [json.loads(line)["record_id"] for line in first_records.text.splitlines()],
+            [
+                "old-record-invalid-page",
+                "old-record-page-one",
+                "old-record-page-two",
+            ],
+        )
+
+        self.assertEqual(second_response.status_code, 202)
+        self.assertEqual(second_download_manifest.status_code, 200)
+        self.assertEqual(second_download_manifest.json()["parse_run_id"], "job-new")
+        self.assertEqual(second_job["parse_run_id"], "job-new")
+        self.assertEqual(second_reader.status_code, 200)
+        self.assertEqual(second_records.status_code, 200)
+        self.assertIn("NEW reader marker", second_reader.text)
+        self.assertNotIn("OLD reader marker", second_reader.text)
+        self.assertIn("new-record", second_records.text)
+        self.assertNotIn("old-record", second_records.text)
+        self.assertEqual(
+            [json.loads(line)["record_id"] for line in second_records.text.splitlines()],
+            [
+                "new-record-invalid-page",
+                "new-record-page-one",
+                "new-record-page-two",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -322,3 +322,11 @@ README、发版说明、自检说明和上线清单均引用本次验收。生�
 - 事件聚合。31 项定向测试通过。同一组事件的租户筛选、计数、有界缓冲和 Prometheus 文本与迁移前一致。
 
 最终 fast 门禁为 `ok / verified`。1,214 项测试通过，5 项因缺少 Postgres 测试连接、1 项因无目录符号链接能力跳过。8 个 schema、8 份样例、3 项样本基线和 6 次 Provider 检查通过。本地报告保存在 `tmp/parsecore-first-split-20261114/gate/reports/verified/self-check.json`。
+
+## 14. 组合导出与 CMM 零件表
+
+- 组合导出的清单、Reader 和 records 共用一次正式快照读取。SQLite 发布切换回归在读取旧快照后发布新版本，确认当前导出全部使用旧版、下一次全部使用新版。另核对了旧快照回退和 records 的原有页序。
+- 本机用默认配置解析完整 297 页 CMM，在同一封存 run 对照原页、Reader、records 和导出文件。第 282、286 页分别为 7 行和 13 行（含表头），对应 6 条和 12 条记录。空列、说明续行、来源页及表格坐标均通过核对。
+- 原有 `seed` 关系样本在本机通过结构诊断。第 282、286 页分别核对 29、53 个格位，第 85、87 页续表核对 25 个格位和 19 条合并记录。GitHub Actions 的真实样本验证仍未完成。
+
+基于 `cdc8f51` 的未提交工作区在本机通过 `self-check --profile fast --require-verified-corpus`，结果为 `ok / verified`。1,223 项测试通过，5 项因缺少 Postgres 测试连接、1 项因无法创建目录符号链接而跳过。8 个 schema、8 份样例、3 项真实语料基线和 6 次 Provider 检查均通过。本地报告保存在 `tmp/parsecore-next-local-cdc8f51/reports/`。

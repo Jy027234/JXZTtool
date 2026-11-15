@@ -17,6 +17,7 @@ from starlette.routing import Route
 from .api_payloads import (
     _batch_success_response,
     _document_projection,
+    _document_records_projection,
     _document_providers_projection,
     _document_quality_projection,
     _document_view_rows,
@@ -42,6 +43,7 @@ from .exports import EXPORT_DATASETS, EXPORT_FORMATS, export_structured_projecti
 from .models import ParseRequest
 from .payload_schemas import payload_schema, payload_schema_names, payload_schema_registry
 from .parts import PART_STATE_FILTERS, document_parts_projection
+from .payload_utils import _safe_int
 from .pdf_parts import detect_pdf_page_count
 from .private_files import (
     ensure_private_directory,
@@ -1539,14 +1541,17 @@ class ApiRoutes:
             includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
             formats = _formats_payload(payload.get("formats"))
             normalized_includes = {str(item).strip().lower() for item in includes or ()}
-            view_names = tuple(name for name in ("pages", "lines") if name in normalized_includes)
+            snapshot_view_names = tuple(
+                name for name in ("pages", "lines", "records") if name in normalized_includes
+            )
+            view_names = tuple(name for name in snapshot_view_names if name in {"pages", "lines"})
             include_coverage = bool(normalized_includes) and "coverage" in normalized_includes
             include_reader = bool(normalized_includes) and "reader" in normalized_includes
             default_export = not normalized_includes
             snapshot = runtime_obj.get_document(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
-                document_view_types=view_names or None,
+                document_view_types=snapshot_view_names or None,
             )
             if snapshot["job"] is None:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1564,20 +1569,30 @@ class ApiRoutes:
                     if dataset_name in normalized_includes:
                         export_payload[dataset_name] = views.get(dataset_name, [])
             if includes and "records" in normalized_includes:
-                records_payload = runtime_obj.get_document_records_projection(
-                    doc_id=request.path_params["doc_id"],
-                    tenant_id=tenant_id,
-                    limit=None,
-                    offset=0,
-                )
-                if records_payload is None:
-                    return _error_response(
-                        request,
-                        code="document_not_found",
-                        message="Document not found",
-                        status_code=404,
-                    )
-                export_payload["records"] = records_payload["items"]
+                persisted_records = (snapshot.get("document_views") or {}).get("records")
+                if persisted_records:
+                    ordered_records: list[tuple[int, dict[str, Any]]] = []
+                    for record in persisted_records:
+                        if not isinstance(record, Mapping):
+                            continue
+                        row = dict(record)
+                        page_start = row.get("page_start")
+                        page_number = row.get("page_number", row.get("page"))
+                        if page_start is None and page_number is not None:
+                            page_start = page_number
+                        ordered_records.append((_safe_int(page_start, default=0), row))
+                    export_payload["records"] = [
+                        row for _page_start, row in sorted(ordered_records, key=lambda item: item[0])
+                    ]
+                else:
+                    # An empty persisted view follows the records endpoint's
+                    # existing fallback: rebuild from the blocks in this same
+                    # snapshot rather than treating the empty view as authoritative.
+                    records_snapshot = dict(snapshot)
+                    records_snapshot["document_views"] = {}
+                    export_payload["records"] = _document_records_projection(
+                        records_snapshot, limit=None, offset=0
+                    )["items"]
             if include_coverage or default_export:
                 coverage_payload = _document_projection(snapshot, projection="coverage")
                 export_payload["coverage"] = coverage_payload["coverage"]["pages"]
