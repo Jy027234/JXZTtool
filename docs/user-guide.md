@@ -4,6 +4,14 @@
 
 本文面向宿主产品开发、测试、实施和运维人员，说明如何把 ParseCore 作为解析中台使用。底层配置细节见 [configuration.md](configuration.md)，灰度部署见 [gray-deployment.md](gray-deployment.md)。
 
+## 按场景查阅
+
+- 首次启动与提交解析：看[快速启动](#快速启动)和[推荐解析流程](#推荐解析流程)。
+- 结果待人工复核或正式发布：看[待审内容与正式发布](#待审内容与正式发布)。这条发布流程按产品需要启用，不是所有接入方的前置步骤。
+- 按需扩展阅读页、质量诊断和字段：看[前端接入字段清单](#前端接入字段清单)与[Reader 最小渲染协议](#reader-最小渲染协议)。
+- 按需排查本地 Provider、RAG 覆盖或 PDF 分片：看[Provider Comparison 产品字段](#provider-comparison-产品字段)、[Coverage 消费指南](#coverage-消费指南)和[大文件和超长 PDF](#大文件和超长-pdf)。
+- 调整运行配置、鉴权、队列或部署：看[配置手册](configuration.md)、[灰度部署说明](gray-deployment.md)和[自检门禁](self-check-gate.md)。
+
 ## 使用形态
 
 ParseCore 当前支持四种使用形态：
@@ -19,11 +27,11 @@ ParseCore 当前支持四种使用形态：
 
 ## 快速启动
 
-在仓库根目录创建虚拟环境并安装开发依赖（Python 3.13 或以上）：
+在仓库根目录创建虚拟环境并安装 API 与常用解析器依赖（Python 3.13 或以上）：
 
 ```powershell
 py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[api,parsers,test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[api,parsers]"
 ```
 
 启动本地 API：
@@ -57,28 +65,52 @@ document = runtime.get_document(doc_id="demo-doc", tenant_id="default")
 
 ## 推荐解析流程
 
-### 中小文档
+### 提交作业、查状态、读结果
 
-中小 Word、Excel、PDF 可用同步入口：
+宿主默认采用异步 job：先把客户端文件上传到桥接入口，再用返回的服务端路径提交 job。以下例子用文本文件演示；Word、Excel、PDF 将文件名和 MIME 类型改成实际值。
 
 ```powershell
 New-Item -ItemType Directory -Force .\samples | Out-Null
 Set-Content -LiteralPath .\samples\demo.txt -Value "ParseCore demo: native text parsing." -Encoding UTF8
-curl.exe -sS -F "file=@samples/demo.txt;type=text/plain" -F "doc_id=demo-doc" -F "profile=auto" http://127.0.0.1:8090/v1/parse
+$upload = curl.exe -sS -F "file=@samples/demo.txt;type=text/plain" -F "doc_id=demo-doc" -F "profile=auto" http://127.0.0.1:8090/v1/parse/uploads | ConvertFrom-Json
+$request = @{
+  doc_id = "demo-doc"
+  file_path = $upload.parsecore_server_file_path
+  media_type = "text/plain"
+  options = @{ profile = "auto" }
+} | ConvertTo-Json -Depth 8
+$job = Invoke-RestMethod -Method Post -ContentType "application/json" -Body $request http://127.0.0.1:8090/v1/parse/jobs
 ```
 
-Word、Excel、PDF 同样通过 `file=@实际文件路径` 上传，并设置对应 MIME 类型。JSON 提交的 `file_path` 是服务端路径；默认仅允许对象存储目录内已存在的文件，不能直接填客户端路径或任意 `D:/app/uploads/...` 路径。
-
-读取结构化结果：
+提交成功会返回 `job_id` 和 `state`。轮询该 job，直到 `done` 或 `failed`：
 
 ```powershell
-Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=structured"
-Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/quality"
+$jobId = $job.job_id
+for ($attempt = 0; $attempt -lt 60; $attempt++) {
+  $status = Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/jobs/$jobId"
+  if ($status.state -in @("done", "failed")) { break }
+  Start-Sleep -Seconds 1
+}
+if ($status.state -eq "failed") { throw "Parse job $jobId failed." }
+if ($status.state -ne "done") { throw "Parse job $jobId is still $($status.state); check it again later." }
+$status | Select-Object job_id, state
 ```
+
+完成后读取 structured projection：
+
+```powershell
+$result = Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc?projection=structured"
+```
+
+普通结果读取返回当前正式版本。若文档尚无正式版本，结果可能为空；若仍在复核中，可能读到上一正式版本。`job.state = done` 只表示任务执行完成，不表示该 run 已发布。需要消费这次待审结果时，再按下节核对 `publication`、预览指定 run 并根据产品审批流程发布。
+
+JSON 提交的 `file_path` 是服务端路径，默认只允许对象存储目录内已存在的文件；客户端不要传本机路径。跨服务上传应使用 `/v1/parse/uploads` 返回的 `parsecore_server_file_path`。同步入口返回 `413 document_too_large_for_sync` 时切换到上传桥接和异步 job，不要反复提交同一个大文件。
 
 ### 待审内容与正式发布
 
-解析 job 的 `done` 只代表执行完成。先检查 publication：
+只有宿主需要读取未发布内容或执行人工审核时才进入本节。SQLite 支持正式版本发布和待审 run 读取；Postgres/pgvector 联调配置不支持这条发布链路。
+
+检查 publication：
 
 ```powershell
 $publication = Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/demo-doc/publication"
@@ -106,28 +138,19 @@ Invoke-RestMethod -Method Post -ContentType "application/json" -Body $review "ht
 
 发布成功后，普通 GET、records 与导出读取同一正式 run。缺少必需产物或后端能力不能通过人工复核绕过；不要在未看过待审正文时自动调用 publish。
 
-### 大文件和超长 PDF
+### 中小文档
 
-大文件推荐异步链路：
-
-1. 上传到 `/v1/parse/uploads`。
-2. 使用返回的 `parsecore_server_file_path` 创建 `/v1/parse/jobs`。
-3. 轮询 `/v1/parse/jobs/{job_id}`。
-4. 完成后读取 structured projection、records、导出包或 part 视图。
-
-示例：
+不需要异步调度的中小文件也可使用同步 `/v1/parse` 入口直接取得解析响应；它适合单次请求或旧 parser-service 兼容场景。该入口不是宿主默认接入流程。
 
 ```powershell
-$upload = curl.exe -sS -F "file=@samples/big.pdf;type=application/pdf" -F "doc_id=big-pdf" -F "profile=large-pdf-catalog" http://127.0.0.1:8090/v1/parse/uploads | ConvertFrom-Json
-$job = @{
-  doc_id = "big-pdf"
-  file_path = $upload.parsecore_server_file_path
-  media_type = "application/pdf"
-  options = @{ profile = "large-pdf-catalog" }
-} | ConvertTo-Json -Depth 8
-
-Invoke-RestMethod -Method Post -ContentType "application/json" -Body $job http://127.0.0.1:8090/v1/parse/jobs
+curl.exe -sS -F "file=@samples/demo.txt;type=text/plain" -F "doc_id=demo-sync" -F "profile=auto" http://127.0.0.1:8090/v1/parse
 ```
+
+### 大文件和超长 PDF
+
+大文件使用上述异步 job 流程，并按文档类型显式选择合适的 profile；例如超大目录类 PDF 使用 `large-pdf-catalog`。以下命令为分片规划和异常 part 复跑示例：
+
+解析完成后按需要读取 records、导出包或 part 视图。
 
 规划 part：
 
@@ -141,6 +164,14 @@ Invoke-RestMethod "http://127.0.0.1:8090/v1/parse/documents/big-pdf/parts"
 ```powershell
 Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/big-pdf/parts/rerun" -ContentType "application/json" -Body '{"failed_only":true}'
 ```
+
+### 宿主接入约定
+
+- 默认传 `profile=auto`；灰度时记录请求策略与结构化结果 `profile_resolution.resolved_profile` 以便对比，仅在明确场景中覆盖策略。
+- 新接入优先读取 `projection=structured`；兼容旧 parser-service 的消费者可继续使用 `compat`，`full` 主要用于排查。`reader`、`ir`、`coverage` 按对应场景选择。
+- 将 `quality_signals` 作为可扩展字段保存或展示；遇到未知 signal code 时应兼容保留，避免把已知枚举写死为解析失败。
+- 桥接上传也可通过 multipart 表单字段 `create_job=true` 在上传请求中一并创建 job，并直接取得 `job_id / state`；需要分离上传与调度时使用前文两步示例。
+- 所有 HTTP 响应都会返回 `x-trace-id`；调用方可传入自己的 ID 关联宿主日志，未传时由 ParseCore 生成。
 
 ## Profile 选择
 
@@ -266,7 +297,8 @@ jsonl | csv | tsv | sqlite | xlsx
 交付给宿主产品前，建议完成：
 
 ```powershell
-python -m pytest -q
+.\.venv\Scripts\python.exe -m pip install -e ".[api,parsers,test]"
+.\.venv\Scripts\python.exe -m pytest -q
 git diff --check
 .\.venv\Scripts\python.exe -m parsecore.cli describe --config parsecore.toml
 Invoke-RestMethod http://127.0.0.1:8090/health
@@ -286,23 +318,18 @@ Invoke-RestMethod http://127.0.0.1:8090/health
 
 ## 契约接入顺序
 
-宿主产品接入 ParseCore 输出时，建议按以下顺序逐层接入投影端点：
+核心接入流程是提交 job、查询状态并读取结果。本节保留历史锚点；下面列出的是按产品功能选用的投影，没有固定先后，也不要求所有接入方全部实现：
 
-| 阶段 | 端点 | 用途 | 说明 |
-| --- | --- | --- | --- |
-| 1 | `GET /v1/parse/documents/{doc_id}/reader` | 页面渲染 | blocks 数组可直接驱动前端阅读器，含 `reader_summary`、`quality_gate` |
-| 2 | `GET /v1/parse/documents/{doc_id}/quality` | 质量诊断 | `quality_signals`、`attention_summary` 驱动红点提示和复核流程 |
-| 3 | `GET /v1/parse/documents/{doc_id}/providers` | Provider 追踪 | 观察哪些 local provider 被选中、对比报告、rerun 建议 |
-| 4 | `GET /v1/parse/documents/{doc_id}/parts` | 分片状态 | 大 PDF 每个 part 的解析状态、质量信号、rerun 合同 |
-| 5 | `GET /v1/parse/documents/{doc_id}/coverage` | RAG 覆盖审计 | 页级/unit 级 coverage gap，驱动 RAG 入库策略 |
-| 6 | `GET /v1/parse/documents/{doc_id}?projection=ir` | 完整 IR | 全量结构化中间表示，适合深度集成 |
+| 场景 | 端点 | 用途 |
+| --- | --- | --- |
+| 阅读页 | `GET /v1/parse/documents/{doc_id}/reader` | 获取可渲染 blocks、`reader_summary` 和 `quality_gate` |
+| 质量诊断 | `GET /v1/parse/documents/{doc_id}/quality` | 查看 `quality_signals`、`attention_summary` 和质量门禁 |
+| Provider 排查 | `GET /v1/parse/documents/{doc_id}/providers` | 查看实际 Provider、对比报告与建议动作 |
+| PDF 分片运维 | `GET /v1/parse/documents/{doc_id}/parts` | 查看 part 状态、质量信号和复跑能力 |
+| RAG 覆盖审计 | `GET /v1/parse/documents/{doc_id}/coverage` | 查看页级和 unit 级 coverage gap |
+| 深度集成 | `GET /v1/parse/documents/{doc_id}?projection=ir` | 获取完整结构化中间表示 |
 
-**接入检查清单：**
-
-- [ ] 每个端点返回的 `schema_version` 已在消费方做兼容判断
-- [ ] `quality_gate.status` 为 `warn` 或 `fail` 时宿主有对应 UX 处理
-- [ ] `rag_coverage_quality.recommended_action` 为 `local_provider_rerun` 时可自动触发复跑
-- [ ] `comparison_report` 中的 `summary` 字段可渲染为 provider 比较摘要卡片
+消费时按 `schema_version` 处理契约兼容。遇到 `quality_gate.gate` 为 `accept_with_warning`、`local_rerun` 或 `manual_review` 时，结合质量信号给出宿主提示。可参考 `rag_coverage_quality.recommended_action` 和 `comparison_report.summary` 呈现复核信息，按宿主策略决定是否触发复跑。
 
 ## 前端接入字段清单
 
@@ -312,16 +339,17 @@ Invoke-RestMethod http://127.0.0.1:8090/health
 
 | 字段路径 | 类型 | 说明 |
 | --- | --- | --- |
-| `blocks[].block_id` | string | 块唯一标识 |
-| `blocks[].block_type` | string | 块类型：`title` / `paragraph` / `table` / `image` |
-| `blocks[].content` | string | 文本内容或表格 Markdown |
+| `blocks[].reader_block_id` | string | 阅读块标识 |
+| `blocks[].source_block_ids` | string[] | 对应源块的标识 |
+| `blocks[].type` | string | 块类型，取值为 `title`、`text`、`table` 或 `figure` |
+| `blocks[].text` | string | 阅读页文本 |
 | `blocks[].semantic_role` | string | 语义角色：`body_section` / `table` / `image` / `header_footer` 等 |
-| `blocks[].metadata.bbox` | array | 页面包裹框 [x1,y1,x2,y2] |
-| `blocks[].metadata.page` | int | 页码 |
-| `blocks[].metadata.reading_order` | int | 阅读顺序序号 |
-| `blocks[].metadata.source_kind` | string | 来源：`native_text` / `ocr_text` / `structured_table` / `pdf_image` |
+| `blocks[].bbox` | array/null | 页面包裹框 [x1,y1,x2,y2] |
+| `blocks[].page_number` | int | 页码 |
+| `blocks[].reading_order` | int | 阅读顺序序号 |
+| `blocks[].source_kind` | string | 来源类型，例如 `native_text`、`ocr_text` 或 `pdf_image` |
 | `pages[].page_number` | int | 页码 |
-| `pages[].quality_signals` | array | 页级质量信号列表 |
+| `pages[].quality_signal_codes` | string[] | 页级质量信号码 |
 | `reader_summary` | object | 文档摘要统计 |
 
 ### Quality 投影（质量红点与复核）
@@ -330,20 +358,20 @@ Invoke-RestMethod http://127.0.0.1:8090/health
 | --- | --- | --- |
 | `quality_signals[].code` | string | 信号代码，如 `column_shift_suspected` |
 | `quality_signals[].severity` | string | 严重级别：`info` / `warning` / `error` |
-| `quality_signals[].page_numbers` | array | 触发该信号的页码 |
+| `quality_signals[].page_number` | int/null | 信号关联的源页 |
 | `attention_summary` | object | 需关注的 part/页汇总 |
-| `quality_gate.status` | string | 门禁状态：`pass` / `warn` / `fail` |
+| `quality_gate.gate` | string | 诊断建议，包括 `accept`、`accept_with_warning`、`local_rerun`、`manual_review` 和 `disabled` |
 
 ### Coverage 投影（RAG 入库审计）
 
 | 字段路径 | 类型 | 说明 |
 | --- | --- | --- |
 | `coverage.pages[].page_number` | int | 页码 |
-| `coverage.pages[].units[].unit_id` | string | KnowledgeUnit ID |
-| `coverage.pages[].units[].should_index_for_rag` | bool | 是否建议 RAG 入库 |
-| `coverage.pages[].units[].skip_reason` | string/null | 跳过原因 |
-| `rag_coverage_quality.status` | string | 覆盖状态：`full` / `partial` / `empty` |
-| `rag_coverage_quality.recommended_action` | string | 建议动作 |
+| `coverage.units[].unit_id` | string | KnowledgeUnit ID |
+| `coverage.units[].should_index_for_rag` | bool | 是否建议 RAG 入库 |
+| `coverage.units[].skip_reason` | string/null | 跳过原因 |
+| `rag_coverage_quality.gate` | string | 覆盖质量判断，例如 `accept` 或 `manual_review` |
+| `rag_coverage_quality.recommended_action` | string/null | 建议动作 |
 
 ## API 错误码参考
 

@@ -124,6 +124,12 @@ fixture 解析顺序：`fixture_relative_path` + `PARSECORE_REGRESSION_FIXTURE_R
 
 `tools/regression_baseline.py check-suite` 复用同一校验：默认会把不可用条目打印为 `[suite][corpus] UNVERIFIED: ...` 并以 `corpus NOT verified` 结尾（仍按历史语义返回 0），传入 `--require-verified-corpus` 时改为返回 1。fixture 哈希漂移也会打印 `[suite][corpus] HASH DRIFT: ...`。
 
+### 版本化回归基线与来源
+
+`regression_baseline.py save` 在基线中记录版本、源码 commit 和 tracked tree 状态。`exact_commit_run` 需要已知 commit 和干净的 tracked tree。没有 Git 信息时可以保存基线并标明来源未知。
+
+`tools/regression_baseline_registry.py validate` 可离线校验工件路径、SHA-256、元数据和指定投影。R4 对照登记保存在 `var/regression/baseline-registry.json`，项目609对照使用 `var/regression/suite.project609.json`。日常 fast 回归和 Provider 检查使用版本化样本，来源与现场抽查记录见[第 8 节](parsecore-reliability-mineru-todo-20260920.md#8-本轮开发结果2026-10-07)。
+
 ### 297 页样本漂移（历史问题，已由后续验收更新）
 
 2026-10-07 开发前评估记录中的 297 页样本 `36d65cd6b61346e28e97dbaf829646de.pdf`（sha256 `aaa5f0a3…78dcf`，2634672 字节）曾有 `numeric_heavy_total` 与 `suspected_header_footer_total` 漂移。该旧记录描述修复前状态，不能作为当前失败结论。后续按原页核查并修复误触发/内容关联问题，在未放宽阈值的情况下，三个配置的版本化快照回归与 fast/corpus release 验收通过；详情见[当前证据入口第 8 节](parsecore-reliability-mineru-todo-20260920.md#8-本轮开发结果2026-10-07)及保留的[原 P0-01 评估记录](p0-01-capability-truthfulness-20260920.md)。这仍只是当时的本地验收，不代表当前改动后的结果、整份 PDF 已获业务批准、生产部署或 Postgres/pgvector 正式发布已验证。

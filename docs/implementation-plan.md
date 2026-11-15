@@ -2,12 +2,12 @@
 
 ## 导航
 
-- 第 1 节「当前状态」与第 2 节「Phase 0 ~ Phase 4」只保留历史结论和回溯入口，不再作为活动路线或日常阅读入口。
-- 第 3 节「下一阶段规划（2026-04-27）」是当前唯一的活动路线，新任务、新决策、新验收口径都写到这里，并对照 [docs/architecture.md](architecture.md)、[docs/ocr-gateway-contract.md](ocr-gateway-contract.md)、[docs/self-check-gate.md](self-check-gate.md) 维护。
-- 超大表格/目录型 PDF 的下一阶段升级路线单独维护在 [large-pdf-table-pipeline-upgrade-plan.md](large-pdf-table-pipeline-upgrade-plan.md)，作为 17,101 页真实样本后的优先实施计划。
+- 第 1 至 3 节保留 Phase 0 至 7 的实施轨迹和阶段性规划，供回溯。
+- 最新交付范围、验收记录和开发路线见[开发与验收入口](parsecore-reliability-mineru-todo-20260920.md#13-产品接入精简与首批模块拆分)。第 3 节记录 2026-04-27 时的规划。
+- 超大表格/目录型 PDF 的下一阶段升级路线单独维护在 [large-pdf-table-pipeline-upgrade-plan.md](large-pdf-table-pipeline-upgrade-plan.md)，记录 17,101 页真实样本之后的大 PDF 专项规划。
 - 单一宿主接线、历史双跑与 compare-only 细节统一留在 `archive/`；本文件只保留会影响当前决策的最小历史结论。
 
-总体收口判断：
+当时的总体收口判断：
 
 - ParseCore 的「嵌入式内核 + 异步 worker + 多租户 + OCR 兜底 + LLM 增强 + pgvector + 同步/异步 API」骨架已基本完整，Phase 0–4 不再是瓶颈。
 - 当前的真实瓶颈集中在三个方向：
@@ -72,7 +72,7 @@
 
 ## 2. Phase 0 ~ Phase 4（历史路线，已收口）
 
-下列章节是 ParseCore 从骨架到平台化准备阶段的实际执行轨迹，不再作为活动路线维护；任何继续推进都改写到第 3 节。
+下列章节记录 ParseCore 从骨架到平台化准备阶段的实际执行轨迹。
 
 ## Phase 0: 定稿骨架
 
@@ -166,7 +166,7 @@
 
 ## 3. 下一阶段规划（2026-04-27）
 
-本节是当前唯一活动路线。核心原则如下：
+本节记录 2026-04-27 制定的历史路线，保留当时的优先级和验收约定。
 
 - 保持 ParseCore 的主链为 deterministic-first：常规 PDF/DOCX/图片解析继续走稳定后端，不把全文 VLM 当默认主解析器。
 - 优先补工程组织，再补专用模型：先把 format/backend/pipeline/options、enrichment stage、chunking、索引层组织好，再引入局部专用模型。
@@ -174,10 +174,10 @@
 - 检索层从单索引升级为多索引：主索引保吞吐和成本，高精度索引保高价值文档，结构索引用于 SOP/工卡/合规比对。
 - 批处理与重建必须成为内建能力：允许夜间重算 chunk、embedding、索引与质量报表，而不是把重建当临时脚本。
 
-当前优先级排序：
+当时的优先级排序：
 
 1. Phase 5 已完成并收口，后续不再回到“先补工程组织”的准备态。
-2. Phase 6 现在是唯一活动阶段，优先挑一个高价值长尾切片进入受控实验。
+2. Phase 6 当时是活动阶段，优先挑一个高价值长尾切片进入受控实验。
 3. Phase 7 仍然排在 Phase 6 之后，避免在专用能力尚未定型前过早铺开多索引与批处理复杂度。
 
 当前逐项完善顺序（2026-04-29）：
