@@ -453,6 +453,94 @@ class PublishedResultSurvivesFailedRerunTests(unittest.TestCase):
             ],
         )
 
+    def test_combined_export_rebuilds_legacy_records_from_the_selected_run(self) -> None:
+        from starlette.testclient import TestClient
+
+        from parsecore.asgi import create_app
+        from parsecore.tables import rows_from_table_payload
+
+        isolated_config = CONFIG.replace(
+            'object_store = "local://./var/uploads"',
+            'object_store = "local://__OBJECT_STORE__"',
+        )
+        export_path = "/v1/parse/documents/doc-1/export-jobs"
+        export_request = {
+            "include": ["reader", "records"],
+            "formats": {"reader": "jsonl", "records": "jsonl"},
+        }
+        with TemporaryWorkspace(isolated_config) as workspace, TestClient(
+            create_app(workspace.config_path)
+        ) as client:
+            runtime = client.app.state.runtime
+
+            def publish_run(version: str) -> str:
+                published = runtime.publish_run(
+                    doc_id="doc-1",
+                    artifacts=RunArtifacts(
+                        blocks=(
+                            Block(
+                                block_id=f"table-{version}",
+                                doc_id="doc-1",
+                                type=BlockType.TABLE,
+                                content="",
+                                metadata={
+                                    "page": 1,
+                                    "cells": [["Part Number", "Quantity"], [f"PN-{version}", "1"]],
+                                },
+                            ),
+                        ),
+                        views={"pages": [{"page_number": 1, "text": f"PN-{version}"}]},
+                    ),
+                    job_id=f"job-{version}",
+                    source_version=f"sha256:{version}",
+                    validation_status="passed",
+                )
+                self.assertTrue(published["published"])
+                return published["parse_run_id"]
+
+            old_run_id = publish_run("old")
+            read_document = runtime.get_document
+
+            def read_old_then_publish_new(**kwargs):
+                snapshot = read_document(**kwargs)
+                if snapshot["publication"]["served_run_id"] == old_run_id:
+                    self.assertFalse(snapshot["document_views"].get("records"))
+                    publish_run("new")
+                return snapshot
+
+            with patch.object(runtime, "get_document", side_effect=read_old_then_publish_new):
+                first_export = client.post(export_path, json=export_request)
+            second_export = client.post(export_path, json=export_request)
+
+            for version, response in (("old", first_export), ("new", second_export)):
+                with self.subTest(version=version):
+                    self.assertEqual(response.status_code, 202, response.text)
+                    job = response.json()
+                    download = job["download_endpoint"]
+                    manifest = client.get(download)
+                    self.assertEqual(manifest.status_code, 200, manifest.text)
+                    self.assertEqual(job["parse_run_id"], f"job-{version}")
+                    self.assertEqual(manifest.json()["parse_run_id"], f"job-{version}")
+
+                    datasets = {}
+                    for dataset in ("reader", "records"):
+                        file_response = client.get(download, params={"file": f"{dataset}.jsonl"})
+                        self.assertEqual(file_response.status_code, 200, file_response.text)
+                        datasets[dataset] = [json.loads(line) for line in file_response.text.splitlines()]
+
+                    block_id = f"table-{version}"
+                    expected_row = [f"PN-{version}", "1"]
+                    reader = datasets["reader"]
+                    self.assertEqual([block["source_block_ids"] for block in reader], [[block_id]])
+                    self.assertEqual(
+                        rows_from_table_payload(reader[0]["table"]),
+                        [["Part Number", "Quantity"], expected_row],
+                    )
+                    self.assertEqual(
+                        [(record["block_id"], record["raw_cells"]) for record in datasets["records"]],
+                        [(block_id, expected_row)],
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
