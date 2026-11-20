@@ -1717,6 +1717,17 @@ gate_status = "pending"
                     ],
                 )
 
+                failed_export = client.post(
+                    "/v1/parse/documents/doc-table-v2/export-jobs",
+                    json={"include": ["pages", "records"], "formats": {"records": "unsupported"}},
+                )
+                self.assertEqual(failed_export.status_code, 400)
+                self.assertEqual(failed_export.json()["code"], "invalid_export_format")
+                export_root = workspace.root / "object-store" / "_exports"
+                self.assertEqual(
+                    {path.name for path in export_root.iterdir()}, {export_payload["export_id"]}
+                )
+
                 export_manifest = client.get(f"/v1/parse/export-jobs/{export_payload['export_id']}")
                 self.assertEqual(export_manifest.status_code, 200)
                 self.assertEqual(export_manifest.json()["export_id"], export_payload["export_id"])

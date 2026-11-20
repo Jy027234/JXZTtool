@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
+from shutil import rmtree
 from typing import Any
 from uuid import uuid4
 
-from .exports import write_structured_projection
+from .exports import _normalize_dataset, _normalize_format, write_structured_projection
 from .private_files import ensure_private_directory, harden_private_file, write_private_bytes
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_EXPORTS: tuple[tuple[str, str], ...] = (
@@ -28,13 +33,6 @@ def create_export_package(
 ) -> dict[str, Any]:
     """Create an isolated export package and return its manifest."""
     export_id = f"exp_{uuid4().hex}"
-    package_dir = _export_package_dir(output_dir, export_id)
-    package_dir = ensure_private_directory(
-        package_dir,
-        allowed_root=output_dir,
-        exist_ok=False,
-    )
-
     filtered_payload = _filtered_payload(payload, filters or {})
     requested_specs = _export_specs(includes=includes, formats=formats)
     manifest: dict[str, Any] = {
@@ -56,29 +54,41 @@ def create_export_package(
         "files": [],
     }
 
-    for dataset, format_name in requested_specs:
-        filename = f"{dataset}.{format_name}"
-        path = export_file_path(output_dir, export_id, filename)
-        exported = write_structured_projection(
-            filtered_payload,
-            dataset=dataset,
-            format=format_name,
-            path=path,
-        )
-        harden_private_file(path)
-        manifest["files"].append(
-            {
-                "dataset": dataset,
-                "format": format_name,
-                "path": filename,
-                "content_type": exported["content_type"],
-                "bytes": exported["bytes"],
-                "records": _record_count(filtered_payload.get(dataset)),
-            }
-        )
+    package_dir = ensure_private_directory(
+        Path(output_dir).expanduser() / export_id,
+        allowed_root=output_dir,
+        exist_ok=False,
+    )
+    try:
+        for dataset, format_name in requested_specs:
+            filename = f"{dataset}.{format_name}"
+            path = export_file_path(package_dir.parent, export_id, filename)
+            exported = write_structured_projection(
+                filtered_payload,
+                dataset=dataset,
+                format=format_name,
+                path=path,
+            )
+            harden_private_file(path)
+            manifest["files"].append(
+                {
+                    "dataset": dataset,
+                    "format": format_name,
+                    "path": filename,
+                    "content_type": exported["content_type"],
+                    "bytes": exported["bytes"],
+                    "records": _record_count(filtered_payload.get(dataset)),
+                }
+            )
 
-    manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
-    write_private_bytes(package_dir, "manifest.json", manifest_bytes)
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+        write_private_bytes(package_dir, "manifest.json", manifest_bytes)
+    except BaseException:
+        try:
+            rmtree(package_dir)
+        except OSError:
+            _LOGGER.warning("Could not remove incomplete export package %s", export_id, exc_info=True)
+        raise
     return manifest
 
 
@@ -93,14 +103,18 @@ def load_export_manifest(output_dir: str | Path, export_id: str) -> dict[str, An
 
 def export_file_path(output_dir: str | Path, export_id: str, filename: str) -> Path:
     package_dir = _export_package_dir(output_dir, export_id)
-    file_name = Path(str(filename))
-    if file_name.is_absolute() or file_name.name != str(filename) or str(filename) in {"", ".", ".."}:
-        raise ValueError("invalid_export_filename")
-    candidate = package_dir / str(filename)
-    resolved = candidate.resolve()
+    name = str(filename)
+    _validate_export_filename(name)
+    resolved = (package_dir / name).resolve()
     if resolved != package_dir and package_dir not in resolved.parents:
         raise ValueError("invalid_export_path")
     return resolved
+
+
+def _validate_export_filename(filename: str) -> None:
+    path = Path(filename)
+    if path.is_absolute() or path.name != filename or filename in {"", ".", ".."}:
+        raise ValueError("invalid_export_filename")
 
 
 def _export_package_dir(output_dir: str | Path, export_id: str) -> Path:
@@ -123,7 +137,14 @@ def _export_specs(
 
     default_formats = dict(DEFAULT_EXPORTS)
     configured_formats = formats or {}
-    return [(dataset, str(configured_formats.get(dataset, default_formats.get(dataset, "jsonl")))) for dataset in datasets]
+    specs: list[tuple[str, str]] = []
+    for dataset in datasets:
+        format_name = str(configured_formats.get(dataset, default_formats.get(dataset, "jsonl")))
+        _validate_export_filename(f"{dataset}.{format_name}")
+        _normalize_dataset(dataset)
+        _normalize_format(format_name)
+        specs.append((dataset, format_name))
+    return specs
 
 
 def _filtered_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:

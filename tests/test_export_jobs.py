@@ -7,8 +7,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from parsecore.export_jobs import create_export_package, export_file_path, load_export_manifest
+from parsecore.exports import write_structured_projection
 
 
 class ExportPackageTests(unittest.TestCase):
@@ -326,14 +328,46 @@ class ExportPackageTests(unittest.TestCase):
             self.assertEqual([row[0] for row in rows], ["rec-1", "rec-2"])
             self.assertEqual(json.loads(rows[1][1]), {"name": "beta"})
 
-    def test_custom_invalid_dataset_and_format_raise_value_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "invalid_export_dataset"):
-                create_export_package({}, tmp, includes=["images"])
+    def test_invalid_options_leave_export_root_empty(self) -> None:
+        cases = (
+            ("invalid_export_dataset", {"includes": ["pages", "images"]}),
+            ("invalid_export_format", {"includes": ["pages", "records"], "formats": {"records": "parquet"}}),
+            ("invalid_export_filename", {"includes": ["pages", "../records"]}),
+            ("invalid_export_filter", {"filters": {"page_range": {"start": 2, "end": 1}}}),
+        )
+        for code, options in cases:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                with patch("parsecore.export_jobs.write_structured_projection", wraps=write_structured_projection) as writer:
+                    with self.assertRaisesRegex(ValueError, f"^{code}$"):
+                        create_export_package({}, tmp, **options)
+                    self.assertEqual(list(Path(tmp).iterdir()), [])
+                    writer.assert_not_called()
+
+    def test_writer_failure_removes_only_the_incomplete_export(self) -> None:
+        payload = {
+            "doc_id": "doc-test",
+            "pages": [{"page_number": 1, "text": "synthetic page"}],
+        }
+
+        def fail_on_records(payload, *, dataset, format, path):
+            if dataset == "records":
+                self.assertTrue(path.with_name("pages.jsonl").is_file())
+                path.write_text("incomplete record", encoding="utf-8")
+                raise OSError("injected export write failure")
+            return write_structured_projection(payload, dataset=dataset, format=format, path=path)
 
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "invalid_export_format"):
-                create_export_package({}, tmp, includes=["tables"], formats={"tables": "parquet"})
+            completed = create_export_package(payload, tmp, includes=["pages"])
+
+            with patch("parsecore.export_jobs.write_structured_projection", side_effect=fail_on_records):
+                with self.assertRaisesRegex(OSError, "injected export write failure"):
+                    create_export_package(payload, tmp, includes=["pages", "records"])
+
+            export_id = completed["export_id"]
+            self.assertEqual({path.name for path in Path(tmp).iterdir()}, {export_id})
+            self.assertEqual(load_export_manifest(tmp, export_id), completed)
+            download = export_file_path(tmp, export_id, "pages.jsonl")
+            self.assertEqual(json.loads(download.read_text(encoding="utf-8")), payload["pages"][0])
 
     def test_export_paths_reject_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
