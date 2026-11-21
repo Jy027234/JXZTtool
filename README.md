@@ -12,7 +12,7 @@ ParseCore 是可嵌入宿主产品、也可独立部署的文档解析中台内�
 
 当前交付包含 CPU 可运行的 Python SDK、CLI、ASGI API 和 queue-worker；SQLite 提供本地持久化任务、正式版本发布、待审 run 读取与文档结果查询。常用解析接入支持 Word、Excel、PDF、文本及按需 OCR；异步 job、structured projection、records/导出、质量视图和 PDF part 操作可按需使用。
 
-2026-11-14 的本地 fast 发版门禁和当前样本的 CPU/SQLite 链路验收通过。GitHub Actions runner 缺少语料时会将真实样本回归标记为 `UNVERIFIED`；smoke 通过不能代替该项验收。真实中文双栏、Postgres/pgvector 正式发布及文档 run 隔离、生产部署仍未验证。Postgres/pgvector 示例限存储与索引联调；启用发布时，内置索引不支持 `rag` 产物 profile。详见[本轮验收与边界](docs/parsecore-reliability-mineru-todo-20260920.md#12-p1-至-p3-总验收)和[自检门禁](docs/self-check-gate.md)。
+`bd6462d` 的本机 CPU/SQLite fast 发版门禁为 `ok / verified`。`f46b4bc` 的 GitHub Fast self-check 已通过，Runner 缺少样本，真实样本回归仍标为 `unverified`。真实中文双栏、Postgres/pgvector 正式发布及文档 run 隔离、生产部署继续待验证。Postgres/pgvector 示例限存储与索引联调。启用发布时，内置索引对 `rag` 产物 profile 的支持继续暂缓。[当前验收与边界](docs/parsecore-reliability-mineru-todo-20260920.md#15-导出收尾与当前验收) · [自检门禁](docs/self-check-gate.md)
 
 ## 按任务查阅
 

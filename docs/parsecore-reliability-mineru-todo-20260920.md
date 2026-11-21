@@ -330,3 +330,14 @@ README、发版说明、自检说明和上线清单均引用本次验收。生�
 - 原有 `seed` 关系样本在本机通过结构诊断。第 282、286 页分别核对 29、53 个格位，第 85、87 页续表核对 25 个格位和 19 条合并记录。GitHub Actions 的真实样本验证仍未完成。
 
 基于 `cdc8f51` 的未提交工作区在本机通过 `self-check --profile fast --require-verified-corpus`，结果为 `ok / verified`。1,223 项测试通过，5 项因缺少 Postgres 测试连接、1 项因无法创建目录符号链接而跳过。8 个 schema、8 份样例、3 项真实语料基线和 6 次 Provider 检查均通过。本地报告保存在 `tmp/parsecore-next-local-cdc8f51/reports/`。
+
+## 15. 导出收尾与当前验收
+
+- `8905b97` 补齐 PDF 表格裁剪异常的页级回退，保留原始网格、坐标和表格与正文的分隔。CMM 第 282、286 页、旋转表、续表和本机真实语料门禁均通过。这两页的最终行结构证据见第 14 节。
+- `d05c627` 验证旧快照缺少 records 时的同版本重建。`bd6462d` 验证写盘失败仅清理当次半包。`bd6462d` 的本机 fast 发版门禁为 `ok / verified`，1,226 项测试通过、6 项跳过，3 项语料基线、8 个 schema、8 份载荷和 6 次 Provider 检查通过。[本机语料门禁](../tmp/parsecore-gap-close-20261121/reports/self-check.fast.json)
+- `f46b4bc` 将快照读取、records 整理和写盘交给每个应用实例的单个导出线程。生成结束后仍返回 `202` 和 `state=done`。本机单 worker 的 5 万条合成 records 对照中，并发健康请求最大耗时从 755.6 ms 降至 109.9 ms，峰值 RSS 约 138 MiB。随后同口径复测峰值为 137.4 MiB，比导出前高 89.7 MiB。固定发布版本分页继续暂缓，容量判断仍待目标宿主数据。[执行隔离复测](../tmp/parsecore-export-isolation-20261121/export_generation_benchmark.json) · [容量复测](../tmp/parsecore-export-capacity-20261121/export_generation_benchmark.json)
+- GitHub Actions 对 `f46b4bc` 的 Fast self-check 已通过，1,225 项通过、8 项跳过，工件实际下载并核对过提交 SHA。Runner 缺少真实样本，使用 smoke 回退，报告中的语料状态为 `unverified`。[运行记录](https://github.com/Jy027234/JXZTtool/actions/runs/44867710796)
+
+本轮在 `f46b4bc` 基础上完成两项本机回归。同步 records 导出的非法页范围与导出包 POST 的非法 `filters` 返回 HTTP `400` 和稳定错误码，失败请求未生成半包。合法导出的筛选、版本标识、`202 done` 和下载均通过。只读到期盘点采用 `export_artifact_retention_seconds`，核对了整包字节数、缺失或损坏清单、越界路径、Windows 目录联接和盘点后下载。缺少导出目录时返回空清单。[SQLite 导出回归](../tests/test_read_consistency.py) · [导出包盘点命令](configuration.md#导出包到期盘点)
+
+本轮以 pytest 8.4.2 执行全量测试，1,231 项通过、7 项跳过。跳过项为 5 项缺少连接的 PostgreSQL 集成测试和 2 项需要 Windows 目录符号链接权限的测试。[本机测试报告](../tmp/parsecore-export-followup-20261121/pytest.xml)

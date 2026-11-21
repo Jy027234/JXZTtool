@@ -15,6 +15,16 @@ def safe_upload_suffix(file_name: str, *, fallback: str = ".bin") -> str:
     return suffix.lower() if _SAFE_SUFFIX_PATTERN.fullmatch(suffix) else fallback
 
 
+def resolve_local_object_store_root(object_store: str) -> Path | None:
+    value = str(object_store or "")
+    if not value.startswith("local://"):
+        return None
+    root = Path(value[len("local://"):])
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    return root.resolve(strict=False)
+
+
 def ensure_private_directory(
     path: str | Path,
     *,

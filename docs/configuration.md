@@ -164,7 +164,7 @@ allow_mock_providers = false
 | `staged_upload_max_bytes` | `0` | 字节数 | `/parse/uploads` 与 `/v1/parse/uploads` 桥接暂存上限；`0` 表示不限制，用于承接同步入口拒绝的大文件。 |
 | `staged_upload_retention_seconds` | `86400` | 秒数 | 桥接暂存文件保留期，过期上传会在上传入口触发清理。 |
 | `part_artifact_retention_seconds` | `604800` | 秒数 | part PDF 等局部解析工件建议保留期，配合 `cleanup_artifacts()` 或运维任务清理。 |
-| `export_artifact_retention_seconds` | `2592000` | 秒数 | 导出包建议保留期，生产可按容量和审计要求调整。 |
+| `export_artifact_retention_seconds` | `2592000` | 秒数 | 本地导出包保留期，供只读命令 `list-expired-export-packages` 盘点。 |
 | `provider_comparison_artifact_retention_seconds` | `2592000` | 秒数；`0` 表示关闭 | self-check 生成的 Provider comparison JSON/Markdown 保留期；仅由 `cleanup-provider-comparison-artifacts` 运维命令消费，默认 dry-run，不会在解析或 self-check 时自动删除。 |
 | `allow_external_file_paths` | `false` | bool | 控制 `/v1/parse/jobs` 是否允许读取 `storage.object_store` 之外的服务端本地路径。生产建议保持 `false`。 |
 | `api_key_env` | 空 | 环境变量名 | 配置后除 `/health` 外都要求 `x-api-key` 或 `Authorization: Bearer`。环境变量为空会启动失败。 |
@@ -1170,11 +1170,25 @@ GET  /v1/parse/export-jobs/{export_id}
 GET  /v1/parse/export-jobs/{export_id}/download?file=quality_signals.jsonl
 ```
 
-`POST /v1/parse/documents/{doc_id}/export-jobs` 在请求内生成并写出文件后返回 `202`，records 导出可能全量读取。随后 `/download` 分块传输已生成的文件。
+`POST /v1/parse/documents/{doc_id}/export-jobs` 等导出线程写完文件后返回 `202` 和 `state=done`，records 导出可能全量读取。随后 `/download` 分块传输已生成的文件。
 
 导出包会生成 `manifest.json` 以及按 include/formats 指定的 `pages.jsonl / lines.csv / tables.csv / quality_signals.jsonl / coverage.jsonl / reader.jsonl / parse_units.tsv / records.jsonl / records.sqlite / records.xlsx`。manifest 会记录 `manifest_schema_version / tenant_id / schema_version / parse_run_id / profile / profile_resolution / request.include / request.formats / request.filters`，每个文件条目包含 `dataset / format / path / content_type / bytes / records`。`filters` 当前支持 `page_range`、`severity`、`quality_signal`，并可用 `fields` 或 `field_filters` 对 records 字段做筛选，例如 `{"fields":{"certificate_or_project_no":"PMA0013"}}`；其中 `page_range` 会同时作用于 `pages / lines / tables / quality_signals / coverage / reader / parse_units / records`，`quality_signal` 也可筛选 coverage/reader 的 `quality_signal_codes`。导出包写出 `jsonl/csv/tsv/sqlite/xlsx` 时会直接落盘，避免全量 records 先序列化成大 bytes。`parquet`、异常页截图、raw cells 与 trace 打包作为后续增强。
 
-当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑：
+同步 records 导出的页码无法解析或范围倒置时返回 HTTP `400`，错误码分别为 `invalid_records_query` 和 `invalid_page_range`。导出包的 `filters` 可省略或设为 `null`。非对象的 `filters` 和无效的 `page_range` 返回 HTTP `400` 与 `invalid_export_filter`。
+
+### 导出包到期盘点
+
+在仓库根目录使用配置里的本地对象目录和保留期运行只读盘点。
+
+```powershell
+python -m parsecore.cli list-expired-export-packages --config parsecore.toml
+```
+
+命令从 `_exports` 下的完整包清单读取 `created_at`，达到 `export_artifact_retention_seconds` 的包计入 `expired_count`。每包字节数包含清单和清单列出的文件，合计写入 `expired_bytes`。未完成、清单失效或路径越界的包列在 `skipped_packages`。缺少导出目录时返回空清单。
+
+### PDF part 调度与复跑
+
+当前也已提供 PDF part 调度与复跑第一版，供宿主产品按页段排障和小范围重跑。
 
 ```powershell
 Invoke-RestMethod -Method Post "http://127.0.0.1:8090/v1/parse/documents/demo-doc/parts/plan" -Body '{"target_pages_per_part":200}' -ContentType "application/json"

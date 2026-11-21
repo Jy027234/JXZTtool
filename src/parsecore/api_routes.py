@@ -50,6 +50,7 @@ from .pdf_parts import detect_pdf_page_count
 from .private_files import (
     ensure_private_directory,
     harden_private_file,
+    resolve_local_object_store_root,
     safe_upload_suffix,
     write_private_bytes,
 )
@@ -1239,8 +1240,7 @@ class ApiRoutes:
         try:
             limit = max(1, min(1000, int(request.query_params.get("limit", "100"))))
             offset = max(0, int(request.query_params.get("offset", "0")))
-            page_start = _optional_int(request.query_params.get("page_start"))
-            page_end = _optional_int(request.query_params.get("page_end"))
+            page_start, page_end = _records_page_range(request)
             records_payload = runtime_obj.get_document_records_projection(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1257,20 +1257,7 @@ class ApiRoutes:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
             return JSONResponse(records_payload)
         except ValueError as exc:
-            code = str(exc) or "invalid_records_query"
-            if code == "invalid_page_range":
-                return _error_response(
-                    request,
-                    code=code,
-                    message="Invalid records page range",
-                    status_code=400,
-                )
-            return _error_response(
-                request,
-                code="invalid_records_query",
-                message="Invalid records query",
-                status_code=400,
-            )
+            return _records_query_error(request, str(exc))
 
     async def export_document(self, request: Request) -> Response:
         runtime_obj: ParseRuntime = request.app.state.runtime
@@ -1292,6 +1279,10 @@ class ApiRoutes:
                 view_types=(normalized_dataset,),
             ).get(normalized_dataset, [])
         elif normalized_dataset == "records":
+            try:
+                page_start, page_end = _records_page_range(request)
+            except ValueError as exc:
+                return _records_query_error(request, str(exc))
             records_payload = runtime_obj.get_document_records_projection(
                 doc_id=request.path_params["doc_id"],
                 tenant_id=tenant_id,
@@ -1301,8 +1292,8 @@ class ApiRoutes:
                 table_id=request.query_params.get("table_id"),
                 quality_signal=request.query_params.get("quality_signal"),
                 field_filters=_record_field_filters(request),
-                page_start=_optional_int(request.query_params.get("page_start")),
-                page_end=_optional_int(request.query_params.get("page_end")),
+                page_start=page_start,
+                page_end=page_end,
             )
             if records_payload is None:
                 return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
@@ -1571,6 +1562,9 @@ class ApiRoutes:
     ) -> dict[str, Any] | None:
         includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
         formats = _formats_payload(payload.get("formats"))
+        filters = payload.get("filters")
+        if filters is not None and not isinstance(filters, dict):
+            raise ValueError("invalid_export_filter")
         normalized_includes = {str(item).strip().lower() for item in includes or ()}
         snapshot_view_names = tuple(
             name for name in ("pages", "lines", "records") if name in normalized_includes
@@ -1635,7 +1629,7 @@ class ApiRoutes:
             _export_root(runtime_obj),
             formats=formats,
             includes=includes,
-            filters=dict(payload.get("filters") or {}),
+            filters=filters,
         )
 
     def _export_manifest_for_request(self, request: Request, export_id: str):
@@ -2170,6 +2164,30 @@ def _minimal_export_payload_from_records(records_payload: dict[str, Any], *, ten
     }
 
 
+def _records_page_range(request: Request) -> tuple[int | None, int | None]:
+    page_start = _optional_int(request.query_params.get("page_start"))
+    page_end = _optional_int(request.query_params.get("page_end"))
+    if page_start is not None and page_end is not None and page_start > page_end:
+        raise ValueError("invalid_page_range")
+    return page_start, page_end
+
+
+def _records_query_error(request: Request, code: str) -> JSONResponse:
+    if code == "invalid_page_range":
+        return _error_response(
+            request,
+            code=code,
+            message="Invalid records page range",
+            status_code=400,
+        )
+    return _error_response(
+        request,
+        code="invalid_records_query",
+        message="Invalid records query",
+        status_code=400,
+    )
+
+
 def _record_field_filters(request: Request) -> dict[str, str]:
     filters: dict[str, str] = {}
     field_name = str(request.query_params.get("field") or request.query_params.get("field_name") or "").strip()
@@ -2213,7 +2231,7 @@ def _includes_payload(value: Any, *, field_name: str = "include") -> list[str] |
 
 
 def _export_root(runtime_obj: ParseRuntime) -> Path:
-    root = _resolve_local_object_store_root(runtime_obj)
+    root = resolve_local_object_store_root(runtime_obj.settings.object_store)
     if root is None:
         raise ValueError("export_requires_local_object_store")
     return ensure_private_directory(root / "_exports", allowed_root=root)
@@ -2370,23 +2388,13 @@ def _resolve_api_file_path(runtime_obj: ParseRuntime, value: Any) -> str:
     if runtime_obj.settings.runtime.allow_external_file_paths:
         return str(resolved_candidate)
 
-    object_store_root = _resolve_local_object_store_root(runtime_obj)
+    object_store_root = resolve_local_object_store_root(runtime_obj.settings.object_store)
     if object_store_root is None or not _path_is_relative_to(
         resolved_candidate,
         object_store_root,
     ):
         raise PermissionError("file_path_not_allowed")
     return str(resolved_candidate)
-
-
-def _resolve_local_object_store_root(runtime_obj: ParseRuntime) -> Path | None:
-    object_store = str(runtime_obj.settings.object_store or "")
-    if not object_store.startswith("local://"):
-        return None
-    root = Path(object_store[len("local://"):])
-    if not root.is_absolute():
-        root = Path.cwd() / root
-    return root.resolve(strict=False)
 
 
 def _path_is_relative_to(candidate: Path, root: Path) -> bool:
@@ -2405,7 +2413,7 @@ def _persist_upload_file(
     doc_id: str,
 ) -> tuple[str, bool]:
     suffix = safe_upload_suffix(file_name)
-    root = _resolve_local_object_store_root(runtime_obj)
+    root = resolve_local_object_store_root(runtime_obj.settings.object_store)
     if root is not None:
         directory_name = (
             "_api_uploads"
@@ -2456,7 +2464,7 @@ def _resolve_staged_upload_dir(runtime_obj: ParseRuntime) -> Path | None:
     object_store = runtime_obj.settings.object_store
     if not object_store.startswith("local://"):
         return None
-    root = _resolve_local_object_store_root(runtime_obj)
+    root = resolve_local_object_store_root(runtime_obj.settings.object_store)
     if root is None:
         return None
     return ensure_private_directory(root / "_api_uploads", allowed_root=root)

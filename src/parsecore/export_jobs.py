@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import re
 from shutil import rmtree
+import stat
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +15,7 @@ from .private_files import ensure_private_directory, harden_private_file, write_
 
 
 _LOGGER = logging.getLogger(__name__)
+_EXPORT_PACKAGE_NAME = re.compile(r"exp_[0-9a-f]{32}")
 
 
 DEFAULT_EXPORTS: tuple[tuple[str, str], ...] = (
@@ -99,6 +102,92 @@ def load_export_manifest(output_dir: str | Path, export_id: str) -> dict[str, An
     if not isinstance(manifest, dict):
         raise ValueError("invalid_export_manifest")
     return manifest
+
+
+def list_expired_export_packages(
+    output_dir: str | Path,
+    *,
+    retention_seconds: int,
+) -> dict[str, Any]:
+    """Report complete export packages past their retention period."""
+
+    if retention_seconds < 0:
+        raise ValueError("invalid_export_retention")
+    root = Path(output_dir).expanduser()
+    if root.is_symlink() or root.is_junction():
+        raise ValueError("invalid_export_root")
+    root = root.resolve()
+    if root.exists() and not root.is_dir():
+        raise ValueError("invalid_export_root")
+
+    observed_at = datetime.now(timezone.utc)
+    expired: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    packages = sorted(root.iterdir()) if root.is_dir() else []
+    for package in packages:
+        if not _EXPORT_PACKAGE_NAME.fullmatch(package.name):
+            continue
+        try:
+            created_at, size = _completed_export_package_info(package)
+            age = (observed_at - created_at).total_seconds()
+        except (OSError, OverflowError, ValueError):
+            skipped.append(package.name)
+            continue
+        if age >= retention_seconds:
+            expired.append({
+                "export_id": package.name,
+                "created_at": created_at.isoformat(),
+                "bytes": size,
+            })
+    return {
+        "export_root": str(root),
+        "retention_seconds": retention_seconds,
+        "expired_count": len(expired),
+        "expired_bytes": sum(package["bytes"] for package in expired),
+        "expired_packages": expired,
+        "skipped_packages": skipped,
+    }
+
+
+def _completed_export_package_info(package: Path) -> tuple[datetime, int]:
+    if package.is_symlink() or package.is_junction() or not package.is_dir():
+        raise ValueError("invalid_export_package")
+    manifest_bytes = _export_package_file_size(package / "manifest.json")
+    manifest = load_export_manifest(package.parent, package.name)
+    files = manifest.get("files")
+    created = manifest.get("created_at")
+    if (
+        manifest.get("export_id") != package.name
+        or manifest.get("state") != "done"
+        or not isinstance(created, str)
+        or not isinstance(files, list)
+    ):
+        raise ValueError("invalid_export_manifest")
+    created_at = datetime.fromisoformat(created)
+    if created_at.tzinfo is None:
+        raise ValueError("invalid_export_manifest")
+
+    file_sizes: dict[str, int] = {}
+    for entry in files:
+        if not isinstance(entry, dict) or not isinstance(filename := entry.get("path"), str):
+            raise ValueError("invalid_export_manifest")
+        _validate_export_filename(filename)
+        if filename == "manifest.json":
+            raise ValueError("invalid_export_manifest")
+        size = _export_package_file_size(package / filename)
+        if type(entry.get("bytes")) is not int or size != entry["bytes"]:
+            raise ValueError("invalid_export_package_file")
+        file_sizes[filename] = size
+    return created_at, manifest_bytes + sum(file_sizes.values())
+
+
+def _export_package_file_size(path: Path) -> int:
+    file_stat = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(file_stat.st_mode) or (
+        getattr(file_stat, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise ValueError("invalid_export_package_file")
+    return file_stat.st_size
 
 
 def export_file_path(output_dir: str | Path, export_id: str, filename: str) -> Path:
@@ -268,8 +357,11 @@ def _page_range(raw: Any) -> tuple[int, int] | None:
         return None
     if not isinstance(raw, dict):
         raise ValueError("invalid_export_filter")
-    start = int(raw.get("start", 1))
-    end = int(raw.get("end", start))
+    try:
+        start = int(raw.get("start", 1))
+        end = int(raw.get("end", start))
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("invalid_export_filter") from exc
     if start > end:
         raise ValueError("invalid_export_filter")
     return start, end

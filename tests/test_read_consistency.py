@@ -309,6 +309,88 @@ class PublishedResultSurvivesFailedRerunTests(unittest.TestCase):
         self.assertIsNone(context["served_run_id"])
         self.assertEqual(context["consumer_signal"], "not_ready")
 
+    def test_export_filters_reject_bad_input_and_preserve_valid_sqlite_exports(self) -> None:
+        from starlette.testclient import TestClient
+
+        from parsecore.asgi import create_app
+
+        config = CONFIG.replace("local://./var/uploads", "local://__OBJECT_STORE__")
+        document = "/v1/parse/documents/doc-1"
+        with TemporaryWorkspace(config) as workspace, TestClient(
+            create_app(workspace.config_path), raise_server_exceptions=False,
+        ) as client:
+            published = client.app.state.runtime.publish_run(
+                doc_id="doc-1",
+                artifacts=RunArtifacts(
+                    blocks=(Block(
+                        block_id="source", doc_id="doc-1", type=BlockType.PARAGRAPH,
+                        content="Published text", metadata={"page": 1},
+                    ),),
+                    views={
+                        "pages": [{"page_number": 1, "text": "Published text"}],
+                        "records": [
+                            {"record_id": "first", "page_start": 1, "fields": {"part": "Bolt"}},
+                            {"record_id": "second", "page_start": 2, "fields": {"part": "Nut"}},
+                        ],
+                    },
+                ),
+                job_id="job-published",
+                source_version="synthetic:export-filters",
+                validation_status="passed",
+            )
+            self.assertTrue(published["published"])
+            export_root = workspace.root / "object-store" / "_exports"
+
+            for pages, code in (
+                ({"page_start": "word"}, "invalid_records_query"),
+                ({"page_end": "word"}, "invalid_records_query"),
+                ({"page_start": 2, "page_end": 1}, "invalid_page_range"),
+            ):
+                with self.subTest(pages=pages):
+                    response = client.get(f"{document}/exports", params={"dataset": "records", **pages})
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()["code"], code)
+
+            for filters in (
+                1,
+                [],
+                {"page_range": {"start": None}},
+                {"page_range": {"end": None}},
+                {"page_range": {"start": "word"}},
+                {"page_range": {"start": 2, "end": 1}},
+                {"page_range": [1, 2]},
+            ):
+                with self.subTest(filters=filters):
+                    response = client.post(
+                        f"{document}/export-jobs", json={"include": ["records"], "filters": filters},
+                    )
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()["code"], "invalid_export_filter")
+                    self.assertFalse(export_root.exists() and any(export_root.iterdir()))
+
+            direct = client.get(
+                f"{document}/exports", params={"dataset": "records", "page_start": 2},
+            )
+            self.assertEqual(direct.status_code, 200, direct.text)
+            self.assertEqual([json.loads(line)["record_id"] for line in direct.text.splitlines()], ["second"])
+            self.assertEqual(json.loads(direct.text)["parse_run_id"], "job-published")
+            self.assertIn("attachment;", direct.headers["content-disposition"])
+
+            job = client.post(
+                f"{document}/export-jobs",
+                json={"include": ["records"], "filters": {"page_range": {"start": "2", "end": "2"}}},
+            )
+            self.assertEqual(job.status_code, 202, job.text)
+            manifest = job.json()
+            self.assertEqual(manifest["state"], "done")
+            self.assertEqual(manifest["parse_run_id"], "job-published")
+            self.assertEqual(manifest["files"][0]["records"], 1)
+            download = client.get(manifest["download_endpoint"], params={"file": "records.jsonl"})
+            self.assertEqual(download.status_code, 200, download.text)
+            self.assertEqual(json.loads(download.text)["record_id"], "second")
+            self.assertIn("attachment;", download.headers["content-disposition"])
+            self.assertEqual([path.name for path in export_root.iterdir()], [manifest["export_id"]])
+
     def test_combined_reader_and_records_export_uses_one_published_run(self) -> None:
         from starlette.testclient import TestClient
 

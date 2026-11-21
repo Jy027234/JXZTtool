@@ -11,8 +11,10 @@ from .asgi import create_app
 from .bootstrap import build_runtime
 from .capabilities import CapabilityConfigurationError, capability_error_payload
 from .config import load_settings
+from .export_jobs import list_expired_export_packages
 from .models import ParseRequest
 from .parts import cleanup_provider_comparison_artifacts
+from .private_files import resolve_local_object_store_root
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -96,6 +98,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove files and staged rows after reviewing the default dry-run report",
     )
     run_cleanup.add_argument("--out", default=None)
+
+    export_inventory = sub.add_parser(
+        "list-expired-export-packages",
+        help="List expired packages in the local object store",
+    )
+    export_inventory.add_argument("--config", default="parsecore.toml")
 
     legacy_import = sub.add_parser(
         "import-legacy-snapshots",
@@ -224,6 +232,21 @@ def _main(argv: Sequence[str] | None = None) -> int:
             output_path.write_text(payload_text + "\n", encoding="utf-8")
         print(payload_text)
         return 1 if payload["errors"] else 0
+
+    if args.command == "list-expired-export-packages":
+        settings = load_settings(args.config)
+        root = resolve_local_object_store_root(settings.object_store)
+        if root is None:
+            parser.error("export_requires_local_object_store")
+        try:
+            payload = list_expired_export_packages(
+                root / "_exports",
+                retention_seconds=settings.runtime.export_artifact_retention_seconds,
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     options: dict[str, str] = {}
     if getattr(args, "mode", "default") != "default":

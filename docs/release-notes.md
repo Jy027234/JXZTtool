@@ -29,14 +29,14 @@
 
 - PDF part 文件批量生成，避免每个 part 反复打开同一大 PDF。
 - `large-pdf-catalog` / `large-pdf-ledger` 默认 fast text path，适合目录、清单、台账型超大 PDF。
-- 导出包文件写入磁盘；`POST /export-jobs` 当前仍在请求内生成并落盘，不能视作后台任务已经异步执行。
+- 导出包由每个应用实例的单个导出线程生成，写完文件后 `POST /export-jobs` 返回 `202` 和 `state=done`。本地导出包可按保留期盘点。[到期盘点命令](configuration.md#导出包到期盘点)
 - records API 查询从主文档快照中拆出，默认不再全量加载 `pages / lines / records` views。
 - SQLite/Postgres/InMemory store 均支持 records 分页查询和游标式过滤扫描。
 - OCR adapter 诊断输出、API 可选依赖、重复 helper、ASGI monolith 等早期质量问题已完成主要收口或规划隔离。
 
 ## 最近记录的本地验证结果
 
-2026-11-14 最终本地 fast 发版门禁为 `ok / verified`。pytest 8.4.2 下有 1,214 项通过、6 项跳过。8 个 schema、8 个 payload、真实样本的 3 种配置回归与 6 次局部 Provider 执行通过。[验收范围与报告](parsecore-reliability-mineru-todo-20260920.md#12-p1-至-p3-总验收)
+2026-11-21，`bd6462d` 的本机 fast 发版门禁为 `ok / verified`，1,226 项通过、6 项跳过。8 个 schema、8 份载荷、3 项真实语料基线和 6 次局部 Provider 执行通过。`f46b4bc` 的 GitHub Fast self-check 通过，报告可下载，CI 真实样本回归仍为 `unverified`。[验收范围与报告](parsecore-reliability-mineru-todo-20260920.md#15-导出收尾与当前验收)
 
 2026-05-10 历史大 PDF 样本只读抽检：
 
