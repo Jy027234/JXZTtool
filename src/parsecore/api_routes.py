@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from asyncio import get_running_loop
 import base64
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 import mimetypes
 import os
 from pathlib import Path
@@ -79,11 +81,13 @@ class ApiRoutes:
         self,
         *,
         api_version: str,
+        export_executor: ThreadPoolExecutor,
         health_services: Callable[[ParseRuntime], dict[str, bool]],
         health_service_details: Callable[[ParseRuntime], dict[str, dict[str, Any]]] | None = None,
         health_capabilities: Callable[[ParseRuntime], dict[str, Any]] | None = None,
     ) -> None:
         self.api_version = api_version
+        self._export_executor = export_executor
         self.health_services = health_services
         self.health_service_details = health_service_details
         self.health_capabilities = health_capabilities
@@ -1538,73 +1542,13 @@ class ApiRoutes:
             request.query_params.get("tenant_id") or payload.get("tenant_id"),
         )
         try:
-            includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
-            formats = _formats_payload(payload.get("formats"))
-            normalized_includes = {str(item).strip().lower() for item in includes or ()}
-            snapshot_view_names = tuple(
-                name for name in ("pages", "lines", "records") if name in normalized_includes
-            )
-            view_names = tuple(name for name in snapshot_view_names if name in {"pages", "lines"})
-            include_coverage = bool(normalized_includes) and "coverage" in normalized_includes
-            include_reader = bool(normalized_includes) and "reader" in normalized_includes
-            default_export = not normalized_includes
-            snapshot = runtime_obj.get_document(
-                doc_id=request.path_params["doc_id"],
-                tenant_id=tenant_id,
-                document_view_types=snapshot_view_names or None,
-            )
-            if snapshot["job"] is None:
-                return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
-            view_only_export = bool(normalized_includes) and not (
-                normalized_includes - {"pages", "lines", "records", "coverage", "reader"}
-            )
-            if view_only_export:
-                export_payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
-            else:
-                export_payload = _document_projection(snapshot, projection="structured")
-                export_payload["tenant_id"] = tenant_id
-            if view_names:
-                views = _document_view_rows(snapshot, view_types=view_names)
-                for dataset_name in ("pages", "lines"):
-                    if dataset_name in normalized_includes:
-                        export_payload[dataset_name] = views.get(dataset_name, [])
-            if includes and "records" in normalized_includes:
-                persisted_records = (snapshot.get("document_views") or {}).get("records")
-                if persisted_records:
-                    ordered_records: list[tuple[int, dict[str, Any]]] = []
-                    for record in persisted_records:
-                        if not isinstance(record, Mapping):
-                            continue
-                        row = dict(record)
-                        page_start = row.get("page_start")
-                        page_number = row.get("page_number", row.get("page"))
-                        if page_start is None and page_number is not None:
-                            page_start = page_number
-                        ordered_records.append((_safe_int(page_start, default=0), row))
-                    export_payload["records"] = [
-                        row for _page_start, row in sorted(ordered_records, key=lambda item: item[0])
-                    ]
-                else:
-                    # An empty persisted view follows the records endpoint's
-                    # existing fallback: rebuild from the blocks in this same
-                    # snapshot rather than treating the empty view as authoritative.
-                    records_snapshot = dict(snapshot)
-                    records_snapshot["document_views"] = {}
-                    export_payload["records"] = _document_records_projection(
-                        records_snapshot, limit=None, offset=0
-                    )["items"]
-            if include_coverage or default_export:
-                coverage_payload = _document_projection(snapshot, projection="coverage")
-                export_payload["coverage"] = coverage_payload["coverage"]["pages"]
-            if include_reader:
-                reader_payload = _document_projection(snapshot, projection="reader")
-                export_payload["reader"] = reader_payload["blocks"]
-            manifest = create_export_package(
-                export_payload,
-                _export_root(runtime_obj),
-                formats=formats,
-                includes=includes,
-                filters=dict(payload.get("filters") or {}),
+            manifest = await get_running_loop().run_in_executor(
+                self._export_executor,
+                self._build_export_manifest,
+                runtime_obj,
+                request.path_params["doc_id"],
+                tenant_id,
+                payload,
             )
         except ValueError as exc:
             return _error_response(
@@ -1613,8 +1557,86 @@ class ApiRoutes:
                 message="Invalid export job",
                 status_code=400,
             )
+        if manifest is None:
+            return _error_response(request, code="document_not_found", message="Document not found", status_code=404)
         manifest["download_endpoint"] = f"/v1/parse/export-jobs/{manifest['export_id']}/download"
         return JSONResponse(manifest, status_code=202)
+
+    def _build_export_manifest(
+        self,
+        runtime_obj: ParseRuntime,
+        doc_id: str,
+        tenant_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        includes = _includes_payload(payload.get("include") or payload.get("includes"), field_name="include")
+        formats = _formats_payload(payload.get("formats"))
+        normalized_includes = {str(item).strip().lower() for item in includes or ()}
+        snapshot_view_names = tuple(
+            name for name in ("pages", "lines", "records") if name in normalized_includes
+        )
+        view_names = tuple(name for name in snapshot_view_names if name in {"pages", "lines"})
+        include_coverage = bool(normalized_includes) and "coverage" in normalized_includes
+        include_reader = bool(normalized_includes) and "reader" in normalized_includes
+        default_export = not normalized_includes
+        snapshot = runtime_obj.get_document(
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            document_view_types=snapshot_view_names or None,
+        )
+        if snapshot["job"] is None:
+            return None
+        view_only_export = bool(normalized_includes) and not (
+            normalized_includes - {"pages", "lines", "records", "coverage", "reader"}
+        )
+        if view_only_export:
+            export_payload = _minimal_export_payload(snapshot, tenant_id=tenant_id)
+        else:
+            export_payload = _document_projection(snapshot, projection="structured")
+            export_payload["tenant_id"] = tenant_id
+        if view_names:
+            views = _document_view_rows(snapshot, view_types=view_names)
+            for dataset_name in ("pages", "lines"):
+                if dataset_name in normalized_includes:
+                    export_payload[dataset_name] = views.get(dataset_name, [])
+        if includes and "records" in normalized_includes:
+            persisted_records = (snapshot.get("document_views") or {}).get("records")
+            if persisted_records:
+                ordered_records: list[tuple[int, dict[str, Any]]] = []
+                for record in persisted_records:
+                    if not isinstance(record, Mapping):
+                        continue
+                    row = dict(record)
+                    page_start = row.get("page_start")
+                    page_number = row.get("page_number", row.get("page"))
+                    if page_start is None and page_number is not None:
+                        page_start = page_number
+                    ordered_records.append((_safe_int(page_start, default=0), row))
+                export_payload["records"] = [
+                    row for _page_start, row in sorted(ordered_records, key=lambda item: item[0])
+                ]
+            else:
+                # An empty persisted view follows the records endpoint's
+                # existing fallback: rebuild from the blocks in this same
+                # snapshot rather than treating the empty view as authoritative.
+                records_snapshot = dict(snapshot)
+                records_snapshot["document_views"] = {}
+                export_payload["records"] = _document_records_projection(
+                    records_snapshot, limit=None, offset=0
+                )["items"]
+        if include_coverage or default_export:
+            coverage_payload = _document_projection(snapshot, projection="coverage")
+            export_payload["coverage"] = coverage_payload["coverage"]["pages"]
+        if include_reader:
+            reader_payload = _document_projection(snapshot, projection="reader")
+            export_payload["reader"] = reader_payload["blocks"]
+        return create_export_package(
+            export_payload,
+            _export_root(runtime_obj),
+            formats=formats,
+            includes=includes,
+            filters=dict(payload.get("filters") or {}),
+        )
 
     def _export_manifest_for_request(self, request: Request, export_id: str):
         """Load an export manifest only when it belongs to the resolved tenant."""

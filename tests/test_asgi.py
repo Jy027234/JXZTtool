@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from importlib import import_module
 import json
 import os
 from pathlib import Path
 import sqlite3
+from threading import Event
 import time
 import unittest
 
@@ -14,6 +15,7 @@ from starlette.testclient import TestClient
 
 from parsecore.asgi import BackgroundParseRunner, _project_pages, create_app
 from parsecore.bootstrap import build_runtime
+from parsecore.exports import write_structured_projection
 from parsecore.models import Block, BlockType, Chunk, ParseJobState, ParseRequest
 from parsecore.stubs import FakeEmbeddingProvider
 from tests.support import TemporaryWorkspace, build_docx_table
@@ -1792,6 +1794,65 @@ gate_status = "pending"
                 self.assertEqual(compat_payload["projection"], "compat")
                 self.assertNotIn("profile_resolution", compat_payload)
                 self.assertIn("pages", compat_payload)
+
+    def test_slow_export_write_allows_health_and_document_reads(self) -> None:
+        config = SAMPLE_CONFIG.replace("local://./var/uploads", "local://__OBJECT_STORE__")
+        with TemporaryWorkspace(config) as workspace:
+            document_path = workspace.create_docx_with_body(
+                "export.docx",
+                build_docx_table([["Part", "Quantity"], ["Bolt", "2"]]),
+            )
+            app = create_app(workspace.config_path)
+            outcome = app.state.runtime.submit(
+                ParseRequest(
+                    doc_id="doc-slow-export",
+                    file_path=str(document_path),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    options={"profile": "table-heavy"},
+                )
+            )
+            self.assertEqual(outcome.job.state, ParseJobState.DONE)
+            document_url = "/v1/parse/documents/doc-slow-export"
+            write_started = Event()
+            allow_write = Event()
+
+            def slow_write(payload, *, dataset, format, path):
+                write_started.set()
+                if not allow_write.wait(timeout=15):
+                    raise TimeoutError("Export writer was not released by the test")
+                return write_structured_projection(payload, dataset=dataset, format=format, path=path)
+
+            with (
+                TestClient(app) as client,
+                patch("parsecore.export_jobs.write_structured_projection", side_effect=slow_write),
+                ThreadPoolExecutor(max_workers=2) as requests,
+            ):
+                export = requests.submit(
+                    client.post,
+                    f"{document_url}/export-jobs",
+                    json={"include": ["records"], "formats": {"records": "jsonl"}},
+                )
+                try:
+                    self.assertTrue(write_started.wait(timeout=5), "Export did not reach the writer")
+                    health = requests.submit(client.get, "/health").result(timeout=5)
+                    self.assertEqual(health.status_code, 200)
+                    self.assertEqual(health.json()["status"], "ok")
+                    document = requests.submit(client.get, document_url).result(timeout=5)
+                    self.assertEqual(document.status_code, 200)
+                    self.assertEqual(document.json()["doc_id"], outcome.job.doc_id)
+                    self.assertFalse(export.done(), "Export returned before the writer was released")
+                finally:
+                    allow_write.set()
+
+                response = export.result(timeout=5)
+                self.assertEqual(response.status_code, 202)
+                manifest = response.json()
+                self.assertEqual(manifest["state"], "done")
+                self.assertEqual(manifest["parse_run_id"], outcome.job.job_id)
+                self.assertEqual(manifest["files"][0]["records"], 1)
+                download = client.get(manifest["download_endpoint"], params={"file": "records.jsonl"})
+                self.assertEqual(download.status_code, 200)
+                self.assertIn("Bolt", download.text)
 
     def test_pdf_catalog_text_records_are_queryable_and_exportable(self) -> None:
         with TemporaryWorkspace(PDF_API_CONFIG) as workspace:

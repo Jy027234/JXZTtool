@@ -264,11 +264,14 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
             max_inflight_jobs=runtime.settings.runtime.max_inflight_jobs,
         )
 
+    export_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parsecore-export")
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         app.state.runtime = runtime
         app.state.runner = runner
-        yield
+        with export_executor:
+            yield
         runner.shutdown()
         close_job_store = getattr(runtime.job_store, "close", None)
         if callable(close_job_store):
@@ -282,6 +285,7 @@ def create_app(config_path: str | Path = "parsecore.toml") -> Starlette:
         lifespan=lifespan,
         routes=ApiRoutes(
             api_version=API_VERSION,
+            export_executor=export_executor,
             health_services=_health_services,
             health_service_details=_health_service_details,
             health_capabilities=_health_capabilities,
